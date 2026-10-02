@@ -1,0 +1,50 @@
+[package]
+name = "unproxy"
+version = "0.13.0"
+edition = "2024"
+license = "MIT"
+description = "A local HTTP proxy with PAC routing and corporate authentication"
+build = "build.rs"
+
+[features]
+default = ["negotiate"]
+negotiate = []
+
+[dependencies]
+anyhow = "1.0"
+async-stream = "0.3"
+base64 = "0.22"
+boa_engine = "0.21"
+bytes = "1"
+chrono = "0.4"
+clap = { version = "4.6", features = ["derive"] }
+dirs = "6"
+futures-util = "0.3"
+glob = "0.3"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+libc = "0.2"
+libloading = "0.8"
+native-tls = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socket2 = { version = "0.6", features = ["all"] }
+tokio = { version = "1", features = ["full"] }
+tokio-native-tls = "0.3"
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Security_Authentication_Identity", "Win32_Foundation"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
+
