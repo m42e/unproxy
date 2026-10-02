@@ -118,11 +118,19 @@ fn main() -> Result<()> {
         }
         Task::Unpack { archive, output } => {
             std::fs::create_dir_all(&output)?;
-            run(Command::new("unzip")
-                .arg("-q")
-                .arg(archive)
-                .arg("-d")
-                .arg(output))
+            if cfg!(windows) {
+                powershell(&format!(
+                    "Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
+                    ps_literal(&archive),
+                    ps_literal(&output)
+                ))
+            } else {
+                run(Command::new("unzip")
+                    .arg("-q")
+                    .arg(archive)
+                    .arg("-d")
+                    .arg(output))
+            }
         }
         Task::Bump { part } => {
             let version = unproxy::tools::bump_version(Path::new("Cargo.toml"), &part)?;
@@ -165,21 +173,27 @@ fn build(release: bool, target: Option<&str>, no_negotiate: bool) -> Result<()> 
     }
     run(&mut command)
 }
+fn ps_literal(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "''"))
+}
+fn powershell(script: &str) -> Result<()> {
+    run(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]))
+}
 fn zip(directory: &Path, output: &Path) -> Result<()> {
     let absolute = if output.is_absolute() {
         output.to_owned()
     } else {
         std::env::current_dir()?.join(output)
     };
+    if absolute.exists() {
+        std::fs::remove_file(&absolute)?;
+    }
     if cfg!(windows) {
-        run(Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "Compress-Archive -Path $args[0] -DestinationPath $args[1] -Force",
-            ])
-            .arg(directory.join("*"))
-            .arg(absolute))
+        powershell(&format!(
+            "Get-ChildItem -LiteralPath {} -Force | Compress-Archive -DestinationPath {} -Force",
+            ps_literal(directory),
+            ps_literal(&absolute)
+        ))
     } else {
         run(Command::new("zip")
             .current_dir(directory)
