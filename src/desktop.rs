@@ -44,6 +44,20 @@ pub fn support_dir() -> PathBuf {
 pub fn default_pac_path() -> PathBuf {
     support_dir().join("proxy.pac")
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundlePaths {
+    pub child: PathBuf,
+    pub login_helper: PathBuf,
+}
+impl BundlePaths {
+    pub fn from_main_executable(executable: &Path) -> Result<Self> {
+        let contents = executable
+            .parent()
+            .and_then(Path::parent)
+            .context("main executable must be in Contents/MacOS")?;
+        Ok(Self{child:contents.join("Resources/unproxy"),login_helper:contents.join("Library/LoginItems/UnproxyLoginHelper.app/Contents/MacOS/unproxy-login-helper")})
+    }
+}
 impl Preferences {
     pub fn effective_port(&self) -> u16 {
         if (1024..=65534).contains(&self.port) {
@@ -142,6 +156,14 @@ pub fn run_app() -> Result<()> {
 #[cfg(target_os = "macos")]
 pub fn run_login_helper() -> Result<()> {
     native::run_helper()
+}
+#[cfg(target_os = "macos")]
+pub fn validate_native_bindings() -> Result<()> {
+    native::validate_bindings()
+}
+#[cfg(not(target_os = "macos"))]
+pub fn validate_native_bindings() -> Result<()> {
+    anyhow::bail!("Objective-C bindings are available only on macOS")
 }
 #[cfg(not(target_os = "macos"))]
 pub fn run_login_helper() -> Result<()> {
@@ -305,6 +327,93 @@ mod native {
         let count: usize = unsafe { msg_send![apps, count] };
         count > 0
     }
+    fn action_class() -> &'static AnyClass {
+        if let Some(c) = AnyClass::get(c"UnproxyMenuActions") {
+            return c;
+        }
+        let superclass = AnyClass::get(c"NSObject").unwrap();
+        let mut cb = ClassBuilder::new(c"UnproxyMenuActions", superclass).unwrap();
+        unsafe {
+            cb.add_method(
+                sel!(clicked:),
+                action as unsafe extern "C-unwind" fn(_, _, _),
+            );
+            cb.add_method(
+                sel!(menuNeedsUpdate:),
+                rebuild_menu as unsafe extern "C-unwind" fn(_, _, _),
+            );
+            cb.add_method(
+                sel!(networkAvailable:),
+                network_available as unsafe extern "C-unwind" fn(_, _, _),
+            );
+            cb.add_method(
+                sel!(networkUnavailable:),
+                network_unavailable as unsafe extern "C-unwind" fn(_, _, _),
+            );
+            cb.add_method(
+                sel!(terminateHelper:),
+                helper_terminate as unsafe extern "C-unwind" fn(_, _, _),
+            );
+        }
+        cb.register()
+    }
+    pub fn validate_bindings() -> Result<()> {
+        let cls = action_class();
+        for selector in [
+            sel!(clicked:),
+            sel!(menuNeedsUpdate:),
+            sel!(networkAvailable:),
+            sel!(networkUnavailable:),
+            sel!(terminateHelper:),
+        ] {
+            let method = cls.instance_method(selector).ok_or_else(|| {
+                anyhow::anyhow!("missing Objective-C selector {:?}", selector.name())
+            })?;
+            if method.arguments_count() != 3 {
+                anyhow::bail!(
+                    "selector {:?} has {} args; expected 3",
+                    selector.name(),
+                    method.arguments_count()
+                )
+            }
+            let ret = method.return_type();
+            if ret.to_str()? != "v" {
+                anyhow::bail!("selector {:?} must return void", selector.name())
+            }
+            let object_arg = method
+                .argument_type(2)
+                .context("Objective-C method missing sender argument")?;
+            if object_arg.to_str()? != "@" {
+                anyhow::bail!(
+                    "selector {:?} sender must be an Objective-C object",
+                    selector.name()
+                )
+            }
+        }
+        let defaults = AnyClass::get(c"NSUserDefaults").context("NSUserDefaults class missing")?;
+        for sel in [
+            sel!(standardUserDefaults),
+            sel!(objectForKey:),
+            sel!(setObject:forKey:),
+            sel!(setBool:forKey:),
+            sel!(setInteger:forKey:),
+            sel!(synchronize),
+        ] {
+            let method = if sel.name().to_bytes() == b"standardUserDefaults" {
+                defaults.class_method(sel)
+            } else {
+                defaults.instance_method(sel)
+            };
+            if method.is_none() {
+                anyhow::bail!("missing NSUserDefaults selector {:?}", sel.name())
+            }
+        }
+        // ServiceManagement exposes a C Boolean (one byte), not ObjC BOOL.
+        if std::mem::size_of::<u8>() != 1 {
+            anyhow::bail!("unexpected Core Foundation Boolean ABI")
+        }
+        Ok(())
+    }
     fn cocoa_string(s: &str) -> *mut AnyObject {
         let c = CString::new(s).unwrap();
         let cls = objc2::class!(NSString);
@@ -414,12 +523,8 @@ mod native {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("preferences.json");
         let prefs = native_preferences(&path)?;
-        let contents = std::env::current_exe()?
-            .parent()
-            .and_then(Path::parent)
-            .context("application is not inside Contents/MacOS")?
-            .to_path_buf();
-        let exe = contents.join("Resources/unproxy");
+        let paths = BundlePaths::from_main_executable(&std::env::current_exe()?)?;
+        let exe = paths.child;
         let state = Arc::new(Mutex::new(State {
             prefs,
             prefs_path: path,
@@ -441,27 +546,7 @@ mod native {
         let item: *mut AnyObject = unsafe { msg_send![bar, statusItemWithLength:-1.0f64] };
         let button: *mut AnyObject = unsafe { msg_send![item, button] };
         let _: () = unsafe { msg_send![button, setTitle:cocoa_string("Proxy")] };
-        let superclass = AnyClass::get(c"NSObject").unwrap();
-        let mut cb = ClassBuilder::new(c"UnproxyMenuActions", superclass).unwrap();
-        unsafe {
-            cb.add_method(
-                sel!(clicked:),
-                action as unsafe extern "C-unwind" fn(_, _, _),
-            );
-            cb.add_method(
-                sel!(menuNeedsUpdate:),
-                rebuild_menu as unsafe extern "C-unwind" fn(_, _, _),
-            );
-            cb.add_method(
-                sel!(networkAvailable:),
-                network_available as unsafe extern "C-unwind" fn(_, _, _),
-            );
-            cb.add_method(
-                sel!(networkUnavailable:),
-                network_unavailable as unsafe extern "C-unwind" fn(_, _, _),
-            );
-        }
-        let cls = cb.register();
+        let cls = action_class();
         let target: *mut AnyObject = unsafe { msg_send![cls, new] };
         let center: *mut AnyObject = unsafe {
             msg_send![
