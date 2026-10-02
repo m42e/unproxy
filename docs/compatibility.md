@@ -12,9 +12,19 @@ Forced CONNECT uses origin-form targets inside the resulting ordinary-HTTP
 tunnel rather than the reference's absolute form. Negative, non-finite and
 overflowing durations are rejected. Date/time helper boundaries are normalized
 and GMT uses UTC construction. Initial inline scripts report load failures.
-An explicit script replacement resets the runtime before script execution;
-there is no last-known-good guarantee. Startup file/network loading remains
-asynchronous and request evaluation errors still select DIRECT.
+The open-PR addendum is also implemented: custom
+entry functions are validated, loops are bounded per loop, ordered sources have
+isolated runtimes, startup awaits all configured policies and complete candidate
+sets replace active policy transactionally. PAC evaluation errors return 502 and
+publish access errors, including with direct fallback enabled. Startup IP detection
+is retained for every manual/native update, and overrides remain authoritative.
+macOS Kerberos availability notifications deliberately switch new decisions to
+DIRECT and restore the complete source list. Failed automatic restores retry on
+the next available notification; duplicate successful states are ignored.
+
+The DNS companion already used valid Rust 2024 receiver bindings. Workspace/bin
+build and tests continue to cover it; no DNS packet or transport change was needed
+for #632. Loop limits do not provide a wall-clock evaluation deadline.
 
 Primary DNS errors do not trigger broader fallback. Native login helper enabling
 remains unconditional; no working Autostart or app system-proxy UI is claimed.

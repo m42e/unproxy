@@ -50,3 +50,37 @@ Native credential success, privileged service installation and system proxy
 changes still use the integration fixtures described above. Linux runtime and
 other Windows runtime checks are supplied by CI and were not executed on this
 macOS host.
+
+## Open-PR addendum validation
+
+The addendum is covered by proposal-specific tests and combined integration tests:
+
+| Proposals | Regression evidence |
+| --- | --- |
+| #620 | Typed IPv4/IPv6 CLI parsing, startup selection and HUP/USR1 override preservation in `config`, `runtime` and `lifecycle` |
+| #621 | Constructor syntax/missing/non-callable entry errors and mutation after initialization in `pac_policy_621` and `pac` |
+| #622 | Last-known-good runtime/globals/cache and continued daemon service in `pac_policy_622`, `policy_composition` and `lifecycle` |
+| #623 | Deterministic resolver-order family selection in `pac::tests` and IPv6 subnet rejection in `pac_policy_623` |
+| #624 | Strict grammar/port/bracket/whitespace cases in `pac_routes`; IPv6 HTTP and HTTPS proxy/CONNECT fixtures in `ipv6_proxy` |
+| #625 | 502 plus access error and zero origin connections for thrown/wrong-type/malformed/looping PAC, with both fallback settings, in `proxy` |
+| #626 | Runaway evaluation recovery and failed top-level candidate rollback in `pac_policy_626` and `policy_composition` |
+| #627 | Slow remote startup, failed startup sources and awaitable supplied-stream initialization in `lifecycle`, `policy_startup` and `streams` |
+| #631 | State transitions, duplicate suppression, failed-restore retry and IP/listener preservation in `network_notifications` and `network_policy`; real private-name distributed delivery in `native_notifications_main` |
+| #632 | The DNS companion already uses valid edition-2024 bindings; all-target builds/tests include `dnsdetox`, plus unchanged wire/transport tests in `dns` and `tls` |
+| #633 | Exhaustive reversed weekday/hour pairs and exact date permutations under controlled local/GMT clocks in `pac_clock` |
+| #634 | Repeatable CLI order, mixed symlink/HTTP sources, whole-set rollback, runtime/cache isolation and top-level IP in `config`, `policy_sources` and `policy_composition` |
+
+`native_notifications_main` is a harness-free test: it registers and pumps from
+its executable's real main thread, while a separate process posts private test
+names. It does not alter a running daemon's Kerberos state. Normal Rust test
+harness threads cannot verify native main-run-loop delivery. The test is inert
+on non-macOS targets. Corporate SSO/MDM operation and established production
+tunnels still use the native integration fixtures above.
+
+Host validation for this change passes `cargo fmt --all -- --check`, strict
+all-target/all-feature Clippy, all-target tests with all features and without
+default features, all binary builds, Rust API documentation and the generated
+book/site. Windows GNU all-target compilation also passes. The native identity
+success fixture remains gated on a real ticket cache. Loop limits bound iterations
+per loop and do not promise an evaluation wall-clock deadline. No automatic PAC
+polling, extra notification service, or DNS packet behavior is introduced.
