@@ -1,4 +1,4 @@
-use crate::route::Routes;
+use crate::route::{Route, Routes};
 use anyhow::{Context as _, Result, anyhow, bail};
 use boa_engine::{Context, JsString, JsValue, NativeFunction, Source};
 use std::{
@@ -37,14 +37,17 @@ pub struct Pac {
 }
 impl Pac {
     pub fn new(source: Option<&str>) -> Result<Self> {
+        Self::new_with_ip(source, "127.0.0.1".parse().unwrap())
+    }
+    pub fn new_with_ip(source: Option<&str>, ip: IpAddr) -> Result<Self> {
         let mut pac = Self {
             context: Context::default(),
-            ip: Arc::new(Mutex::new("127.0.0.1".parse().unwrap())),
+            ip: Arc::new(Mutex::new(ip)),
             source: None,
             cache: Arc::new(Mutex::new(HashMap::new())),
             last_prune: Instant::now(),
         };
-        pac.set_script(source)?;
+        pac.install_script(source)?;
         Ok(pac)
     }
     pub fn set_script(&mut self, source: Option<&str>) -> Result<()> {
@@ -198,7 +201,7 @@ impl Pac {
 
 enum Job {
     Eval(String, String, oneshot::Sender<Result<Routes>>),
-    Script(Option<String>, oneshot::Sender<Result<()>>),
+    Scripts(Vec<String>, oneshot::Sender<Result<()>>),
     Ip(IpAddr, oneshot::Sender<()>),
     Snapshot(oneshot::Sender<HashMap<String, Option<IpAddr>>>),
 }
@@ -208,15 +211,26 @@ pub struct Policy {
 }
 impl Policy {
     pub fn new(source: Option<String>) -> Result<Self> {
+        Self::new_scripts(source.into_iter().collect())
+    }
+    pub fn new_scripts(scripts: Vec<String>) -> Result<Self> {
+        Self::new_scripts_with_ip(scripts, "127.0.0.1".parse().unwrap())
+    }
+    pub fn new_scripts_with_ip(scripts: Vec<String>, ip: IpAddr) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("pac-policy".into())
             .spawn(move || {
-                let mut pac = match Pac::new(source.as_deref()) {
-                    Ok(p) => {
+                let mut active_ip = ip;
+                let mut pacs = match scripts
+                    .iter()
+                    .map(|s| Pac::new_with_ip(Some(s), ip))
+                    .collect::<Result<Vec<_>>>()
+                {
+                    Ok(pacs) => {
                         let _ = ready_tx.send(Ok(()));
-                        p
+                        pacs
                     }
                     Err(e) => {
                         let _ = ready_tx.send(Err(e.to_string()));
@@ -226,17 +240,37 @@ impl Policy {
                 for job in rx {
                     match job {
                         Job::Eval(u, h, r) => {
-                            let _ = r.send(pac.evaluate(&u, &h));
+                            let result = evaluate_scripts(&mut pacs, &u, &h);
+                            let _ = r.send(result);
                         }
-                        Job::Script(s, r) => {
-                            let _ = r.send(pac.set_script(s.as_deref()));
+                        Job::Scripts(scripts, r) => {
+                            let replacement = scripts
+                                .iter()
+                                .map(|s| Pac::new_with_ip(Some(s), active_ip))
+                                .collect::<Result<Vec<_>>>();
+                            match replacement {
+                                Ok(new_pacs) => {
+                                    pacs = new_pacs;
+                                    let _ = r.send(Ok(()));
+                                }
+                                Err(e) => {
+                                    let _ = r.send(Err(e));
+                                }
+                            }
                         }
                         Job::Ip(ip, r) => {
-                            pac.set_ip(ip);
+                            active_ip = ip;
+                            for pac in &mut pacs {
+                                pac.set_ip(ip);
+                            }
                             let _ = r.send(());
                         }
                         Job::Snapshot(r) => {
-                            let _ = r.send(pac.cache_snapshot());
+                            let mut snapshot = HashMap::new();
+                            for pac in &pacs {
+                                snapshot.extend(pac.cache_snapshot());
+                            }
+                            let _ = r.send(snapshot);
                         }
                     }
                 }
@@ -256,9 +290,12 @@ impl Policy {
         rx.await.context("PAC worker stopped")?
     }
     pub async fn set_script(&self, script: Option<String>) -> Result<()> {
+        self.set_scripts(script.into_iter().collect()).await
+    }
+    pub async fn set_scripts(&self, scripts: Vec<String>) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(Job::Script(script, tx))
+            .send(Job::Scripts(scripts, tx))
             .map_err(|_| anyhow!("PAC worker stopped"))?;
         rx.await.context("PAC worker stopped")?
     }
@@ -279,16 +316,27 @@ impl Policy {
     }
 }
 
+fn evaluate_scripts(pacs: &mut [Pac], url: &str, host: &str) -> Result<Routes> {
+    for pac in pacs {
+        let routes = pac.evaluate(url, host)?;
+        if routes.0.iter().any(|route| !matches!(route, Route::Direct)) {
+            return Ok(routes);
+        }
+    }
+    Ok("DIRECT".parse().expect("DIRECT is a valid route list"))
+}
+
 #[cfg(test)]
-mod dns_preference_tests {
+mod tests {
     use super::preferred_ip;
     use std::net::IpAddr;
+
     #[test]
-    fn prefers_ipv4_and_falls_back_to_ipv6() {
-        let addrs = ["::1", "192.0.2.1", "192.0.2.2"].map(|s| s.parse::<IpAddr>().unwrap());
-        assert_eq!(preferred_ip(addrs), Some("192.0.2.1".parse().unwrap()));
-        let addrs = ["::1", "2001:db8::1"].map(|s| s.parse::<IpAddr>().unwrap());
-        assert_eq!(preferred_ip(addrs), Some("::1".parse().unwrap()));
+    fn dns_prefers_first_ipv4_then_falls_back_to_first_ipv6() {
+        let ips = ["::1", "192.0.2.2", "192.0.2.3"].map(|ip| ip.parse::<IpAddr>().unwrap());
+        assert_eq!(preferred_ip(ips), Some("192.0.2.2".parse().unwrap()));
+        let ips = ["::1", "2001:db8::1"].map(|ip| ip.parse::<IpAddr>().unwrap());
+        assert_eq!(preferred_ip(ips), Some("::1".parse().unwrap()));
         assert_eq!(preferred_ip([]), None);
     }
 }
