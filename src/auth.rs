@@ -308,8 +308,12 @@ impl NegotiateContext {
             name.len = target.len();
             name.value = target.as_ptr() as *mut _;
             // host-based service name OID 1.2.840.113554.1.2.1.4
-            let mut name_oid_bytes:[u8;10]=[0x2a,0x86,0x48,0x86,0xf7,0x12,0x01,0x02,0x01,0x04];
-            let mut name_oid=GssOid{len:10,elements:name_oid_bytes.as_mut_ptr().cast()};
+            let mut name_oid_bytes: [u8; 10] =
+                [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x01, 0x04];
+            let mut name_oid = GssOid {
+                len: 10,
+                elements: name_oid_bytes.as_mut_ptr().cast(),
+            };
             let status = import(&mut output, &mut name, &mut name_oid, &mut ty);
             if status != 0 {
                 return Err(anyhow!(
@@ -344,7 +348,10 @@ impl NegotiateContext {
                     *mut u32,
                     *mut u32,
                 ) -> GssStatus,
-            > = self.lib.get(b"gss_init_sec_context\0")?;
+            > = self
+                .lib
+                .get(b"gss_init_sec_context\0")
+                .context(format!("loading GSSAPI context step for {}", self.host))?;
             let mut input = GssBuf {
                 len: server_token.map_or(0, |v| v.len()),
                 value: server_token.map_or(std::ptr::null_mut::<std::ffi::c_void>(), |v| {
@@ -355,8 +362,11 @@ impl NegotiateContext {
                 len: 0,
                 value: std::ptr::null_mut(),
             };
-            let mut mech_bytes:[u8;6]=[0x2b,0x06,0x01,0x05,0x05,0x02];
-            let mut mech=GssOid{len:6,elements:mech_bytes.as_mut_ptr().cast()};
+            let mut mech_bytes: [u8; 6] = [0x2b, 0x06, 0x01, 0x05, 0x05, 0x02];
+            let mut mech = GssOid {
+                len: 6,
+                elements: mech_bytes.as_mut_ptr().cast(),
+            };
             let mut flags = 0;
             let mut minor = 0;
             // GSS_C_NO_CREDENTIAL = NULL, mutual-auth flag = 2.
@@ -527,6 +537,20 @@ mod tests {
     }
     #[cfg(all(feature = "negotiate", unix))]
     #[test]
+    fn native_gss_context_step_is_safe_without_a_ticket_fixture() {
+        let mut context = match NegotiateContext::new("localhost") {
+            Ok(c) => c,
+            Err(e) if e.to_string().contains("GSSAPI library is unavailable") => return,
+            Err(e) => panic!("GSSAPI name import failed: {e:#}"),
+        };
+        match context.step(None) {
+            Ok(None) => {}
+            Ok(Some(token)) => assert!(!token.is_empty()),
+            Err(e) => assert!(e.to_string().contains("localhost"), "{e:#}"),
+        }
+    }
+    #[cfg(all(feature = "negotiate", unix))]
+    #[test]
     #[ignore = "requires a configured native GSS identity or ticket cache"]
     fn native_gss_context_step_uses_host_based_spnego() {
         let mut context = NegotiateContext::new("localhost").unwrap();
@@ -536,6 +560,7 @@ mod tests {
 }
 
 #[cfg(all(feature = "negotiate", windows))]
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct SecHandle {
     a: usize,
@@ -632,7 +657,7 @@ impl NegotiateContext {
                 ) -> i32,
             > = self.lib.get(b"InitializeSecurityContextW\0")?;
             let _ = _server_token; // The Windows adapter intentionally ignores server challenge tokens.
-            let in_desc: Option<SecBufferDesc> = None;
+            let in_desc: *mut SecBufferDesc = std::ptr::null_mut();
             let mut prior = self.ctx;
             let prior_ptr = if prior.a == 0 && prior.b == 0 {
                 std::ptr::null_mut()
@@ -659,9 +684,7 @@ impl NegotiateContext {
                 2,
                 0,
                 0,
-                in_desc
-                    .as_mut()
-                    .map_or(std::ptr::null_mut(), |x| x as *mut _),
+                in_desc,
                 0,
                 &mut next,
                 &mut outdesc,

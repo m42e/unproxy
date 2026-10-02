@@ -103,6 +103,7 @@ pub async fn run(a: MainArgs) -> Result<()> {
     #[cfg(unix)]
     let mut term = signal(SignalKind::terminate())?;
     let mut initial = Box::pin(load_pac(a.pac_file.as_deref(), discovered.as_deref()));
+    #[allow(unused_mut)]
     let mut initial_pending = a.pac_file.is_some() || discovered.is_some();
     #[cfg(unix)]
     loop {

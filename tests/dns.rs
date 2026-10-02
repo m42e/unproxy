@@ -34,7 +34,6 @@ fn dns_parser_rejects_bad_compression_and_trailing_sections() {
 }
 
 #[tokio::test]
-#[ignore = "requires loopback UDP sockets"]
 async fn primary_exchange_uses_a_fresh_connected_udp_socket() {
     // This exchange validates primary wire processing, so use a complete empty DNS header.
     let responder = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -52,7 +51,6 @@ async fn primary_exchange_uses_a_fresh_connected_udp_socket() {
 }
 
 #[tokio::test]
-#[ignore = "requires loopback UDP sockets"]
 async fn exchange_returns_primary_without_fallback_when_it_has_answers() {
     let responder = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = responder.local_addr().unwrap();
