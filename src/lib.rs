@@ -6,6 +6,7 @@ pub mod connection;
 pub mod desktop;
 pub mod dns;
 pub mod net;
+pub mod network_notifications;
 pub mod pac;
 pub mod platform;
 pub mod proxy;

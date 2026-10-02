@@ -104,12 +104,33 @@ pub async fn run(a: MainArgs) -> Result<()> {
     let mut direct = signal(SignalKind::user_defined1())?;
     #[cfg(unix)]
     let mut term = signal(SignalKind::terminate())?;
+    #[cfg(target_os = "macos")]
+    let mut notifications = crate::network_notifications::NotificationAdapter::start()
+        .context("starting native network notification adapter")?;
+    #[cfg(target_os = "macos")]
+    let mut notification_ticks = tokio::time::interval(Duration::from_millis(100));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut notification_ticks = ();
+    #[cfg(target_os = "macos")]
+    let mut native_state = crate::network_notifications::TransitionState::new();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut notifications = ();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut native_state = crate::network_notifications::TransitionState::new();
     #[cfg(unix)]
     let listener_failed = loop {
         tokio::select! {
             _=tokio::signal::ctrl_c()=>break false,
             _=term.recv()=>break false,
             _=context.shutdown_notified()=>break true,
+            _=next_network_tick(&mut notification_ticks)=>{
+                pump_network_events(&mut notifications);
+            },
+            Some(event)=next_network_event(&mut notifications)=>{
+                if let Err(error) = handle_network_event(&context, &mut native_state, event).await {
+                    tracing::error!(sources=?sources, error=%format!("{error:#}"), "native policy update failed; retaining previous policy");
+                }
+            },
             _=hup.recv()=>{
                 let result = context.reload_pac().await;
                 if let Err(error) = result {
@@ -139,6 +160,52 @@ pub async fn run(a: MainArgs) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn next_network_event(
+    adapter: &mut crate::network_notifications::NotificationAdapter,
+) -> Option<crate::network_notifications::NetworkEvent> {
+    adapter.recv().await
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+async fn next_network_event(_: &mut ()) -> Option<crate::network_notifications::NetworkEvent> {
+    std::future::pending().await
+}
+
+#[cfg(target_os = "macos")]
+async fn next_network_tick(interval: &mut tokio::time::Interval) {
+    interval.tick().await;
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+async fn next_network_tick(_: &mut ()) {
+    std::future::pending::<()>().await;
+}
+#[cfg(target_os = "macos")]
+fn pump_network_events(adapter: &mut crate::network_notifications::NotificationAdapter) {
+    adapter.pump();
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn pump_network_events(_: &mut ()) {}
+
+/// Apply a native observation using the same atomic operations as manual controls.
+/// A failed restore leaves service running and retries on the next available event.
+pub async fn handle_network_event(
+    context: &crate::proxy::Context,
+    state: &mut crate::network_notifications::TransitionState,
+    event: crate::network_notifications::NetworkEvent,
+) -> Result<bool> {
+    use crate::network_notifications::NetworkEvent;
+    let Some(event) = state.observe(event) else {
+        return Ok(false);
+    };
+    let result = match event {
+        NetworkEvent::Available => context.reload_pac().await,
+        NetworkEvent::Unavailable => context.clear_policy().await,
+    };
+    state.complete(event, result.is_ok());
+    result?;
+    Ok(true)
 }
 
 async fn drain(context: crate::proxy::Context, timeout: Duration) -> bool {
