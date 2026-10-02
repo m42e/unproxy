@@ -87,8 +87,8 @@ pub struct MainArgs {
     pub listen: Vec<String>,
     #[arg(long = "activate-socket")]
     pub activate_socket: Option<String>,
-    #[arg(short = 'p', long = "pac-file")]
-    pub pac_file: Option<String>,
+    #[arg(short = 'p', long = "pac-file", action = clap::ArgAction::Append)]
+    pub pac_file: Vec<String>,
     #[arg(long = "my-ip-address")]
     pub my_ip_address: Option<IpAddr>,
     #[arg(long = "netrc-file")]

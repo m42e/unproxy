@@ -48,8 +48,9 @@ pub struct ContextBuilder {
     server_keepalive: net::Keepalive,
     shutdown_timeout: Duration,
     bound_addrs: Vec<SocketAddr>,
-    pac_source: Option<PathOrUri>,
-    inline_script: Option<String>,
+    pac_sources: Vec<PathOrUri>,
+    inline_scripts: Vec<String>,
+    initialize_inline: bool,
 }
 impl Clone for ContextBuilder {
     fn clone(&self) -> Self {
@@ -66,8 +67,9 @@ impl Clone for ContextBuilder {
             server_keepalive: self.server_keepalive.clone(),
             shutdown_timeout: self.shutdown_timeout,
             bound_addrs: self.bound_addrs.clone(),
-            pac_source: self.pac_source.clone(),
-            inline_script: self.inline_script.clone(),
+            pac_sources: self.pac_sources.clone(),
+            inline_scripts: self.inline_scripts.clone(),
+            initialize_inline: self.initialize_inline,
         }
     }
 }
@@ -86,8 +88,9 @@ impl ContextBuilder {
             server_keepalive: net::Keepalive::default(),
             shutdown_timeout: Duration::from_secs(30),
             bound_addrs: vec![],
-            pac_source: None,
-            inline_script: None,
+            pac_sources: vec![],
+            inline_scripts: vec![],
+            initialize_inline: false,
         }
     }
     pub fn listen(mut self, addr: SocketAddr) -> Self {
@@ -130,21 +133,32 @@ impl ContextBuilder {
         self.force_tunnel = v;
         self
     }
-    pub fn inline_pac(mut self, source: Option<String>) -> Result<Self> {
-        self.policy = Arc::new(Policy::new(source.clone())?);
-        self.pac_source = None;
-        self.inline_script = source;
+    /// Configure an inline script; validation is awaited before serving.
+    pub fn inline_pac(self, source: Option<String>) -> Result<Self> {
+        self.inline_pacs(source.into_iter().collect())
+    }
+    /// Each inline script gets an isolated runtime, in the supplied order.
+    pub fn inline_pacs(mut self, sources: Vec<String>) -> Result<Self> {
+        self.pac_sources.clear();
+        self.inline_scripts = sources;
+        self.initialize_inline = true;
         Ok(self)
     }
-    pub fn pac_source(mut self, source: PathOrUri) -> Self {
-        self.pac_source = Some(source);
-        self.inline_script = None;
+    pub fn pac_source(self, source: PathOrUri) -> Self {
+        self.pac_sources(vec![source])
+    }
+    pub fn pac_sources(mut self, sources: Vec<PathOrUri>) -> Self {
+        self.pac_sources = sources;
+        self.inline_scripts.clear();
+        self.initialize_inline = self.pac_sources.is_empty();
         self
     }
     async fn initialize_policy(&self) -> Result<()> {
-        if let Some(source) = &self.pac_source {
-            let script = load_pac_source(source).await?;
-            self.policy.set_script(Some(script)).await?;
+        if !self.pac_sources.is_empty() {
+            let scripts = load_pac_sources(&self.pac_sources).await?;
+            self.policy.set_scripts(scripts).await?;
+        } else if self.initialize_inline {
+            self.policy.set_scripts(self.inline_scripts.clone()).await?;
         }
         Ok(())
     }
@@ -190,7 +204,7 @@ impl ContextBuilder {
                 accept_loop(listener, cfg, rx, shutdown_tx, events, tracker).await
             }));
         }
-        let pac_source = self.pac_source.clone();
+        let pac_sources = self.pac_sources.clone();
         Ok(Context {
             local_addrs,
             events,
@@ -198,8 +212,8 @@ impl ContextBuilder {
             tracker,
             joins,
             policy: self.policy.clone(),
-            pac_source,
-            inline_script: self.inline_script.clone(),
+            pac_sources,
+            inline_scripts: self.inline_scripts.clone(),
         })
     }
     /// Serve one already-connected client stream. The returned context exposes
@@ -213,8 +227,8 @@ impl ContextBuilder {
         let (events, _) = broadcast::channel(16);
         let tracker = TaskTracker::new();
         let policy = self.policy.clone();
-        let pac_source = self.pac_source.clone();
-        let inline_script = self.inline_script.clone();
+        let pac_sources = self.pac_sources.clone();
+        let inline_scripts = self.inline_scripts.clone();
         let cfg = self;
         let ev = events.clone();
         let task_tracker = tracker.clone();
@@ -228,8 +242,8 @@ impl ContextBuilder {
             tracker,
             joins: vec![join],
             policy,
-            pac_source,
-            inline_script,
+            pac_sources,
+            inline_scripts,
         })
     }
 
@@ -246,7 +260,7 @@ impl ContextBuilder {
         let ev = events.clone();
         let tasks = tracker.clone();
         let policy = self.policy.clone();
-        let source = self.pac_source.clone();
+        let sources = self.pac_sources.clone();
         let join = tokio::spawn(async move {
             let mut sessions = tokio::task::JoinSet::new();
             loop {
@@ -261,8 +275,8 @@ impl ContextBuilder {
             tracker,
             joins: vec![join],
             policy,
-            pac_source: source,
-            inline_script: self.inline_script.clone(),
+            pac_sources: sources,
+            inline_scripts: self.inline_scripts.clone(),
         })
     }
 }
@@ -274,8 +288,8 @@ pub struct Context {
     tracker: TaskTracker,
     joins: Vec<JoinHandle<()>>,
     policy: Arc<Policy>,
-    pac_source: Option<PathOrUri>,
-    inline_script: Option<String>,
+    pac_sources: Vec<PathOrUri>,
+    inline_scripts: Vec<String>,
 }
 
 async fn load_pac_source(source: &PathOrUri) -> Result<String> {
@@ -289,6 +303,19 @@ async fn load_pac_source(source: &PathOrUri) -> Result<String> {
         }
         PathOrUri::Uri(uri) => net::fetch_remote_pac(&uri.to_string()).await,
     }
+}
+
+/// Read all sources before publishing a replacement collection.
+pub async fn load_pac_sources(sources: &[PathOrUri]) -> Result<Vec<String>> {
+    let mut scripts = Vec::with_capacity(sources.len());
+    for source in sources {
+        scripts.push(
+            load_pac_source(source)
+                .await
+                .with_context(|| format!("loading PAC source {source}"))?,
+        );
+    }
+    Ok(scripts)
 }
 
 impl Context {
@@ -329,21 +356,25 @@ impl Context {
     pub async fn set_ip(&self, ip: std::net::IpAddr) -> Result<()> {
         self.policy.set_ip(ip).await
     }
+    pub async fn set_scripts(&self, scripts: Vec<String>) -> Result<()> {
+        self.policy.set_scripts(scripts).await
+    }
     pub async fn load_pac(&self, source: &PathOrUri) -> Result<()> {
-        let script = load_pac_source(source).await?;
-        self.policy.set_script(Some(script)).await
+        self.load_pacs(std::slice::from_ref(source)).await
+    }
+    pub async fn load_pacs(&self, sources: &[PathOrUri]) -> Result<()> {
+        let scripts = load_pac_sources(sources).await?;
+        self.policy.set_scripts(scripts).await
     }
     pub async fn reload_pac(&self) -> Result<()> {
-        if let Some(script) = &self.inline_script {
-            return self.policy.set_script(Some(script.clone())).await;
-        }
-        match &self.pac_source {
-            Some(source) => self.load_pac(source).await,
-            None => self.policy.set_script(None).await,
+        if !self.pac_sources.is_empty() {
+            self.load_pacs(&self.pac_sources).await
+        } else {
+            self.policy.set_scripts(self.inline_scripts.clone()).await
         }
     }
     pub async fn clear_policy(&self) -> Result<()> {
-        self.policy.set_script(None).await
+        self.policy.set_scripts(vec![]).await
     }
     pub async fn wait(mut self) {
         for j in self.joins.drain(..) {

@@ -70,6 +70,13 @@ async fn missing_or_invalid_sources_fail_before_binding_or_serving() {
                 .await
                 .is_err()
         );
-        assert!(builder().inline_pac(Some(script.into())).is_err());
+        assert!(
+            builder()
+                .inline_pac(Some(script.into()))
+                .unwrap()
+                .bind()
+                .await
+                .is_err()
+        );
     }
 }

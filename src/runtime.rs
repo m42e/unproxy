@@ -7,7 +7,7 @@ use crate::{
     proxy::ContextBuilder,
 };
 use anyhow::{Context, Result, anyhow};
-use std::{ffi::OsString, fs, path::Path, sync::Arc, time::Duration};
+use std::{ffi::OsString, fs, sync::Arc, time::Duration};
 
 /// Run the primary proxy process with already parsed settings.
 pub async fn run(a: MainArgs) -> Result<()> {
@@ -46,21 +46,19 @@ pub async fn run(a: MainArgs) -> Result<()> {
             .try_init()
             .ok();
     }
-    let discovered = if a.pac_file.is_none() {
+    let sources: Vec<crate::route::PathOrUri> = if a.pac_file.is_empty() {
         config::pac_path()
+            .into_iter()
+            .map(crate::route::PathOrUri::Path)
+            .collect()
     } else {
-        None
+        a.pac_file
+            .iter()
+            .map(|source| source.parse())
+            .collect::<Result<_>>()?
     };
-    if let Some(p) = a.pac_file.as_deref()
-        && !p.starts_with("http://")
-        && !p.starts_with("https://")
-        && !Path::new(p).is_file()
-    {
-        return Err(anyhow!("PAC file does not exist: {p}"));
-    }
-    let policy = Arc::new(Policy::new(None)?);
     let effective_ip = select_pac_ip(a.my_ip_address, crate::platform::default_interface_ipv4);
-    policy.set_ip(effective_ip).await?;
+    let policy = Arc::new(Policy::new_scripts_with_ip(vec![], effective_ip)?);
     let auth = load_auth(&a)?;
     let options = ConnectionOptions {
         auth,
@@ -83,7 +81,8 @@ pub async fn run(a: MainArgs) -> Result<()> {
         .parallel_connect(a.parallel_connect)
         .force_tunnel(a.proxytunnel)
         .server_keepalive(server_keepalive)
-        .shutdown_timeout(Duration::from_secs(a.graceful_shutdown_timeout));
+        .shutdown_timeout(Duration::from_secs(a.graceful_shutdown_timeout))
+        .pac_sources(sources.clone());
     if let Some(name) = a.activate_socket.as_deref() {
         builder = builder.listeners(crate::platform::activated_listeners(name)?)
     } else {
@@ -91,16 +90,11 @@ pub async fn run(a: MainArgs) -> Result<()> {
             builder = builder.listen(addr)
         }
     }
-    let script = load_pac(a.pac_file.as_deref(), discovered.as_deref()).await?;
-    policy
-        .set_script(script)
-        .await
-        .context("initial PAC load failed")?;
     let context = builder.bind().await?;
     for addr in context.local_addrs() {
         tracing::info!(%addr,"proxy listening")
     }
-    tracing::info!(pac_source=?a.pac_file.as_deref().or_else(||discovered.as_ref().and_then(|p|p.to_str())),"proxy started");
+    tracing::info!(pac_sources=?sources,"proxy started");
 
     #[cfg(unix)]
     use tokio::signal::unix::{SignalKind, signal};
@@ -117,12 +111,9 @@ pub async fn run(a: MainArgs) -> Result<()> {
             _=term.recv()=>break false,
             _=context.shutdown_notified()=>break true,
             _=hup.recv()=>{
-                let result = match load_pac(a.pac_file.as_deref(), discovered.as_deref()).await {
-                    Ok(script) => policy.set_script(script).await,
-                    Err(error) => Err(error),
-                };
+                let result = context.reload_pac().await;
                 if let Err(error) = result {
-                    tracing::error!(source=?a.pac_file, %error, "PAC reload failed; retaining previous policy");
+                    tracing::error!(sources=?sources, %error, "PAC reload failed; retaining previous policy");
                 }
             },
             _=direct.recv()=>{
@@ -181,23 +172,6 @@ fn load_auth(a: &MainArgs) -> Result<AuthFactory> {
     };
     Ok(AuthFactory::basic(store))
 }
-async fn load_pac(explicit: Option<&str>, discovered: Option<&Path>) -> Result<Option<String>> {
-    if let Some(p) = explicit {
-        if p.starts_with("http://") || p.starts_with("https://") {
-            return Ok(Some(crate::net::fetch_remote_pac(p).await?));
-        }
-        return Ok(Some(
-            fs::read_to_string(p).with_context(|| format!("reading PAC file {p}"))?,
-        ));
-    }
-    if let Some(p) = discovered {
-        return Ok(Some(
-            fs::read_to_string(p).with_context(|| format!("reading PAC file {}", p.display()))?,
-        ));
-    }
-    Ok(None)
-}
-
 /// Callable process entry used by embedded applications. It deliberately skips rc files.
 pub fn embedded_entry(args: Vec<OsString>) -> Result<()> {
     let a = match config::try_parse_main_from(args, false) {

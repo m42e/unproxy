@@ -33,3 +33,32 @@ fn my_ip_address_accepts_both_families_and_rejects_invalid_values() {
     }
     assert!(MainArgs::try_parse_from(["unproxy", "--my-ip-address", "not-an-ip"]).is_err());
 }
+
+#[test]
+fn repeated_pac_sources_append_settings_before_cli_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("rc");
+    fs::write(
+        &settings,
+        "--pac-file first.pac\n-p http://example.test/second.pac\n",
+    )
+    .unwrap();
+    let mut tokens = vec!["unproxy".to_string()];
+    tokens.extend(token_file(&settings));
+    tokens.extend([
+        "--pac-file".into(),
+        "https://example.test/third.pac".into(),
+        "-p".into(),
+        "fourth.pac".into(),
+    ]);
+    let args = MainArgs::try_parse_from(tokens).unwrap();
+    assert_eq!(
+        args.pac_file,
+        [
+            "first.pac",
+            "http://example.test/second.pac",
+            "https://example.test/third.pac",
+            "fourth.pac"
+        ]
+    );
+}
