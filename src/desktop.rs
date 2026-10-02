@@ -110,10 +110,12 @@ pub struct ChildLifecycle {
 }
 impl ChildLifecycle {
     pub fn is_running(&mut self) -> bool {
-        if let Some(c) = self.child.as_mut() {
-            if c.try_wait().ok().flatten().is_some() {
-                self.child = None
-            }
+        if self
+            .child
+            .as_mut()
+            .is_some_and(|c| c.try_wait().ok().flatten().is_some())
+        {
+            self.child = None;
         }
         self.child.is_some()
     }
