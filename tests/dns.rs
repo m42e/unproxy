@@ -1,7 +1,11 @@
 use unproxy::dns::{exchange, exchange_primary, needs_fallback, parse_counts};
 use unproxy::{net::ConnectionOptions, route::Route};
 use std::net::Ipv4Addr;
-use tokio::net::UdpSocket;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream, UdpSocket},
+    time::timeout,
+};
 
 #[test]
 fn dns_wire_parser_checks_all_declared_sections() {
@@ -48,6 +52,104 @@ async fn primary_exchange_uses_a_fresh_connected_udp_socket() {
     assert_eq!(response, vec![0; 12]);
     task.await.unwrap();
     let _ = addr;
+}
+
+#[tokio::test]
+async fn primary_exchange_supports_ipv6_server_addresses() {
+    let responder = match UdpSocket::bind("[::1]:0").await {
+        Ok(socket) => socket,
+        Err(_) => return,
+    };
+    let addr = responder.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut buf = [0; 64];
+        let (_, peer) = responder.recv_from(&mut buf).await.unwrap();
+        responder.send_to(&[0u8; 12], peer).await.unwrap();
+    });
+    assert_eq!(
+        exchange_primary(&[0u8; 12], addr).await.unwrap(),
+        vec![0; 12]
+    );
+    task.await.unwrap();
+}
+
+fn doh_tls() -> (
+    tokio_native_tls::TlsAcceptor,
+    tokio_native_tls::TlsConnector,
+) {
+    let certificate =
+        native_tls::Certificate::from_pem(include_bytes!("fixtures/localhost.pem")).unwrap();
+    let identity = native_tls::Identity::from_pkcs8(
+        include_bytes!("fixtures/localhost.pem"),
+        include_bytes!("fixtures/localhost.key"),
+    )
+    .unwrap();
+    let acceptor = native_tls::TlsAcceptor::new(identity).unwrap().into();
+    let connector = native_tls::TlsConnector::builder()
+        .add_root_certificate(certificate)
+        .build()
+        .unwrap()
+        .into();
+    (acceptor, connector)
+}
+
+async fn read_http_head<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) {
+    let mut bytes = Vec::new();
+    while !bytes.ends_with(b"\r\n\r\n") {
+        let mut byte = [0];
+        stream.read_exact(&mut byte).await.unwrap();
+        bytes.push(byte[0]);
+    }
+}
+
+#[tokio::test]
+async fn doh_bounds_stalled_and_oversized_response_bodies() {
+    use unproxy::{dns::doh_on_stream, net::BoxedIo};
+    for oversized in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (acceptor, connector) = doh_tls();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(stream).await.unwrap();
+            read_http_head(&mut stream).await;
+            let mut query = [0; 12];
+            stream.read_exact(&mut query).await.unwrap();
+            if oversized {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 65508\r\n\r\n")
+                    .await
+                    .unwrap();
+                stream.write_all(&vec![0; 65_508]).await.unwrap();
+            } else {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n")
+                    .await
+                    .unwrap();
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        });
+        let stream: BoxedIo = Box::new(TcpStream::connect(addr).await.unwrap());
+        let result = timeout(
+            std::time::Duration::from_secs(3),
+            doh_on_stream(
+                stream,
+                "localhost",
+                "localhost",
+                "/dns-query",
+                &[0; 12],
+                &connector,
+            ),
+        )
+        .await
+        .unwrap();
+        if oversized {
+            assert!(result.is_err());
+        } else {
+            assert!(result.unwrap_err().to_string().contains("timed out"));
+        }
+        server.abort();
+    }
 }
 
 #[tokio::test]

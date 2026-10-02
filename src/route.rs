@@ -141,6 +141,9 @@ impl Destination {
         let authority = uri
             .authority()
             .ok_or_else(|| anyhow!("URI authority missing"))?;
+        if authority.as_str().contains('@') {
+            bail!("URI user information is not allowed in proxy requests");
+        }
         let host = authority.host();
         if host.is_empty() {
             bail!("URI host missing")

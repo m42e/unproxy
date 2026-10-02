@@ -1,8 +1,23 @@
 use unproxy::{
-    pac::Pac,
+    pac::{Pac, Policy},
     route::{Endpoint, Route, Routes},
 };
 use std::str::FromStr;
+
+#[test]
+fn synchronous_pac_api_bounds_initialization_and_evaluation() {
+    let expensive = "function work(){let n=0; for(let i=0;i<99990;i++) n++;} for(let j=0;j<99990;j++) work(); function FindProxyForURL(){return 'DIRECT';}";
+    let started = std::time::Instant::now();
+    assert!(Pac::new(Some(expensive)).is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    let mut pac = Pac::new(Some("function FindProxyForURL(){while(true){}}")).unwrap();
+    let started = std::time::Instant::now();
+    assert!(
+        pac.evaluate("http://example.test/", "example.test")
+            .is_err()
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+}
 
 #[test]
 fn endpoint_and_pac_directives_are_strict_and_normalized() {
@@ -31,6 +46,33 @@ fn endpoint_and_pac_directives_are_strict_and_normalized() {
     assert!("PROXYx host.test:80".parse::<Route>().is_err());
     assert!("PROXY host.test:80 extra".parse::<Route>().is_err());
     assert!("PROXY user@host.test:80".parse::<Route>().is_err());
+}
+
+#[tokio::test]
+async fn policy_bounds_script_execution_and_failed_replacement_clears_readiness() {
+    let policy = Policy::new(None).unwrap();
+    policy
+        .set_script(Some(
+            "function FindProxyForURL(){ return 'DIRECT'; }".into(),
+        ))
+        .await
+        .unwrap();
+    assert!(policy.is_loaded());
+    policy
+        .set_script(Some("function FindProxyForURL(){ while(true){} }".into()))
+        .await
+        .unwrap();
+    let start = std::time::Instant::now();
+    assert!(
+        policy
+            .evaluate("http://example.test/".into(), "example.test".into())
+            .await
+            .is_err()
+    );
+    assert!(start.elapsed() < std::time::Duration::from_secs(3));
+    let failed = policy.set_script(Some("while(true){}".into())).await;
+    assert!(failed.is_err());
+    assert!(!policy.is_loaded());
 }
 
 #[test]

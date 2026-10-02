@@ -2,7 +2,7 @@
 
 use std::{
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -50,6 +50,13 @@ pub struct ContextBuilder {
     bound_addrs: Vec<SocketAddr>,
     pac_source: Option<PathOrUri>,
     inline_script: Option<String>,
+    trusted_management_hosts: Vec<String>,
+    session_limit: Arc<tokio::sync::Semaphore>,
+    exchange_timeout: Duration,
+    relay_handles: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
+    header_timeout: Duration,
+    idle_timeout: Duration,
+    strict_policy: bool,
 }
 impl Clone for ContextBuilder {
     fn clone(&self) -> Self {
@@ -68,6 +75,13 @@ impl Clone for ContextBuilder {
             bound_addrs: self.bound_addrs.clone(),
             pac_source: self.pac_source.clone(),
             inline_script: self.inline_script.clone(),
+            trusted_management_hosts: self.trusted_management_hosts.clone(),
+            session_limit: self.session_limit.clone(),
+            exchange_timeout: self.exchange_timeout,
+            relay_handles: self.relay_handles.clone(),
+            header_timeout: self.header_timeout,
+            idle_timeout: self.idle_timeout,
+            strict_policy: self.strict_policy,
         }
     }
 }
@@ -88,10 +102,43 @@ impl ContextBuilder {
             bound_addrs: vec![],
             pac_source: None,
             inline_script: None,
+            trusted_management_hosts: vec![],
+            session_limit: Arc::new(tokio::sync::Semaphore::new(256)),
+            exchange_timeout: Duration::from_secs(30),
+            relay_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
+            header_timeout: Duration::from_secs(15),
+            idle_timeout: Duration::from_secs(60),
+            strict_policy: false,
         }
     }
     pub fn listen(mut self, addr: SocketAddr) -> Self {
         self.listens.push(addr);
+        self
+    }
+    /// Trust an additional Host authority for local management resources.
+    /// This is intended for reverse-proxy and embedded deployments.
+    pub fn trusted_management_host(mut self, authority: impl Into<String>) -> Self {
+        self.trusted_management_hosts.push(authority.into());
+        self
+    }
+    pub fn exchange_timeout(mut self, timeout: Duration) -> Self {
+        self.exchange_timeout = timeout;
+        self
+    }
+    pub fn header_timeout(mut self, timeout: Duration) -> Self {
+        self.header_timeout = timeout;
+        self
+    }
+    pub fn idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle_timeout = timeout;
+        self
+    }
+    pub fn strict_policy(mut self, strict: bool) -> Self {
+        self.strict_policy = strict;
+        self
+    }
+    pub fn max_sessions(mut self, maximum: usize) -> Self {
+        self.session_limit = Arc::new(tokio::sync::Semaphore::new(maximum.max(1)));
         self
     }
     /// Serve sockets supplied by a service manager or embedding application.
@@ -185,6 +232,7 @@ impl ContextBuilder {
         let pac_source = self.pac_source.clone();
         let pac_load = spawn_pac_load(pac_source.clone(), self.policy.clone());
         Ok(Context {
+            shutdown_timeout: self.shutdown_timeout,
             local_addrs,
             events,
             shutdown,
@@ -194,6 +242,7 @@ impl ContextBuilder {
             pac_source,
             inline_script: self.inline_script.clone(),
             pac_load,
+            relay_handles: self.relay_handles.clone(),
         })
     }
     /// Serve one already-connected client stream. The returned context exposes
@@ -208,6 +257,8 @@ impl ContextBuilder {
         let policy = self.policy.clone();
         let pac_source = self.pac_source.clone();
         let inline_script = self.inline_script.clone();
+        let shutdown_timeout = self.shutdown_timeout;
+        let relay_handles = self.relay_handles.clone();
         let pac_load = spawn_pac_load(pac_source.clone(), policy.clone());
         let cfg = self;
         let ev = events.clone();
@@ -216,6 +267,7 @@ impl ContextBuilder {
             serve_io(stream, peer, None, cfg, ev, task_tracker, rx).await;
         });
         Context {
+            shutdown_timeout,
             local_addrs: vec![],
             events,
             shutdown,
@@ -225,6 +277,7 @@ impl ContextBuilder {
             pac_source,
             inline_script,
             pac_load,
+            relay_handles,
         }
     }
 
@@ -241,6 +294,7 @@ impl ContextBuilder {
         let tasks = tracker.clone();
         let policy = self.policy.clone();
         let source = self.pac_source.clone();
+        let shutdown_timeout = self.shutdown_timeout;
         let pac_load = spawn_pac_load(source.clone(), policy.clone());
         let join = tokio::spawn(async move {
             let mut sessions = tokio::task::JoinSet::new();
@@ -250,6 +304,7 @@ impl ContextBuilder {
             while sessions.join_next().await.is_some() {}
         });
         Context {
+            shutdown_timeout,
             local_addrs: vec![],
             events,
             shutdown,
@@ -259,11 +314,13 @@ impl ContextBuilder {
             pac_source: source,
             inline_script: self.inline_script.clone(),
             pac_load,
+            relay_handles: self.relay_handles.clone(),
         }
     }
 }
 
 pub struct Context {
+    shutdown_timeout: Duration,
     local_addrs: Vec<SocketAddr>,
     events: broadcast::Sender<String>,
     shutdown: watch::Sender<bool>,
@@ -273,6 +330,7 @@ pub struct Context {
     pac_source: Option<PathOrUri>,
     inline_script: Option<String>,
     pac_load: Option<JoinHandle<()>>,
+    relay_handles: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
 }
 
 async fn load_pac_source(source: &PathOrUri) -> Result<String> {
@@ -290,6 +348,7 @@ async fn load_pac_source(source: &PathOrUri) -> Result<String> {
 
 fn spawn_pac_load(source: Option<PathOrUri>, policy: Arc<Policy>) -> Option<JoinHandle<()>> {
     source.map(|source| {
+        policy.mark_unloaded();
         tokio::spawn(async move {
             match load_pac_source(&source).await {
                 Ok(script) => {
@@ -342,6 +401,7 @@ impl Context {
         self.policy.set_ip(ip).await
     }
     pub async fn load_pac(&self, source: &PathOrUri) -> Result<()> {
+        self.policy.mark_unloaded();
         let script = load_pac_source(source).await?;
         self.policy.set_script(Some(script)).await
     }
@@ -358,14 +418,33 @@ impl Context {
         self.policy.set_script(None).await
     }
     pub async fn wait(mut self) {
-        for j in self.joins.drain(..) {
-            let _ = j.await;
-        }
-        if let Some(load) = self.pac_load.take() {
-            let _ = load.await;
+        // `wait` observes lifecycle; callers choose when to request shutdown.
+        for join in self.joins.drain(..) {
+            let _ = join.await;
         }
         self.tracker.close();
-        self.tracker.wait().await;
+        let timeout = self.shutdown_timeout;
+        let drained = tokio::time::timeout(timeout, async {
+            if let Some(load) = &mut self.pac_load {
+                let _ = load.await;
+            }
+            self.tracker.wait().await;
+        })
+        .await
+        .is_ok();
+        if !drained {
+            if let Some(load) = &self.pac_load {
+                load.abort();
+            }
+            for relay in self.relay_handles.lock().unwrap().iter() {
+                relay.abort();
+            }
+            self.tracker.wait().await;
+            tracing::warn!(
+                ?timeout,
+                "proxy drain timed out; remaining relay tasks were cancelled"
+            );
+        }
     }
     pub async fn wait_timeout(self, d: Duration) -> bool {
         let mut this = self;
@@ -388,15 +467,24 @@ impl Context {
             if let Some(load) = &this.pac_load {
                 load.abort();
             }
-            for join in &mut this.joins {
-                let _ = join.await;
-            }
+            // Some earlier handles may already have been awaited by the timed
+            // drain; drop all handles after aborting, without polling twice.
+            this.joins.clear();
         }
         this.tracker.close();
         let remaining = d.saturating_sub(started.elapsed());
         let tracked = tokio::time::timeout(remaining, this.tracker.wait())
             .await
             .is_ok();
+        if !listeners || !tracked {
+            {
+                let relays = this.relay_handles.lock().unwrap();
+                for relay in relays.iter() {
+                    relay.abort();
+                }
+            }
+            this.tracker.wait().await;
+        }
         listeners && tracked
     }
 }
@@ -455,16 +543,31 @@ async fn serve_io<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let shutdown_timeout = cfg.shutdown_timeout;
-    let io = TokioIo::new(stream);
+    let Ok(session_permit) = cfg.session_limit.clone().try_acquire_owned() else {
+        return;
+    };
+    let session = SessionLease {
+        permit: Arc::new(session_permit),
+        idle_disabled: Arc::new(AtomicBool::new(false)),
+    };
+    let header_timeout = cfg.header_timeout;
+    let io = TokioIo::new(net::IdleIo::new(
+        stream,
+        cfg.idle_timeout,
+        session.idle_disabled.clone(),
+    ));
     let service = service_fn(move |req| {
         let cfg = cfg.clone();
         let events = events.clone();
         let tracker = tracker.clone();
-        async move { handle(req, peer, local, cfg, events, tracker).await }
+        let session = session.clone();
+        async move { handle(req, peer, local, cfg, events, tracker, session).await }
     });
-    let connection = hyper::server::conn::http1::Builder::new()
-        .serve_connection(io, service)
-        .with_upgrades();
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(header_timeout);
+    let connection = builder.serve_connection(io, service).with_upgrades();
     tokio::pin!(connection);
     if *shutdown.borrow() {
         connection.as_mut().graceful_shutdown();
@@ -475,6 +578,12 @@ async fn serve_io<S>(
         _=&mut connection=>{},
         _=shutdown.changed()=>{connection.as_mut().graceful_shutdown();let _=tokio::time::timeout(shutdown_timeout,&mut connection).await;}
     }
+}
+
+#[derive(Clone)]
+struct SessionLease {
+    permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+    idle_disabled: Arc<AtomicBool>,
 }
 
 fn full(status: StatusCode, content_type: &str, body: String) -> Response<OutBody> {
@@ -536,7 +645,8 @@ async fn handle(
     local: Option<SocketAddr>,
     cfg: ContextBuilder,
     events: broadcast::Sender<String>,
-    tracker: TaskTracker,
+    _tracker: TaskTracker,
+    session: SessionLease,
 ) -> Result<Response<OutBody>, std::convert::Infallible> {
     let start = Instant::now();
     let method = req.method().clone();
@@ -556,6 +666,12 @@ async fn handle(
                 "Only GET is supported for local resources",
             ));
         }
+        if !trusted_management_request(&req, peer, local, &cfg) {
+            return Ok(error_response(
+                StatusCode::FORBIDDEN,
+                "Untrusted management authority",
+            ));
+        }
         return Ok(match path {
             "/" => full(
                 StatusCode::OK,
@@ -570,7 +686,6 @@ async fn handle(
                     .headers()
                     .get(http::header::HOST)
                     .and_then(|v| v.to_str().ok())
-                    .filter(|h| h.parse::<http::uri::Authority>().is_ok())
                     .unwrap_or("127.0.0.1:3128");
                 full(
                     StatusCode::OK,
@@ -586,6 +701,12 @@ async fn handle(
             "/access.log" => event_response(events),
             _ => error_response(StatusCode::NOT_FOUND, "Resource not found"),
         });
+    }
+    if !connect && req.uri().scheme_str() == Some("https") {
+        return Ok(error_response(
+            StatusCode::BAD_REQUEST,
+            "HTTPS requests must use CONNECT for end-to-end TLS",
+        ));
     }
     let destination = if connect {
         connect_destination(req.uri())
@@ -630,14 +751,34 @@ async fn handle(
     } else {
         destination.pac_url.clone()
     };
-    let mut routes = cfg
-        .policy
-        .evaluate(route_input.clone(), destination.endpoint.host.clone())
-        .await
-        .unwrap_or_else(|e| {
+    if cfg.strict_policy && !cfg.policy.is_loaded() {
+        return Ok(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Routing policy has not loaded",
+        ));
+    }
+    let evaluation = if cfg.strict_policy {
+        cfg.policy
+            .evaluate_strict(route_input.clone(), destination.endpoint.host.clone())
+            .await
+    } else {
+        cfg.policy
+            .evaluate(route_input.clone(), destination.endpoint.host.clone())
+            .await
+    };
+    let mut routes = match evaluation {
+        Ok(routes) => routes,
+        Err(e) => {
             tracing::warn!("PAC evaluation failed: {e:#}");
+            if cfg.strict_policy {
+                return Ok(error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "Routing policy evaluation failed",
+                ));
+            }
             Routes(vec![Route::Direct])
-        });
+        }
+    };
     if cfg.direct_fallback && !routes.0.iter().any(|r| matches!(r, Route::Direct)) {
         routes.0.push(Route::Direct)
     }
@@ -678,6 +819,9 @@ async fn handle(
         ));
     };
     if connect {
+        session
+            .idle_disabled
+            .store(true, std::sync::atomic::Ordering::Release);
         let response = Response::builder()
             .status(StatusCode::OK)
             .body(
@@ -687,7 +831,8 @@ async fn handle(
             )
             .unwrap();
         let on = hyper::upgrade::on(&mut req);
-        tracker.spawn(async move {
+        let relay = _tracker.spawn(async move {
+            let _session_hold = session.permit;
             if let Ok(upgraded) = on.await {
                 let mut client = TokioIo::new(upgraded);
                 let mut upstream = stream;
@@ -707,6 +852,9 @@ async fn handle(
                 }
             }
         });
+        let mut relays = cfg.relay_handles.lock().unwrap();
+        relays.retain(|relay| !relay.is_finished());
+        relays.push(relay.abort_handle());
         publish(
             &events,
             AccessEntry::for_request(
@@ -729,6 +877,8 @@ async fn handle(
         &route,
         tunneled,
         &cfg.options,
+        cfg.exchange_timeout,
+        cfg.idle_timeout,
         peer,
         &method,
         &request_uri,
@@ -762,6 +912,37 @@ async fn handle(
             ))
         }
     }
+}
+
+fn trusted_management_request(
+    req: &Request<Incoming>,
+    peer: SocketAddr,
+    local: Option<SocketAddr>,
+    cfg: &ContextBuilder,
+) -> bool {
+    if !peer.ip().is_loopback() {
+        return false;
+    }
+    let Some(host) = req
+        .headers()
+        .get(http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(authority) = host.parse::<http::uri::Authority>() else {
+        return false;
+    };
+    cfg.trusted_management_hosts
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case(host))
+        || cfg.bound_addrs.iter().copied().chain(local).any(|addr| {
+            let expected = addr.to_string();
+            authority.as_str().eq_ignore_ascii_case(&expected)
+                || (addr.ip().is_loopback()
+                    && authority.port_u16() == Some(addr.port())
+                    && authority.host().eq_ignore_ascii_case("localhost"))
+        })
 }
 
 // Each argument is an independent input to the request-scoped route selector.
@@ -864,6 +1045,8 @@ async fn forward(
     route: &Route,
     tunneled: bool,
     options: &ConnectionOptions,
+    exchange_timeout: Duration,
+    idle_timeout: Duration,
     peer: SocketAddr,
     method: &Method,
     original_uri: &Uri,
@@ -874,16 +1057,17 @@ async fn forward(
 ) -> Result<Response<OutBody>> {
     let (mut parts, body) = req.into_parts();
     sanitize(&mut parts.headers);
-    if !parts.headers.contains_key(http::header::HOST) {
-        let host = if dest.endpoint.host.contains(':') {
-            format!("[{}]", dest.endpoint.host)
-        } else {
-            dest.endpoint.host.clone()
-        };
-        parts
-            .headers
-            .insert(http::header::HOST, HeaderValue::from_str(&host)?);
+    let authority = original_uri
+        .authority()
+        .ok_or_else(|| anyhow::anyhow!("request authority missing"))?;
+    let mut host = authority.host().to_owned();
+    if let Some(port) = authority.port() {
+        host.push(':');
+        host.push_str(port.as_str());
     }
+    parts
+        .headers
+        .insert(http::header::HOST, HeaderValue::from_str(&host)?);
     let proxy = match route {
         Route::Http(e) | Route::Https(e) => Some(e),
         Route::Direct => None,
@@ -908,14 +1092,20 @@ async fn forward(
     };
     parts.uri = uri;
     let request = Request::from_parts(parts, body);
-    let io = TokioIo::new(stream);
+    let io = TokioIo::new(net::IdleIo::new(
+        stream,
+        idle_timeout,
+        Arc::new(AtomicBool::new(false)),
+    ));
     let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
         .handshake(io)
         .await?;
     tokio::spawn(async move {
         let _ = conn.with_upgrades().await;
     });
-    let response = sender.send_request(request).await?;
+    let response = tokio::time::timeout(exchange_timeout, sender.send_request(request))
+        .await
+        .context("upstream response headers timed out")??;
     let status = response.status();
     if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
         anyhow::bail!("upstream returned HTTP 407");
@@ -964,4 +1154,43 @@ fn event_response(events: broadcast::Sender<String>) -> Response<OutBody> {
 }
 fn access_html() -> &'static str {
     "<!doctype html><meta charset=utf-8><title>unproxy access log</title><h1>Access log</h1><button id=stop>Stop</button><pre id=log></pre><script>const s=new EventSource('access.log');s.onmessage=e=>{const p=document.createElement('div');p.textContent=e.data;document.querySelector('#log').append(p)};s.addEventListener('lagged',e=>console.warn('access events dropped',e.data));s.onerror=e=>console.warn('access stream error',e);document.querySelector('#stop').onclick=()=>s.close();</script>"
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn wait_observes_shutdown_without_triggering_it() {
+        let policy = Arc::new(Policy::new(None).unwrap());
+        let server = ContextBuilder::new(policy, ConnectionOptions::default())
+            .listen("127.0.0.1:0".parse().unwrap())
+            .bind()
+            .await
+            .unwrap();
+        let addr = server.local_addrs()[0];
+        let shutdown = server.shutdown.clone();
+        let waiter = tokio::spawn(server.wait());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(
+                format!("GET /missing HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 404"));
+        assert!(!waiter.is_finished());
+
+        shutdown.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }

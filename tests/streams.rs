@@ -84,6 +84,7 @@ async fn supplied_connection_stream_loads_and_reloads_configured_pac() {
     ))
     .unwrap()
     .pac_source(PathOrUri::Path(path))
+    .trusted_management_host("fixture")
     .serve_connections(connections);
     let policy = context.policy();
     tokio::time::timeout(Duration::from_secs(2), async {

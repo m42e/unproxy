@@ -101,6 +101,17 @@ pub struct MainArgs {
     pub proxytunnel: bool,
     #[arg(long = "direct-fallback")]
     pub direct_fallback: bool,
+    /// Fail closed until a routing script loads and on PAC evaluation errors.
+    #[arg(long = "strict-policy")]
+    pub strict_policy: bool,
+    #[arg(long = "header-timeout", value_parser=parse_duration, default_value="15")]
+    pub header_timeout: Duration,
+    #[arg(long = "idle-timeout", value_parser=parse_duration, default_value="60")]
+    pub idle_timeout: Duration,
+    #[arg(long = "exchange-timeout", value_parser=parse_duration, default_value="30")]
+    pub exchange_timeout: Duration,
+    #[arg(long = "max-sessions", default_value = "256")]
+    pub max_sessions: usize,
     #[arg(short='c',long="connect-timeout",value_parser=parse_duration,default_value="10")]
     pub connect_timeout: Duration,
     #[arg(long)]

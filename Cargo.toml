@@ -15,7 +15,7 @@ vendored-tls = ["native-tls/vendored"]
 anyhow = "1.0"
 async-stream = "0.3"
 base64 = "0.22"
-boa_engine = "0.21"
+boa_engine = "0.22"
 bytes = "1"
 chrono = "0.4"
 clap = { version = "4.6", features = ["derive", "env"] }

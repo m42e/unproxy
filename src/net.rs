@@ -4,6 +4,10 @@ use std::{
     future::Future,
     net::IpAddr,
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -12,8 +16,131 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::TcpStream,
-    time,
+    time::{self, Instant, Sleep},
 };
+
+/// A stream wrapper that closes inactive HTTP exchanges. An owner may disable
+/// the deadline after protocol upgrade, for example when CONNECT takes over.
+pub struct IdleIo<S> {
+    inner: S,
+    timeout: Duration,
+    disabled: Arc<AtomicBool>,
+    read_deadline: Pin<Box<Sleep>>,
+    write_deadline: Pin<Box<Sleep>>,
+}
+impl<S> IdleIo<S> {
+    pub fn new(inner: S, timeout: Duration, disabled: Arc<AtomicBool>) -> Self {
+        let deadline = Instant::now() + timeout;
+        Self {
+            inner,
+            timeout,
+            disabled,
+            read_deadline: Box::pin(time::sleep_until(deadline)),
+            write_deadline: Box::pin(time::sleep_until(deadline)),
+        }
+    }
+    fn reset_read(&mut self) {
+        self.read_deadline
+            .as_mut()
+            .reset(Instant::now() + self.timeout);
+    }
+    fn reset_write(&mut self) {
+        self.write_deadline
+            .as_mut()
+            .reset(Instant::now() + self.timeout);
+    }
+}
+impl<S: AsyncRead + Unpin> AsyncRead for IdleIo<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        match Pin::new(&mut self.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) if buf.filled().len() > before => {
+                self.reset_read();
+                self.reset_write();
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(value) => Poll::Ready(value),
+            Poll::Pending if self.disabled.load(Ordering::Relaxed) => Poll::Pending,
+            Poll::Pending => match self.read_deadline.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "HTTP read idle timeout",
+                ))),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+}
+impl<S: AsyncWrite + Unpin> AsyncWrite for IdleIo<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match Pin::new(&mut self.inner).poll_write(cx, data) {
+            Poll::Ready(Ok(n)) if n > 0 => {
+                self.reset_write();
+                self.reset_read();
+                Poll::Ready(Ok(n))
+            }
+            Poll::Ready(value) => Poll::Ready(value),
+            Poll::Pending if self.disabled.load(Ordering::Relaxed) => Poll::Pending,
+            Poll::Pending => match self.write_deadline.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "HTTP write idle timeout",
+                ))),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match Pin::new(&mut self.inner).poll_flush(cx) {
+            Poll::Ready(Ok(())) => {
+                self.reset_write();
+                self.reset_read();
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(value) => Poll::Ready(value),
+            Poll::Pending if self.disabled.load(Ordering::Relaxed) => Poll::Pending,
+            Poll::Pending => match self.write_deadline.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "HTTP flush idle timeout",
+                ))),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match Pin::new(&mut self.inner).poll_shutdown(cx) {
+            Poll::Ready(Ok(())) => {
+                self.reset_write();
+                self.reset_read();
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(value) => Poll::Ready(value),
+            Poll::Pending if self.disabled.load(Ordering::Relaxed) => Poll::Pending,
+            Poll::Pending => match self.write_deadline.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "HTTP shutdown idle timeout",
+                ))),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+}
 use tokio_native_tls::TlsConnector;
 
 use crate::{
@@ -162,10 +289,7 @@ async fn proxy_connect(
         .await
         .context("upstream authorization timed out")??;
         let authority = destination.authority();
-        let mut request = format!(
-            "CONNECT {authority} HTTP/1.1\r\nHost: {}\r\n",
-            destination.host
-        );
+        let mut request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
         if let Some(value) = authorization {
             request.push_str("Proxy-Authorization: ");
             request.push_str(
@@ -338,8 +462,9 @@ pub async fn fetch_remote_pac(uri: &str) -> Result<String> {
             if matches!(status, 301 | 302 | 307 | 308) {
                 if redirects == 9 { bail!("too many PAC redirects"); }
                 let location = header.lines().skip(1).find_map(|l| { let (k,v)=l.split_once(':')?; k.eq_ignore_ascii_case("location").then(||v.trim()) }).ok_or_else(|| anyhow!("PAC redirect has no Location"))?;
-                current = http::Uri::try_from(location).context("invalid PAC redirect Location")?;
-                if current.authority().is_none() { bail!("PAC redirect Location must have authority"); }
+                let next = http::Uri::try_from(location).context("invalid PAC redirect Location")?;
+                validate_pac_redirect(scheme, &next)?;
+                current = next;
                 continue;
             }
             if status != 200 { bail!("PAC download returned HTTP {status}"); }
@@ -348,6 +473,34 @@ pub async fn fetch_remote_pac(uri: &str) -> Result<String> {
         }
         bail!("too many PAC redirects")
     }).await.context("remote PAC download timed out")?.with_context(||format!("downloading PAC from {requested}"))
+}
+
+fn validate_pac_redirect(previous_scheme: &str, next: &http::Uri) -> Result<()> {
+    if next.authority().is_none() {
+        bail!("PAC redirect Location must have authority");
+    }
+    match next.scheme_str() {
+        Some("http") | Some("https") => {}
+        _ => bail!("PAC redirect Location must use HTTP or HTTPS"),
+    }
+    if previous_scheme == "https" && next.scheme_str() != Some("https") {
+        bail!("HTTPS PAC redirect cannot downgrade to HTTP");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod pac_redirect_tests {
+    use super::*;
+
+    #[test]
+    fn https_pac_redirects_cannot_downgrade() {
+        let http: http::Uri = "http://pac.example/script.pac".parse().unwrap();
+        let https: http::Uri = "https://pac.example/script.pac".parse().unwrap();
+        assert!(validate_pac_redirect("https", &http).is_err());
+        assert!(validate_pac_redirect("https", &https).is_ok());
+        assert!(validate_pac_redirect("http", &https).is_ok());
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

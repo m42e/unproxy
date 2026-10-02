@@ -132,7 +132,12 @@ fn skip_name(b: &[u8], start: usize) -> Result<usize> {
     }
 }
 pub async fn exchange_primary(query: &[u8], server: SocketAddr) -> Result<Vec<u8>> {
-    let sock = UdpSocket::bind("0.0.0.0:0").await?;
+    let bind = if server.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let sock = UdpSocket::bind(bind).await?;
     sock.connect(server).await?;
     let n = timeout(Duration::from_millis(500), sock.send(query))
         .await
@@ -161,30 +166,44 @@ pub async fn doh_on_stream(
     use http::{Request, header};
     use http_body_util::{BodyExt, Full};
     use hyper_util::rt::TokioIo;
-    let tls = timeout(
-        Duration::from_millis(1500),
-        tls_connector.connect(host, stream),
-    )
+    timeout(Duration::from_millis(1500), async {
+        let tls = tls_connector.connect(host, stream).await?;
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+            .await
+            .context("DoH HTTP handshake")?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let request = Request::post(path)
+            .header(header::HOST, host_header)
+            .header(header::ACCEPT, "application/dns-message")
+            .header(header::CONTENT_TYPE, "application/dns-message")
+            .body(Full::new(Bytes::copy_from_slice(query)))?;
+        let response = sender.send_request(request).await?;
+        if response.status() != http::StatusCode::OK {
+            return Err(anyhow!("DoH response status {}", response.status()));
+        }
+        let mut body = response.into_body();
+        let mut bytes = Vec::new();
+        while let Some(frame) = body.frame().await {
+            let frame = frame?;
+            if let Ok(data) = frame.into_data() {
+                append_doh_chunk(&mut bytes, &data)?;
+            }
+        }
+        parse_counts(&bytes).context("invalid DoH DNS response")?;
+        Ok(bytes)
+    })
     .await
-    .context("DoH TLS timeout")??;
-    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
-        .await
-        .context("DoH HTTP handshake")?;
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    let request = Request::post(path)
-        .header(header::HOST, host_header)
-        .header(header::ACCEPT, "application/dns-message")
-        .header(header::CONTENT_TYPE, "application/dns-message")
-        .body(Full::new(Bytes::copy_from_slice(query)))?;
-    let response = timeout(Duration::from_millis(1500), sender.send_request(request))
-        .await
-        .context("DoH exchange timeout")??;
-    if response.status() != http::StatusCode::OK {
-        return Err(anyhow!("DoH response status {}", response.status()));
+    .context("DoH exchange timed out")?
+}
+
+fn append_doh_chunk(output: &mut Vec<u8>, data: &[u8]) -> Result<()> {
+    if output.len().saturating_add(data.len()) > 65_507 {
+        return Err(anyhow!("DoH response exceeds maximum DNS UDP payload"));
     }
-    Ok(response.into_body().collect().await?.to_bytes().to_vec())
+    output.extend_from_slice(data);
+    Ok(())
 }
 
 /// Tell whether an authority spells an explicit port, including malformed ports.
@@ -331,5 +350,12 @@ mod tests {
         b.truncate(12);
         assert!(parse_counts(&b).is_err());
         assert!(parse_counts(&[]).is_err())
+    }
+    #[test]
+    fn doh_body_enforces_udp_payload_size_across_chunks() {
+        let mut body = vec![0; 65_506];
+        append_doh_chunk(&mut body, &[0]).unwrap();
+        assert_eq!(body.len(), 65_507);
+        assert!(append_doh_chunk(&mut body, &[0]).is_err());
     }
 }

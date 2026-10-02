@@ -30,15 +30,20 @@ destination TLS, implements asynchronous read/write, and retains route identity.
 Its HTTP sender applies upstream credentials only on a forward-proxy transport.
 `access::AccessEntry` provides typed timestamps, outcomes, real elapsed seconds
 and safe event formatting; `Context::publish_access` publishes these entries.
-The primary proxy intentionally does not add origin TLS to absolute-form HTTPS
-requests: use client CONNECT for that flow.
+Absolute-form HTTPS requests receive HTTP 400; clients must use CONNECT for
+end-to-end TLS. `ContextBuilder` exposes `header_timeout`, `idle_timeout`,
+`exchange_timeout`, `max_sessions`, `strict_policy`, and
+`trusted_management_host` for deadline, capacity, routing and management-alias
+configuration.
 
 CredentialStore supports atomic replacement and hostname enumeration. Native
 NegotiateContext exposes token stepping separately from the one-token HTTP path.
 Metered streams and bidirectional relay expose byte counters, and remote PAC
 retrieval operates directly without consulting proxy policy or environment.
 The server supports application-owned listeners/streams, peer-aware sessions,
-live bounded event subscriptions and programmatic shutdown/completion.
+live bounded event subscriptions and programmatic shutdown/completion. `wait`
+observes the lifecycle and does not initiate shutdown; `wait_timeout` requests
+shutdown and cancels outstanding CONNECT relays after its grace period.
 
 For a source or embedding application, create/replace the policy explicitly,
 configure `ContextBuilder::inline_pac` or `pac_source`, or use the live context

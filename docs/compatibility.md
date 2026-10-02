@@ -12,9 +12,13 @@ Forced CONNECT uses origin-form targets inside the resulting ordinary-HTTP
 tunnel rather than the reference's absolute form. Negative, non-finite and
 overflowing durations are rejected. Date/time helper boundaries are normalized
 and GMT uses UTC construction. Initial inline scripts report load failures.
+PAC initialization/evaluation has a 2-second deadline and instruction budget.
 An explicit script replacement resets the runtime before script execution;
 there is no last-known-good guarantee. Startup file/network loading remains
-asynchronous and request evaluation errors still select DIRECT.
+asynchronous. Default request evaluation errors still select DIRECT, while
+`--strict-policy` fails closed. Ordinary absolute-form HTTPS receives 400 and
+requires CONNECT. Management routes require a loopback peer and listener Host
+or an explicit embedded alias.
 
 Primary DNS errors do not trigger broader fallback. Native login helper enabling
 remains unconditional; no working Autostart or app system-proxy UI is claimed.
@@ -22,7 +26,8 @@ Use the standalone macOS system utility for system settings. Upstream Basic
 authentication still requires credentials even for an unauthenticated proxy.
 Ordinary HTTP 407 becomes 502 after the request is transmitted, with no retry.
 
-CONNECT tasks are bounded by process shutdown; response access records describe
+CONNECT tasks are tracked and cancelled when bounded process drain expires;
+response access records describe
 establishment rather than byte totals or tunnel lifetime. Transparent routing,
 HTTP/2/3 frontend, incoming TLS, TLS interception, SOCKS, response caching,
 general Upgrade, upstream pooling, multi-round Negotiate, WPAD, automatic policy

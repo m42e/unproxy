@@ -20,6 +20,11 @@ host lists and verbosity counts accumulate.
 --connect-timeout 10
 --parallel-connect 2
 --direct-fallback
+--strict-policy
+--header-timeout 15
+--idle-timeout 60
+--exchange-timeout 30
+--max-sessions 256
 ```
 
 A nonempty UNPROXY_NORC disables only settings reading. PAC discovery still
@@ -29,8 +34,10 @@ select remote files; other values are local paths. Remote PAC uses direct TLS,
 verified platform roots, a 15-second total deadline, at most nine followed
 redirects (301/302/307/308 with absolute Location), an 8 MiB limit and UTF-8.
 
-Startup loading is asynchronous: DIRECT can serve before the PAC is loaded;
-startup failures are logged. SIGHUP reloads the configured source, while SIGUSR1
+Startup loading is asynchronous: by default DIRECT can serve before the PAC is loaded;
+startup failures are logged. `--strict-policy` returns 503 until a configured PAC
+loads and 502 after evaluation errors. A failed replacement leaves strict mode
+unavailable. SIGHUP reloads the configured source, while SIGUSR1
 restores DIRECT. Both refresh myIpAddress from the default IPv4 interface.
 Explicit reload failure is fatal. Script replacement resets globals and DNS
 cache. Native helper DNS results and failures remain cached for five minutes.
@@ -39,7 +46,15 @@ PAC must define FindProxyForURL(url, host), returning a semicolon list of DIRECT
 PROXY host:port, HTTP host:port or HTTPS host:port. Directive keywords are
 case-sensitive; HTTP is the normalized plain-proxy spelling. Bracket IPv6
 endpoints. Invalid policy evaluation falls back to DIRECT in the server;
-paceval reports an error. DomainTable matches case-sensitive label suffixes.
+paceval reports an error. `--strict-policy` closes that compatibility fallback.
+PAC scripts are limited to 8 MiB and two seconds for initialization and evaluation;
+native PAC DNS resolution has one bounded worker and at most four uncached lookups
+per evaluation. DomainTable matches case-sensitive label suffixes.
+
+Frontend headers default to a 15-second read deadline. The 60-second idle deadline
+applies to frontend and upstream HTTP I/O; it is disabled after CONNECT upgrades.
+Upstream exchange/header time is capped at 30 seconds. At most 256 client
+connections, including CONNECT tunnels, run at once.
 
 UNPROXY_LOG selects a valid tracing filter; otherwise INFO is the default,
 with -v/-q saturating through OFF/ERROR/WARN/INFO/DEBUG/TRACE. --logfile truncates

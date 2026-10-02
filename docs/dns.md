@@ -22,6 +22,7 @@ Malformed responses/timeouts are logged without fallback or synthesized SERVFAIL
 Secondary POST requests carry the original DNS bytes and application/dns-message
 Accept/Content-Type. A CONNECT tunnel through the configured proxy is followed
 by verified TLS to an HTTPS endpoint, independently of HTTPS proxy TLS. Tunnel
-and request/header phases each have 1.5-second deadlines; only HTTP 200 succeeds.
-The body is collected without that header deadline. There is no answer cache,
+and the complete DoH TLS/HTTP exchange each have 1.5-second deadlines; only HTTP
+200 succeeds. The response body is bounded to the maximum IPv4 UDP payload size
+(65,507 bytes) and shares the exchange deadline. There is no answer cache,
 TCP DNS, direct-secondary mode or query rewriting.

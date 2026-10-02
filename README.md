@@ -15,6 +15,11 @@ export no_proxy=127.0.0.1,localhost,::1
 Use `--pac-file FILE_OR_URL` for upstream routing. No policy means DIRECT.
 Basic/netrc is the command-line default; unauthenticated upstream routes can use
 the library's no-auth factory. Add `--negotiate` to use the current native identity.
+PAC execution is bounded. For fail-closed routing while a PAC file loads and when
+evaluation fails, use `--strict-policy`; the default keeps compatibility by using
+DIRECT when no policy is available or evaluation fails. See
+[security boundaries](docs/security.md) for management endpoints, PAC trust, and
+credential handling.
 
 ```sh
 cargo run --bin paceval -- assets/proxy.pac https://example.org/
