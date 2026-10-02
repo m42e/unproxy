@@ -1,0 +1,15 @@
+[Unit]
+Description=Local PAC-aware HTTP proxy
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/unproxy
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+KillMode=process
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target

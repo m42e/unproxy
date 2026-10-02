@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+console_user=$(/usr/bin/stat -f %Su /dev/console)
+if [ "$console_user" != root ] && [ "$console_user" != loginwindow ]; then
+    uid=$(/usr/bin/id -u "$console_user")
+    /bin/launchctl bootout "gui/$uid/de.m42e.unproxy" 2>/dev/null || true
+    /bin/launchctl bootout "gui/$uid/com.github.m42e.unproxy" 2>/dev/null || true
+fi
+if [ -f /Library/LaunchAgents/com.github.m42e.unproxy.plist ]; then
+    rm -f /Library/LaunchAgents/com.github.m42e.unproxy.plist
+fi
+# Migration removes only the old project's known installation locations.
+if /usr/sbin/pkgutil --pkg-info com.github.m42e.unproxy >/dev/null 2>&1; then
+    rm -f /usr/local/bin/unproxy
+    /usr/sbin/pkgutil --forget com.github.m42e.unproxy >/dev/null
+fi

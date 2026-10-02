@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+if [ "$1" = remove ] && command -v deb-systemd-helper >/dev/null; then
+    deb-systemd-helper --user mask unproxy.service >/dev/null || true
+fi

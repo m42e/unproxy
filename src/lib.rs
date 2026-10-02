@@ -2,6 +2,7 @@
 pub mod auth;
 pub mod config;
 pub mod dns;
+pub mod desktop;
 pub mod net;
 pub mod pac;
 pub mod platform;

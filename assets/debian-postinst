@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ] && command -v deb-systemd-helper >/dev/null; then
+    deb-systemd-helper --user unmask unproxy.service >/dev/null || true
+    if deb-systemd-helper --user was-enabled unproxy.service; then
+        deb-systemd-helper --user enable unproxy.service >/dev/null || true
+    else
+        deb-systemd-helper --user update-state unproxy.service >/dev/null || true
+    fi
+fi

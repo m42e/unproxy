@@ -1,0 +1,63 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --locked --bin xtask -- check
+      - run: cargo build --locked --release --bins
+        env:
+          UNPROXY_REVISION: ${{ github.sha }}
+      - run: cargo run --locked --bin xtask -- package --format portable
+      - if: runner.os == 'Linux'
+        run: cargo run --locked --bin xtask -- package --format deb
+      - if: runner.os == 'macOS'
+        run: |
+          cargo run --locked --bin xtask -- package --format macos
+          cargo run --locked --bin xtask -- package --format app
+      - if: runner.os == 'Windows'
+        run: cargo run --locked --bin xtask -- package --format windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ runner.os }}
+          path: |
+            dist/*.zip
+            dist/*.deb
+            dist/*.pkg
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - run: cargo run --locked --bin xtask -- release-notes > dist/release-notes.md
+      - run: gh release create "$RELEASE_TAG" dist/*.zip dist/*.deb dist/*.pkg --notes-file dist/release-notes.md --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+      - run: cargo run --locked --bin xtask -- docs --repository "${{ github.repository }}"
+      - run: git archive --format=zip HEAD -o dist/site/source.zip
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/site
+      - uses: actions/deploy-pages@v4
