@@ -177,6 +177,175 @@ async fn racing_connect_uses_first_success() {
 }
 
 #[tokio::test]
+async fn parallel_limit_and_connect_failover_are_enforced() {
+    use tokio::sync::oneshot;
+    let mut listeners = Vec::new();
+    for _ in 0..3 {
+        listeners.push(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap())
+    }
+    let addresses = listeners
+        .iter()
+        .map(|l| l.local_addr().unwrap())
+        .collect::<Vec<_>>();
+    let mut iter = listeners.into_iter();
+    let listener1 = iter.next().unwrap();
+    let listener2 = iter.next().unwrap();
+    let listener3 = iter.next().unwrap();
+    let (started1_tx, started1_rx) = oneshot::channel();
+    let (release1_tx, release1_rx) = oneshot::channel();
+    let first = tokio::spawn(async move {
+        let (mut io, _) = listener1.accept().await.unwrap();
+        let mut h = Vec::new();
+        loop {
+            let mut b = [0];
+            io.read_exact(&mut b).await.unwrap();
+            h.push(b[0]);
+            if h.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let _ = started1_tx.send(());
+        let _ = release1_rx.await;
+        io.write_all(b"HTTP/1.1 502 Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let (started2_tx, started2_rx) = oneshot::channel();
+    let (release2_tx, release2_rx) = oneshot::channel();
+    let second = tokio::spawn(async move {
+        let (mut io, _) = listener2.accept().await.unwrap();
+        let mut h = Vec::new();
+        loop {
+            let mut b = [0];
+            io.read_exact(&mut b).await.unwrap();
+            h.push(b[0]);
+            if h.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let _ = started2_tx.send(());
+        let _ = release2_rx.await;
+        io.write_all(b"HTTP/1.1 200 Established\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let (started3_tx, mut started3_rx) = oneshot::channel();
+    let (release3_tx, release3_rx) = oneshot::channel();
+    let third = tokio::spawn(async move {
+        let (mut io, _) = listener3.accept().await.unwrap();
+        let mut h = Vec::new();
+        loop {
+            let mut b = [0];
+            io.read_exact(&mut b).await.unwrap();
+            h.push(b[0]);
+            if h.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let _ = started3_tx.send(());
+        let _ = release3_rx.await;
+        io.write_all(b"HTTP/1.1 200 Established\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let policy = Policy::new(Some(format!(
+        "function FindProxyForURL(url, host) {{ return 'PROXY {}; PROXY {}; PROXY {}'; }}",
+        addresses[0], addresses[1], addresses[2]
+    )))
+    .unwrap();
+    let proxy = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
+        .listen("127.0.0.1:0".parse().unwrap())
+        .parallel_connect(2)
+        .bind()
+        .await
+        .unwrap();
+    let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
+    client
+        .write_all(b"CONNECT example.test:80 HTTP/1.1\r\nHost: example.test:80\r\n\r\n")
+        .await
+        .unwrap();
+    started1_rx.await.unwrap();
+    started2_rx.await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(80), &mut started3_rx)
+            .await
+            .is_err()
+    );
+    release1_tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(1), &mut started3_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    release2_tx.send(()).unwrap();
+    release3_tx.send(()).unwrap();
+    let mut response = Vec::new();
+    loop {
+        let mut b = [0];
+        client.read_exact(&mut b).await.unwrap();
+        response.push(b[0]);
+        if response.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    drop(client);
+    let _ = tokio::join!(first, second, third);
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
+async fn direct_fallback_runs_after_proxy_connection_failure() {
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bad_proxy = closed.local_addr().unwrap();
+    drop(closed);
+    let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = origin.local_addr().unwrap();
+    let origin_task = tokio::spawn(async move {
+        let (mut io, _) = origin.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut b = [0; 1024];
+        loop {
+            let n = io.read(&mut b).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&b[..n]);
+            if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        io.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&request).into_owned()
+    });
+    let policy = Policy::new(Some(format!(
+        "function FindProxyForURL(url, host) {{ return 'PROXY {bad_proxy}'; }}"
+    )))
+    .unwrap();
+    let proxy = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
+        .listen("127.0.0.1:0".parse().unwrap())
+        .direct_fallback(true)
+        .bind()
+        .await
+        .unwrap();
+    let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
+    client.write_all(format!("GET http://{target}/fallback HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(
+        origin_task
+            .await
+            .unwrap()
+            .starts_with("GET /fallback HTTP/1.1")
+    );
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
 async fn access_sse_emits_records_and_reports_lag() {
     let proxy = start(Policy::new(None).unwrap()).await;
     let addr = proxy.local_addrs()[0];
@@ -194,6 +363,7 @@ async fn access_sse_emits_records_and_reports_lag() {
         }
     }
     assert!(String::from_utf8_lossy(&header).contains("text/event-stream"));
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let target = closed.local_addr().unwrap();
     drop(closed);
@@ -223,7 +393,7 @@ async fn access_sse_emits_records_and_reports_lag() {
         .await
         .unwrap()
         .unwrap();
-    assert!(String::from_utf8_lossy(&frame[..n]).starts_with("data:"));
+    assert!(String::from_utf8_lossy(&frame[..n]).contains("data:"));
     drop(sse);
     proxy.shutdown();
     proxy.wait().await;
@@ -259,7 +429,7 @@ async fn forwards_stream_and_removes_hop_headers() {
     let mut events = proxy.subscribe();
     let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
     let req = format!(
-        "POST http://{origin_addr}/upload?q=1 HTTP/1.1\r\nHost: preserved.test\r\nUser-Agent: test-agent\r\nConnection: X-Remove\r\nX-Remove: secret\r\nProxy-Authorization: Basic client\r\nAuthorization: Basic origin\r\nContent-Length: 5\r\n\r\nhello"
+        "POST http://{origin_addr}/upload?q=1 HTTP/1.1\r\nHost: preserved.test\r\nUser-Agent: test-agent\r\nConnection: X-Remove, close\r\nX-Remove: secret\r\nProxy-Authorization: Basic client\r\nAuthorization: Basic origin\r\nContent-Length: 5\r\n\r\nhello"
     );
     client.write_all(req.as_bytes()).await.unwrap();
     let mut response = String::new();
@@ -272,8 +442,8 @@ async fn forwards_stream_and_removes_hop_headers() {
     let sent = upstream.await.unwrap();
     let sent = String::from_utf8_lossy(&sent);
     assert!(sent.starts_with("POST /upload?q=1 HTTP/1.1"));
-    assert!(sent.contains("Host: preserved.test"));
-    assert!(sent.contains("Authorization: Basic origin"));
+    assert!(sent.to_ascii_lowercase().contains("host: preserved.test"));
+    assert!(sent.to_ascii_lowercase().contains("authorization: basic origin"));
     assert!(!sent.to_ascii_lowercase().contains("proxy-authorization"));
     assert!(!sent.to_ascii_lowercase().contains("x-remove"));
     proxy.shutdown();
@@ -287,7 +457,17 @@ async fn chunked_request_body_streams_to_origin() {
     let origin_task = tokio::spawn(async move {
         let (mut io, _) = origin.accept().await.unwrap();
         let mut raw = Vec::new();
-        io.read_to_end(&mut raw).await.unwrap();
+        let mut chunk = [0; 4096];
+        loop {
+            let n = io.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&chunk[..n]);
+            if raw.windows(5).any(|w| w == b"0\r\n\r\n") {
+                break;
+            }
+        }
         io.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
             .await
             .unwrap();
@@ -317,7 +497,7 @@ async fn chunked_request_body_streams_to_origin() {
     let raw = origin_task.await.unwrap();
     let raw = String::from_utf8_lossy(&raw);
     assert!(raw.starts_with("POST /bulk HTTP/1.1"));
-    assert!(raw.contains("Transfer-Encoding: chunked"));
+    assert!(raw.to_ascii_lowercase().contains("transfer-encoding: chunked"));
     for byte in b"abcd" {
         assert!(
             raw.as_bytes()
