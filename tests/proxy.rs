@@ -762,3 +762,51 @@ async fn ordinary_407_is_a_local_bad_gateway() {
     proxy.shutdown();
     proxy.wait().await;
 }
+
+#[tokio::test]
+async fn policy_errors_return_502_without_origin_connections_and_publish_access() {
+    use std::time::Duration;
+    for fallback in [false, true] {
+        for body in [
+            "throw new Error('policy denied')",
+            "return 42",
+            "return 'PROXYbroken:3128'",
+        ] {
+            let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = origin.local_addr().unwrap();
+            let policy =
+                Policy::new(Some(format!("function FindProxyForURL(){{{body};}}"))).unwrap();
+            let context = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
+                .listen("127.0.0.1:0".parse().unwrap())
+                .direct_fallback(fallback)
+                .bind()
+                .await
+                .unwrap();
+            let mut events = context.subscribe();
+            let mut client = TcpStream::connect(context.local_addrs()[0]).await.unwrap();
+            client.write_all(format!("GET http://{target}/ HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            let mut response = String::new();
+            tokio::time::timeout(Duration::from_secs(3), client.read_to_string(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(response.starts_with("HTTP/1.1 502"), "{response}");
+            assert!(response.contains("PAC evaluation failed"), "{response}");
+            let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                event.contains("error:") && event.contains("PAC evaluation failed"),
+                "{event}"
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), origin.accept())
+                    .await
+                    .is_err()
+            );
+            context.shutdown();
+            context.wait().await;
+        }
+    }
+}

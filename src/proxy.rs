@@ -630,18 +630,29 @@ async fn handle(
     } else {
         destination.pac_url.clone()
     };
-    let mut routes = cfg
+    let mut routes = match cfg
         .policy
         .evaluate(route_input.clone(), destination.endpoint.host.clone())
         .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("PAC evaluation failed: {e:#}");
-            Routes(vec![Route::Direct])
-        });
+    {
+        Ok(routes) => routes,
+        Err(error) => {
+            let message = format!("PAC evaluation failed: {error:#}");
+            tracing::warn!("{message}");
+            publish(
+                &events,
+                AccessEntry::for_request(
+                    peer,
+                    None,
+                    &req,
+                    start.elapsed(),
+                    AccessOutcome::Error(message.clone()),
+                ),
+            );
+            return Ok(error_response(StatusCode::BAD_GATEWAY, message));
+        }
+    };
     if cfg.direct_fallback && !routes.0.iter().any(|r| matches!(r, Route::Direct)) {
-        routes.0.push(Route::Direct)
-    }
-    if routes.0.is_empty() {
         routes.0.push(Route::Direct)
     }
     // Preserve policy order. Sequential selection also bounds socket use and gives deterministic behavior.
