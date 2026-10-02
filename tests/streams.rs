@@ -60,3 +60,72 @@ async fn generic_timeout_bounds_operation_and_direct_connection_keeps_identity()
     assert_eq!(connection.transport(), Transport::DirectTcp);
     assert!(listener.accept().await.is_ok());
 }
+
+#[tokio::test]
+async fn supplied_connection_stream_loads_and_reloads_configured_pac() {
+    use unproxy::{pac::Policy, proxy::ContextBuilder, route::PathOrUri};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("proxy.pac");
+    tokio::fs::write(
+        &path,
+        "function FindProxyForURL(u,h){return 'PROXY example.test:8081'}",
+    )
+    .await
+    .unwrap();
+    let (mut client, server) = tokio::io::duplex(4096);
+    let connections = futures_util::stream::iter([Ok((server, "127.0.0.1:3210".parse().unwrap()))]);
+    let context = ContextBuilder::new(
+        Arc::new(Policy::new(None).unwrap()),
+        ConnectionOptions::default(),
+    )
+    .inline_pac(Some(
+        "function FindProxyForURL(u,h){return 'PROXY inline.test:8082'}".into(),
+    ))
+    .unwrap()
+    .pac_source(PathOrUri::Path(path))
+    .serve_connections(connections);
+    let policy = context.policy();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let routes = policy
+                .evaluate("http://destination.test/".into(), "destination.test".into())
+                .await
+                .unwrap();
+            if routes.to_string() == "HTTP example.test:8081" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    context.clear_policy().await.unwrap();
+    assert_eq!(
+        policy
+            .evaluate("http://destination.test/".into(), "destination.test".into())
+            .await
+            .unwrap()
+            .to_string(),
+        "DIRECT"
+    );
+    context.reload_pac().await.unwrap();
+    assert_eq!(
+        policy
+            .evaluate("http://destination.test/".into(), "destination.test".into())
+            .await
+            .unwrap()
+            .to_string(),
+        "HTTP example.test:8081"
+    );
+    client
+        .write_all(b"GET /missing HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 404"));
+    context.shutdown();
+    context.shutdown_notified().await;
+    assert!(context.wait_timeout(Duration::from_secs(1)).await);
+}

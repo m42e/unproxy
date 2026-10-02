@@ -38,3 +38,15 @@ On Windows, launch a release executable from a parent console with
 and inspect the HKCU Run entry. On Linux, test named activation using owned
 descriptors 3 onward and environment errors, and inspect Debian user-unit hooks
 through installation/upgrade/removal/purge in a disposable container.
+
+The implementation was validated on macOS ARM64 with both feature modes,
+strict all-target Clippy and rustfmt checks. Controlled tests cover verified TLS
+to upstream HTTPS proxies, TLS to DoH inside HTTPS-proxy CONNECT, PAC download
+limits, fixed clocks, streaming/half-close, live SSE and subprocess Unix signals.
+Windows GNU/ARM64 and macOS Intel targets compile; Windows ARM64 also passes
+strict target-specific Clippy. Portable ZIP, native macOS installer and app ZIP
+were assembled locally and their payloads, versions and plist metadata inspected.
+Native credential success, privileged service installation and system proxy
+changes still use the integration fixtures described above. Linux runtime and
+other Windows runtime checks are supplied by CI and were not executed on this
+macOS host.
