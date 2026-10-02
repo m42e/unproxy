@@ -16,6 +16,17 @@ struct CacheEntry {
     value: Option<IpAddr>,
     at: Instant,
 }
+fn preferred_ip(ips: impl IntoIterator<Item = IpAddr>) -> Option<IpAddr> {
+    let mut first = None;
+    for ip in ips {
+        if ip.is_ipv4() {
+            return Some(ip);
+        }
+        first.get_or_insert(ip);
+    }
+    first
+}
+
 pub struct Pac {
     context: Context,
     ip: Arc<Mutex<IpAddr>>,
@@ -71,7 +82,7 @@ impl Pac {
                         let ip = (host.as_str(), 0)
                             .to_socket_addrs()
                             .ok()
-                            .and_then(|mut i| i.next().map(|s| s.ip()));
+                            .and_then(|i| preferred_ip(i.map(|addr| addr.ip())));
                         c.insert(host, CacheEntry { value: ip, at: now });
                         ip
                     }
@@ -261,5 +272,19 @@ impl Policy {
             .send(Job::Snapshot(tx))
             .map_err(|_| anyhow!("PAC worker stopped"))?;
         rx.await.context("PAC worker stopped")
+    }
+}
+
+#[cfg(test)]
+mod dns_preference_tests {
+    use super::preferred_ip;
+    use std::net::IpAddr;
+    #[test]
+    fn prefers_ipv4_and_falls_back_to_ipv6() {
+        let addrs = ["::1", "192.0.2.1", "192.0.2.2"].map(|s| s.parse::<IpAddr>().unwrap());
+        assert_eq!(preferred_ip(addrs), Some("192.0.2.1".parse().unwrap()));
+        let addrs = ["::1", "2001:db8::1"].map(|s| s.parse::<IpAddr>().unwrap());
+        assert_eq!(preferred_ip(addrs), Some("::1".parse().unwrap()));
+        assert_eq!(preferred_ip([]), None);
     }
 }
