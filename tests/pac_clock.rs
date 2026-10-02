@@ -93,3 +93,70 @@ fn invalid_helpers_throw_and_domains_obey_label_boundaries_and_case() {
         check("2026-10-02T12:00:00Z", expression);
     }
 }
+
+#[test]
+fn reversed_weekday_and_hour_pairs_match_only_their_endpoints() {
+    let weekdays = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+    for gmt in [false, true] {
+        for day in 0..7 {
+            let date_expr = if gmt {
+                format!("new RealDate(Date.UTC(2026, 9, {}))", 4 + day)
+            } else {
+                format!("new RealDate(2026, 9, {})", 4 + day)
+            };
+            let expected_day = if gmt { "getUTCDay" } else { "getDay" };
+            let expression = format!(
+                "(()=>{{const d={date_expr}; Date=class extends RealDate{{constructor(...a){{super(...(a.length?a:[d]))}} static now(){{return d.getTime()}}}}; const v=new Date().{expected_day}(); const w={weekdays:?}; for(let x=0;x<7;x++)for(let y=0;y<7;y++){{const ordered=x<=y, expect=ordered?(v>=x&&v<=y):(v===x||v===y), got=weekdayRange(w[x],w[y]{gmt_arg}); if(got!==expect)throw Error(x+','+y)}} return true}})()",
+                gmt_arg = if gmt { ", 'GMT'" } else { "" },
+            );
+            check("2026-10-04T12:00:00Z", &expression);
+        }
+        for hour in 0..24 {
+            let instant = if gmt {
+                format!("new RealDate(Date.UTC(2026, 9, 2, {hour}))")
+            } else {
+                format!("new RealDate(2026, 9, 2, {hour})")
+            };
+            let getter = if gmt { "getUTCHours" } else { "getHours" };
+            let expression = format!(
+                "(()=>{{const d={instant}; Date=class extends RealDate{{constructor(...a){{super(...(a.length?a:[d]))}} static now(){{return d.getTime()}}}}; const v=new Date().{getter}(); for(let x=0;x<24;x++)for(let y=0;y<24;y++){{const expect=x<=y?(v>=x&&v<=y):(v===x||v===y), got=timeRange(x,y{gmt_arg}); if(got!==expect)throw Error(x+','+y)}} return true}})()",
+                gmt_arg = if gmt { ", 'GMT'" } else { "" },
+            );
+            check("2026-10-02T12:00:00Z", &expression);
+        }
+    }
+}
+
+#[test]
+fn exact_date_permutations_and_mismatches_work_in_local_and_gmt() {
+    for gmt in [false, true] {
+        let suffix = if gmt { ", 'GMT'" } else { "" };
+        for good in [
+            "dateRange(2, 'OCT')",
+            "dateRange('OCT', 2)",
+            "dateRange(2, 'OCT', 2026)",
+            "dateRange(2, 2026, 'OCT')",
+            "dateRange('OCT', 2, 2026)",
+            "dateRange('OCT', 2026, 2)",
+            "dateRange(2026, 2, 'OCT')",
+            "dateRange(2026, 'OCT', 2)",
+        ] {
+            check(
+                "2026-10-02T12:00:00Z",
+                &format!("{good}{suffix}"),
+            );
+        }
+        for bad in [
+            "dateRange(3, 'OCT')",
+            "dateRange('SEP', 2)",
+            "dateRange(2, 'OCT', 2025)",
+            "dateRange(3, 'OCT', 2026)",
+            "dateRange(2, 'SEP', 2026)",
+        ] {
+            check(
+                "2026-10-02T12:00:00Z",
+                &format!("!{bad}{suffix}"),
+            );
+        }
+    }
+}

@@ -29,7 +29,6 @@ function dateRange(...a) {
   else if(a.length===2&&t.includes('d')&&t.includes('m')){return cd===a[t.indexOf('d')]&&cm===month(a[t.indexOf('m')]);}
   else if(a.length===3&&t.includes('d')&&t.includes('m')&&t.includes('y')){return cd===a[t.indexOf('d')]&&cm===month(a[t.indexOf('m')])&&cy===a[t.indexOf('y')];}
   else if(a.length===2&&t[0]===t[1]){if(t[0]==='d')lo=mk(cy,cm,a[0]),hi=mk(cy,cm,a[1],true);else if(t[0]==='m')lo=mk(cy,month(a[0]),1),hi=mk(cy,month(a[1])+1,0,true);else lo=mk(a[0],0,1),hi=mk(a[1],11,31,true);}
-  else if(a.length===2&&t[0]==='d'&&t[1]==='m'){lo=mk(cy,cm,a[0]);hi=mk(cy,month(a[1])+1,0,true);}
   else if(a.length===2&&t[0]==='m'&&t[1]==='y'){lo=mk(a[1],month(a[0]),1);hi=mk(a[1],11,31,true);}
   else if(a.length===4&&t.join('')==='dmdm'){lo=mk(cy,month(a[1]),a[0]);hi=mk(cy,month(a[3]),a[2],true);}
   else if(a.length===4&&t.join('')==='mymy'){lo=mk(a[1],month(a[0]),1);hi=mk(a[3],month(a[2])+1,0,true);}
