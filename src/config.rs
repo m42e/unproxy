@@ -160,10 +160,8 @@ impl MainArgs {
 fn merged_args(args: Vec<std::ffi::OsString>, read_settings: bool) -> Vec<std::ffi::OsString> {
     let program = args.first().cloned().unwrap_or_else(|| "unproxy".into());
     let mut all = vec![program];
-    if read_settings {
-        if let Some(p) = settings_path() {
-            all.extend(token_file(&p).into_iter().map(Into::into));
-        }
+    if read_settings && let Some(p) = settings_path() {
+        all.extend(token_file(&p).into_iter().map(Into::into));
     }
     all.extend(args.into_iter().skip(1));
     all

@@ -27,3 +27,15 @@ async fn basic_and_no_auth_headers() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn netrc_supports_an_explicitly_empty_password_and_rejects_missing_default_login() {
+    let store = CredentialStore::parse("machine proxy.test login user password \"\"").unwrap();
+    let value = AuthFactory::basic(store)
+        .authorization("proxy.test")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(value, "Basic dXNlcjo=");
+    assert!(CredentialStore::parse("default password empty").is_err());
+}

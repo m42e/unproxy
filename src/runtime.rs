@@ -51,22 +51,26 @@ pub async fn run(a: MainArgs) -> Result<()> {
     } else {
         None
     };
-    if let Some(p) = a.pac_file.as_deref() {
-        if !p.starts_with("http://") && !p.starts_with("https://") && !Path::new(p).is_file() {
-            return Err(anyhow!("PAC file does not exist: {p}"));
-        }
+    if let Some(p) = a.pac_file.as_deref()
+        && !p.starts_with("http://")
+        && !p.starts_with("https://")
+        && !Path::new(p).is_file()
+    {
+        return Err(anyhow!("PAC file does not exist: {p}"));
     }
     let policy = Arc::new(Policy::new(None)?);
     if let Some(ip) = a.my_ip_address.as_deref() {
         policy.set_ip(ip.parse()?).await?;
     }
     let auth = load_auth(&a)?;
-    let mut options = ConnectionOptions::default();
-    options.auth = auth;
-    options.keepalive = Keepalive {
-        time: a.client_tcp_keepalive_time,
-        interval: a.client_tcp_keepalive_interval,
-        retries: a.client_tcp_keepalive_retries,
+    let options = ConnectionOptions {
+        auth,
+        keepalive: Keepalive {
+            time: a.client_tcp_keepalive_time,
+            interval: a.client_tcp_keepalive_interval,
+            retries: a.client_tcp_keepalive_retries,
+        },
+        ..ConnectionOptions::default()
     };
     let server_keepalive = Keepalive {
         time: a.server_tcp_keepalive_time,

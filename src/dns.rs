@@ -187,6 +187,17 @@ pub async fn doh_on_stream(
     Ok(response.into_body().collect().await?.to_bytes().to_vec())
 }
 
+/// Tell whether an authority spells an explicit port, including malformed ports.
+pub fn authority_has_explicit_port(authority: &str) -> bool {
+    let a = authority.rsplit('@').next().unwrap_or(authority);
+    if let Some(rest) = a.strip_prefix('[') {
+        return rest
+            .find(']')
+            .is_some_and(|i| rest[i + 1..].starts_with(':'));
+    }
+    a.rsplit_once(':').is_some()
+}
+
 /// Validate an HTTPS DNS endpoint URI and all explicitly supplied ports.
 pub fn validate_secondary_uri(uri: &http::Uri) -> Result<()> {
     if uri.scheme_str() != Some("https") {
@@ -195,10 +206,12 @@ pub fn validate_secondary_uri(uri: &http::Uri) -> Result<()> {
     let authority = uri
         .authority()
         .ok_or_else(|| anyhow!("secondary DNS URI requires a host"))?;
-    if authority.host().is_empty() {
-        return Err(anyhow!("secondary DNS URI requires a host"));
+    if authority.host().is_empty() || authority.as_str().contains('@') {
+        return Err(anyhow!(
+            "secondary DNS URI requires a host and cannot contain user information"
+        ));
     }
-    if authority.port().is_some() && authority.port_u16().is_none() {
+    if authority_has_explicit_port(authority.as_str()) && authority.port_u16().is_none() {
         return Err(anyhow!("invalid secondary DNS port"));
     }
     if authority.port_u16() == Some(0) {

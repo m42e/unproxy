@@ -70,12 +70,12 @@ async fn main() -> Result<()> {
         "https" => 443,
         _ => return Err(anyhow!("proxy URL must use HTTP or HTTPS")),
     };
-    let port = match authority.port() {
-        Some(port) => port
-            .as_str()
-            .parse::<u16>()
-            .map_err(|_| anyhow!("invalid proxy port"))?,
-        None => default_port,
+    let port = if unproxy::dns::authority_has_explicit_port(authority.as_str()) {
+        authority
+            .port_u16()
+            .ok_or_else(|| anyhow!("invalid proxy port"))?
+    } else {
+        default_port
     };
     if port == 0 {
         return Err(anyhow!("proxy port must be nonzero"));

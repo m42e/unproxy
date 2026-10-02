@@ -60,13 +60,20 @@ impl CredentialStore {
                 i += 1;
                 match key {
                     "login" | "user" => {
-                        login = Some(t.get(i).ok_or_else(|| anyhow!("missing login"))?.clone());
+                        let value = t
+                            .get(i)
+                            .filter(|v| v.as_str() != "machine" && v.as_str() != "default")
+                            .ok_or_else(|| anyhow!("missing login"))?;
+                        login = Some(value.clone());
                         i += 1
                     }
                     "password" | "passwd" => {
-                        password =
-                            Some(t.get(i).ok_or_else(|| anyhow!("missing password"))?.clone());
-                        i += 1
+                        if i < t.len() && t[i] != "machine" && t[i] != "default" {
+                            password = Some(t[i].clone());
+                            i += 1;
+                        } else {
+                            password = Some(String::new());
+                        }
                     }
                     "account" => {
                         if i < t.len() {
@@ -79,7 +86,8 @@ impl CredentialStore {
             if let Some(host) = host {
                 let u = login.ok_or_else(|| anyhow!("machine {host} has no login"))?;
                 h.insert(host, (u, password.unwrap_or_default()));
-            } else if let Some(u) = login {
+            } else {
+                let u = login.ok_or_else(|| anyhow!("default entry has no login"))?;
                 d = Some((u, password.unwrap_or_default()));
             }
         }
@@ -120,54 +128,68 @@ impl CredentialStore {
         m.hosts.get(host).cloned().or_else(|| m.default.clone())
     }
 }
-fn netrc_tokens(s: &str) -> Result<Vec<String>> {
-    let (mut o, mut c) = (vec![], String::new());
-    let (mut quote, mut esc) = (None, false);
-    let mut it = s.chars().peekable();
-    while let Some(x) = it.next() {
-        if esc {
-            c.push(x);
-            esc = false;
+fn netrc_tokens(input: &str) -> Result<Vec<String>> {
+    let (mut tokens, mut current) = (Vec::new(), String::new());
+    let (mut quote, mut escaped, mut active) = (None, false, false);
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if escaped {
+            current.push(ch);
+            active = true;
+            escaped = false;
             continue;
         }
-        if x == '\\' {
-            esc = true;
+        if ch == '\\' {
+            escaped = true;
+            active = true;
             continue;
         }
         if let Some(q) = quote {
-            if x == q {
+            if ch == q {
                 quote = None
             } else {
-                c.push(x)
+                current.push(ch)
             };
+            active = true;
             continue;
         }
-        if x == '"' || x == '\'' {
-            quote = Some(x);
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            active = true;
             continue;
         }
-        if x == '#' {
-            while it.next().is_some_and(|z| z != '\n') {}
-            if !c.is_empty() {
-                o.push(std::mem::take(&mut c))
-            };
+        if ch == '#' {
+            if active {
+                tokens.push(std::mem::take(&mut current));
+                active = false
+            }
+            for c in chars.by_ref() {
+                if c == '\n' {
+                    break;
+                }
+            }
             continue;
         }
-        if x.is_whitespace() {
-            if !c.is_empty() {
-                o.push(std::mem::take(&mut c))
+        if ch.is_whitespace() {
+            if active {
+                tokens.push(std::mem::take(&mut current));
+                active = false
             }
         } else {
-            c.push(x)
+            current.push(ch);
+            active = true
         }
+    }
+    if escaped {
+        return Err(anyhow!("unterminated netrc escape"));
     }
     if quote.is_some() {
         return Err(anyhow!("unterminated netrc quote"));
     }
-    if !c.is_empty() {
-        o.push(c)
+    if active {
+        tokens.push(current)
     }
-    Ok(o)
+    Ok(tokens)
 }
 
 #[derive(Clone, Default)]
@@ -249,7 +271,7 @@ impl AuthFactory {
         )
         .await
         .map_err(|_| anyhow!("authorization timed out for {timeout_host}"))?
-        .context("authorization worker failed")?
+        .with_context(|| format!("generating authorization for upstream {timeout_host}"))?
     }
 }
 
@@ -275,6 +297,29 @@ struct GssOid {
 }
 #[cfg(all(feature = "negotiate", unix))]
 type GssStatus = i32;
+#[cfg(all(feature = "negotiate", unix))]
+type GssInitSecContext = unsafe extern "C" fn(
+    *mut u32,
+    *mut std::ffi::c_void,
+    *mut *mut std::ffi::c_void,
+    *mut std::ffi::c_void,
+    *mut GssOid,
+    u32,
+    u32,
+    *mut std::ffi::c_void,
+    *mut GssBuf,
+    *mut *mut GssOid,
+    *mut GssBuf,
+    *mut u32,
+    *mut u32,
+) -> GssStatus;
+#[cfg(all(feature = "negotiate", unix))]
+type GssReleaseBuffer = unsafe extern "C" fn(*mut u32, *mut GssBuf) -> GssStatus;
+#[cfg(all(feature = "negotiate", unix))]
+type GssDeleteContext =
+    unsafe extern "C" fn(*mut u32, *mut *mut std::ffi::c_void, *mut GssBuf) -> GssStatus;
+#[cfg(all(feature = "negotiate", unix))]
+type GssReleaseName = unsafe extern "C" fn(*mut u32, *mut *mut std::ffi::c_void) -> GssStatus;
 #[cfg(all(feature = "negotiate", unix))]
 impl NegotiateContext {
     pub fn new(host: &str) -> Result<Self> {
@@ -332,23 +377,7 @@ impl NegotiateContext {
     }
     pub fn step(&mut self, server_token: Option<&[u8]>) -> Result<Option<Vec<u8>>> {
         unsafe {
-            let f: libloading::Symbol<
-                unsafe extern "C" fn(
-                    *mut u32,
-                    *mut std::ffi::c_void,
-                    *mut *mut std::ffi::c_void,
-                    *mut std::ffi::c_void,
-                    *mut GssOid,
-                    u32,
-                    u32,
-                    *mut std::ffi::c_void,
-                    *mut GssBuf,
-                    *mut *mut GssOid,
-                    *mut GssBuf,
-                    *mut u32,
-                    *mut u32,
-                ) -> GssStatus,
-            > = self
+            let f: libloading::Symbol<GssInitSecContext> = self
                 .lib
                 .get(b"gss_init_sec_context\0")
                 .context(format!("loading GSSAPI context step for {}", self.host))?;
@@ -408,15 +437,11 @@ impl NegotiateContext {
 }
 #[cfg(all(feature = "negotiate", unix))]
 unsafe fn release_gss_buffer(lib: &libloading::Library, minor: &mut u32, buf: &mut GssBuf) {
-    if !buf.value.is_null() {
-        if let Ok(f) = unsafe {
-            lib.get::<unsafe extern "C" fn(*mut u32, *mut GssBuf) -> GssStatus>(
-                b"gss_release_buffer\0",
-            )
-        } {
-            unsafe {
-                f(minor, buf);
-            }
+    if !buf.value.is_null()
+        && let Ok(f) = unsafe { lib.get::<GssReleaseBuffer>(b"gss_release_buffer\0") }
+    {
+        unsafe {
+            f(minor, buf);
         }
     }
 }
@@ -476,41 +501,28 @@ fn gss_status_text(lib: &libloading::Library, value: u32, kind: i32) -> String {
 impl Drop for NegotiateContext {
     fn drop(&mut self) {
         unsafe {
-            if !self.ctx.is_null() {
-                if let Ok(delete) =
-                    self.lib.get::<unsafe extern "C" fn(
-                        *mut u32,
-                        *mut *mut std::ffi::c_void,
-                        *mut GssBuf,
-                    ) -> GssStatus>(b"gss_delete_sec_context\0")
+            if !self.ctx.is_null()
+                && let Ok(delete) = self
+                    .lib
+                    .get::<GssDeleteContext>(b"gss_delete_sec_context\0")
+            {
+                let mut minor = 0;
+                let mut out = GssBuf {
+                    len: 0,
+                    value: std::ptr::null_mut(),
+                };
+                delete(&mut minor, &mut self.ctx, &mut out);
+                if !out.value.is_null()
+                    && let Ok(release) = self.lib.get::<GssReleaseBuffer>(b"gss_release_buffer\0")
                 {
-                    let mut minor = 0;
-                    let mut out = GssBuf {
-                        len: 0,
-                        value: std::ptr::null_mut(),
-                    };
-                    delete(&mut minor, &mut self.ctx, &mut out);
-                    if !out.value.is_null() {
-                        if let Ok(release) =
-                            self.lib.get::<unsafe extern "C" fn(*mut u32, *mut GssBuf)>(
-                                b"gss_release_buffer\0",
-                            )
-                        {
-                            release(&mut minor, &mut out)
-                        }
-                    }
+                    release(&mut minor, &mut out);
                 }
             }
-            if !self.target.is_null() {
-                if let Ok(release) = self
-                    .lib
-                    .get::<unsafe extern "C" fn(*mut u32, *mut *mut std::ffi::c_void) -> GssStatus>(
-                        b"gss_release_name\0",
-                    )
-                {
-                    let mut minor = 0;
-                    release(&mut minor, &mut self.target);
-                }
+            if !self.target.is_null()
+                && let Ok(release) = self.lib.get::<GssReleaseName>(b"gss_release_name\0")
+            {
+                let mut minor = 0;
+                release(&mut minor, &mut self.target);
             }
         }
     }

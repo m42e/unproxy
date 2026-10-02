@@ -79,3 +79,18 @@ async fn exchange_returns_primary_without_fallback_when_it_has_answers() {
     assert_eq!(parse_counts(&response).unwrap().answers, 1);
     task.await.unwrap();
 }
+
+#[test]
+fn secondary_uri_requires_verified_https_and_usable_authority() {
+    let valid: http::Uri = "https://resolver.test/dns-query".parse().unwrap();
+    assert!(unproxy::dns::validate_secondary_uri(&valid).is_ok());
+    let plain: http::Uri = "http://resolver.test/dns-query".parse().unwrap();
+    assert!(unproxy::dns::validate_secondary_uri(&plain).is_err());
+    let port_zero: http::Uri = "https://resolver.test:0/dns-query".parse().unwrap();
+    assert!(unproxy::dns::validate_secondary_uri(&port_zero).is_err());
+    assert!(unproxy::dns::authority_has_explicit_port(
+        "resolver.test:bad"
+    ));
+    assert!(unproxy::dns::authority_has_explicit_port("[::1]:443"));
+    assert!(!unproxy::dns::authority_has_explicit_port("[::1]"));
+}
