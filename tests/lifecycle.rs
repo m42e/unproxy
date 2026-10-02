@@ -156,7 +156,7 @@ async fn startup_serves_direct_while_remote_policy_is_still_loading() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn direct_signal_reload_and_fatal_reload_error_follow_configured_policy() {
+async fn direct_signal_reload_and_failed_reload_preserve_service() {
     let temp = tempfile::tempdir().unwrap();
     let netrc = temp.path().join("netrc");
     std::fs::write(&netrc, "").unwrap();
@@ -190,10 +190,13 @@ async fn direct_signal_reload_and_fatal_reload_error_follow_configured_policy() 
     await_status(address, origin_address, 502).await;
     std::fs::remove_file(&pac).unwrap();
     assert_eq!(unsafe { libc::kill(pid, libc::SIGHUP) }, 0);
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(status.code(), Some(1));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(child.try_wait().unwrap().is_none());
+    assert_eq!(response_status(address, origin_address).await, 502);
+    std::fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGHUP) }, 0);
+    await_status(address, origin_address, 200).await;
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
     origin_task.abort();
 }

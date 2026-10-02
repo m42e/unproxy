@@ -114,8 +114,20 @@ pub async fn run(a: MainArgs) -> Result<()> {
             _=term.recv()=>break false,
             _=context.shutdown_notified()=>break true,
             loaded=&mut initial,if initial_pending=>{initial_pending=false;match loaded{Ok(s)=>if let Err(e)=policy.set_script(s).await{tracing::error!(%e,"PAC load failed; using direct policy")},Err(e)=>tracing::error!(%e,"PAC load failed; using direct policy")}},
-            _=hup.recv()=>{match load_pac(a.pac_file.as_deref(),discovered.as_deref()).await{Ok(s)=>if let Err(e)=policy.set_script(s).await{context.shutdown();let _=context.wait_timeout(Duration::from_secs(a.graceful_shutdown_timeout)).await;return Err(e).context("PAC reload failed")},Err(e)=>{context.shutdown();let _=context.wait_timeout(Duration::from_secs(a.graceful_shutdown_timeout)).await;return Err(e).context("PAC reload failed")}};policy.set_ip(effective_ip).await?;},
-            _=direct.recv()=>{policy.set_script(None).await?;policy.set_ip(effective_ip).await?;}
+            _=hup.recv()=>{
+                let result = match load_pac(a.pac_file.as_deref(), discovered.as_deref()).await {
+                    Ok(script) => policy.set_script(script).await,
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = result {
+                    tracing::error!(source=?a.pac_file, %error, "PAC reload failed; retaining previous policy");
+                }
+            },
+            _=direct.recv()=>{
+                if let Err(error) = policy.set_script(None).await {
+                    tracing::error!(%error, "direct mode failed; retaining previous policy");
+                }
+            }
         }
     };
     #[cfg(not(unix))]
