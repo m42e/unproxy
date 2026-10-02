@@ -1,6 +1,6 @@
 use clap::Parser;
 use unproxy::config::{MainArgs, token_file};
-use std::{fs, path::PathBuf};
+use std::fs;
 #[test]
 fn defaults_and_listener_validation() {
     let a = MainArgs::try_parse_from(["unproxy"]).unwrap();
@@ -12,7 +12,7 @@ fn defaults_and_listener_validation() {
 }
 #[test]
 fn settings_are_whitespace_tokens() {
-    let p = PathBuf::from(std::env::temp_dir()).join("unproxyrc-test");
+    let p = std::env::temp_dir().join("unproxyrc-test");
     fs::write(
         &p,
         "# comment\n --listen 127.0.0.1:4567  \n\n--direct-fallback\n",

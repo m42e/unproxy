@@ -35,15 +35,15 @@ fn config() -> Option<PathBuf> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut argv = vec![env::args_os().next().unwrap_or_default()];
-    if let Some(p) = config() {
-        if let Ok(s) = fs::read_to_string(p) {
-            for l in s
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            {
-                argv.extend(l.split_ascii_whitespace().map(Into::into));
-            }
+    if let Some(p) = config()
+        && let Ok(s) = fs::read_to_string(p)
+    {
+        for l in s
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            argv.extend(l.split_ascii_whitespace().map(Into::into));
         }
     }
     argv.extend(env::args_os().skip(1));

@@ -25,8 +25,11 @@ server.wait().await;
 Routes preserve order and repeats; Endpoint parses/displays bracketed IPv6,
 Destination normalizes URI/PAC input, and PathOrUri distinguishes exact HTTP(S)
 prefixes from filesystem paths. ConnectionOptions accepts a custom native TLS
-connector, AuthFactory and outbound keepalive settings. The connection service
-supports TCP, proxy TLS, CONNECT and direct destination TLS for reusable callers.
+connector, AuthFactory and outbound keepalive settings. The `connection::Connection` service supports TCP, proxy TLS, CONNECT and direct
+destination TLS, implements asynchronous read/write, and retains route identity.
+Its HTTP sender applies upstream credentials only on a forward-proxy transport.
+`access::AccessEntry` provides typed timestamps, outcomes, real elapsed seconds
+and safe event formatting; `Context::publish_access` publishes these entries.
 The primary proxy intentionally does not add origin TLS to absolute-form HTTPS
 requests: use client CONNECT for that flow.
 
@@ -38,6 +41,7 @@ The server supports application-owned listeners/streams, peer-aware sessions,
 live bounded event subscriptions and programmatic shutdown/completion.
 
 For a source or embedding application, create/replace the policy explicitly,
-load PAC text with net::fetch_remote_pac or filesystem I/O, and share it through
-Policy. DNS wire parsing and exchange APIs similarly operate independently of
+configure `ContextBuilder::inline_pac` or `pac_source`, or use the live context
+load/reload/clear methods. Source loading occurs asynchronously after binding.
+`serve_stream` and `serve_connections` support application-owned transports. DNS wire parsing and exchange APIs similarly operate independently of
 the companion CLI. See cargo doc --no-deps for signatures and examples.

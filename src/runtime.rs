@@ -107,29 +107,33 @@ pub async fn run(a: MainArgs) -> Result<()> {
     #[cfg(unix)]
     let mut term = signal(SignalKind::terminate())?;
     let mut initial = Box::pin(load_pac(a.pac_file.as_deref(), discovered.as_deref()));
-    #[allow(unused_mut)]
     let mut initial_pending = a.pac_file.is_some() || discovered.is_some();
     #[cfg(unix)]
-    loop {
+    let listener_failed = loop {
         tokio::select! {
-            _=tokio::signal::ctrl_c()=>break,
-            _=term.recv()=>break,
+            _=tokio::signal::ctrl_c()=>break false,
+            _=term.recv()=>break false,
+            _=context.shutdown_notified()=>break true,
             loaded=&mut initial,if initial_pending=>{initial_pending=false;match loaded{Ok(s)=>if let Err(e)=policy.set_script(s).await{tracing::error!(%e,"PAC load failed; using direct policy")},Err(e)=>tracing::error!(%e,"PAC load failed; using direct policy")}},
             _=hup.recv()=>{match load_pac(a.pac_file.as_deref(),discovered.as_deref()).await{Ok(s)=>if let Err(e)=policy.set_script(s).await{context.shutdown();let _=context.wait_timeout(Duration::from_secs(a.graceful_shutdown_timeout)).await;return Err(e).context("PAC reload failed")},Err(e)=>{context.shutdown();let _=context.wait_timeout(Duration::from_secs(a.graceful_shutdown_timeout)).await;return Err(e).context("PAC reload failed")}};policy.set_ip(crate::platform::default_interface_ipv4()).await?;},
             _=direct.recv()=>{policy.set_script(None).await?;policy.set_ip(crate::platform::default_interface_ipv4()).await?;}
         }
-    }
+    };
     #[cfg(not(unix))]
-    if initial_pending {
+    let listener_failed = loop {
         tokio::select! {
-            _=tokio::signal::ctrl_c()=>{let _=drain(context,Duration::from_secs(a.graceful_shutdown_timeout)).await;return Ok(())},
-            loaded=&mut initial=>{match loaded{Ok(s)=>if let Err(e)=policy.set_script(s).await{tracing::error!(%e,"PAC load failed; using direct policy")},Err(e)=>tracing::error!(%e,"PAC load failed; using direct policy")}}
+            _=tokio::signal::ctrl_c()=>break false,
+            _=context.shutdown_notified()=>break true,
+            loaded=&mut initial,if initial_pending=>{initial_pending=false;match loaded{Ok(s)=>if let Err(e)=policy.set_script(s).await{tracing::error!(%e,"PAC load failed; using direct policy")},Err(e)=>tracing::error!(%e,"PAC load failed; using direct policy")}}
         }
-    }
-    #[cfg(not(unix))]
-    tokio::signal::ctrl_c().await?;
+    };
     if !drain(context, Duration::from_secs(a.graceful_shutdown_timeout)).await {
         tracing::warn!("graceful shutdown timed out");
+    }
+    if listener_failed {
+        return Err(anyhow!(
+            "proxy listener terminated after repeated accept failures"
+        ));
     }
     Ok(())
 }
