@@ -5,7 +5,9 @@
 //! callbacks are delivered on the main thread's run loop.
 
 use std::marker::PhantomData;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+#[cfg(target_os = "macos")]
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 /// A native observation of the organization's Kerberos internal network.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,7 +40,7 @@ impl NotificationAdapter {
 
     /// Pump the macOS default run-loop mode for up to 100 ms.
     ///
-    /// Call this periodically from the same main thread that called [`start`].
+    /// Call this periodically from the same main thread that called [`Self::start`].
     /// It is a no-op on other platforms.
     pub fn pump(&mut self) {
         #[cfg(target_os = "macos")]

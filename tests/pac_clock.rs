@@ -141,10 +141,7 @@ fn exact_date_permutations_and_mismatches_work_in_local_and_gmt() {
             "dateRange(2026, 2, 'OCT')",
             "dateRange(2026, 'OCT', 2)",
         ] {
-            check(
-                "2026-10-02T12:00:00Z",
-                &format!("{good}{suffix}"),
-            );
+            check("2026-10-02T12:00:00Z", &format!("{good}{suffix}"));
         }
         for bad in [
             "dateRange(3, 'OCT')",
@@ -153,10 +150,7 @@ fn exact_date_permutations_and_mismatches_work_in_local_and_gmt() {
             "dateRange(3, 'OCT', 2026)",
             "dateRange(2, 'SEP', 2026)",
         ] {
-            check(
-                "2026-10-02T12:00:00Z",
-                &format!("!{bad}{suffix}"),
-            );
+            check("2026-10-02T12:00:00Z", &format!("!{bad}{suffix}"));
         }
     }
 }

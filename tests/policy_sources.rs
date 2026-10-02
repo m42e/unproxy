@@ -83,8 +83,13 @@ async fn ordered_sources_mix_symlink_and_http() {
     let url = format!("http://{}/proxy.pac", remote.local_addr().unwrap());
     let fetch = tokio::spawn(async move {
         let (mut stream, _) = remote.accept().await.unwrap();
-        let mut head = [0; 4096];
-        stream.read(&mut head).await.unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).await.unwrap();
+            head.push(byte[0]);
+            assert!(head.len() < 4096);
+        }
         let body = script("PROXY remote.test:3128");
         stream
             .write_all(
