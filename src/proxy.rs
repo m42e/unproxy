@@ -141,7 +141,15 @@ impl ContextBuilder {
         self.inline_script = None;
         self
     }
+    async fn initialize_policy(&self) -> Result<()> {
+        if let Some(source) = &self.pac_source {
+            let script = load_pac_source(source).await?;
+            self.policy.set_script(Some(script)).await?;
+        }
+        Ok(())
+    }
     pub async fn bind(mut self) -> Result<Context> {
+        self.initialize_policy().await?;
         let mut listeners = std::mem::take(&mut self.sockets);
         let addrs = if !listeners.is_empty() {
             vec![]
@@ -183,7 +191,6 @@ impl ContextBuilder {
             }));
         }
         let pac_source = self.pac_source.clone();
-        let pac_load = spawn_pac_load(pac_source.clone(), self.policy.clone());
         Ok(Context {
             local_addrs,
             events,
@@ -193,29 +200,28 @@ impl ContextBuilder {
             policy: self.policy.clone(),
             pac_source,
             inline_script: self.inline_script.clone(),
-            pac_load,
         })
     }
     /// Serve one already-connected client stream. The returned context exposes
     /// shutdown and completion just like a listener-backed server.
-    pub fn serve_stream<S>(self, stream: S, peer: SocketAddr) -> Context
+    pub async fn serve_stream<S>(self, stream: S, peer: SocketAddr) -> Result<Context>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        self.initialize_policy().await?;
         let (shutdown, rx) = watch::channel(false);
         let (events, _) = broadcast::channel(16);
         let tracker = TaskTracker::new();
         let policy = self.policy.clone();
         let pac_source = self.pac_source.clone();
         let inline_script = self.inline_script.clone();
-        let pac_load = spawn_pac_load(pac_source.clone(), policy.clone());
         let cfg = self;
         let ev = events.clone();
         let task_tracker = tracker.clone();
         let join = tokio::spawn(async move {
             serve_io(stream, peer, None, cfg, ev, task_tracker, rx).await;
         });
-        Context {
+        Ok(Context {
             local_addrs: vec![],
             events,
             shutdown,
@@ -224,15 +230,15 @@ impl ContextBuilder {
             policy,
             pac_source,
             inline_script,
-            pac_load,
-        }
+        })
     }
 
-    pub fn serve_connections<S, St>(self, mut input: St) -> Context
+    pub async fn serve_connections<S, St>(self, mut input: St) -> Result<Context>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
         St: futures_util::Stream<Item = std::io::Result<(S, SocketAddr)>> + Unpin + Send + 'static,
     {
+        self.initialize_policy().await?;
         let (shutdown, mut rx) = watch::channel(false);
         let (events, _) = broadcast::channel(16);
         let tracker = TaskTracker::new();
@@ -241,7 +247,6 @@ impl ContextBuilder {
         let tasks = tracker.clone();
         let policy = self.policy.clone();
         let source = self.pac_source.clone();
-        let pac_load = spawn_pac_load(source.clone(), policy.clone());
         let join = tokio::spawn(async move {
             let mut sessions = tokio::task::JoinSet::new();
             loop {
@@ -249,7 +254,7 @@ impl ContextBuilder {
             }
             while sessions.join_next().await.is_some() {}
         });
-        Context {
+        Ok(Context {
             local_addrs: vec![],
             events,
             shutdown,
@@ -258,8 +263,7 @@ impl ContextBuilder {
             policy,
             pac_source: source,
             inline_script: self.inline_script.clone(),
-            pac_load,
-        }
+        })
     }
 }
 
@@ -272,7 +276,6 @@ pub struct Context {
     policy: Arc<Policy>,
     pac_source: Option<PathOrUri>,
     inline_script: Option<String>,
-    pac_load: Option<JoinHandle<()>>,
 }
 
 async fn load_pac_source(source: &PathOrUri) -> Result<String> {
@@ -286,21 +289,6 @@ async fn load_pac_source(source: &PathOrUri) -> Result<String> {
         }
         PathOrUri::Uri(uri) => net::fetch_remote_pac(&uri.to_string()).await,
     }
-}
-
-fn spawn_pac_load(source: Option<PathOrUri>, policy: Arc<Policy>) -> Option<JoinHandle<()>> {
-    source.map(|source| {
-        tokio::spawn(async move {
-            match load_pac_source(&source).await {
-                Ok(script) => {
-                    if let Err(e) = policy.set_script(Some(script)).await {
-                        tracing::error!("loading PAC source failed: {e:#}")
-                    }
-                }
-                Err(e) => tracing::error!("loading PAC source failed: {e:#}"),
-            }
-        })
-    })
 }
 
 impl Context {
@@ -361,9 +349,6 @@ impl Context {
         for j in self.joins.drain(..) {
             let _ = j.await;
         }
-        if let Some(load) = self.pac_load.take() {
-            let _ = load.await;
-        }
         self.tracker.close();
         self.tracker.wait().await;
     }
@@ -375,18 +360,12 @@ impl Context {
             for join in &mut this.joins {
                 let _ = join.await;
             }
-            if let Some(load) = &mut this.pac_load {
-                let _ = load.await;
-            }
         })
         .await
         .is_ok();
         if !listeners {
             for join in &this.joins {
                 join.abort();
-            }
-            if let Some(load) = &this.pac_load {
-                load.abort();
             }
             for join in &mut this.joins {
                 let _ = join.await;

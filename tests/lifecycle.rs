@@ -118,17 +118,19 @@ fn runtime_products_have_usable_help_and_versions() {
 }
 
 #[tokio::test]
-async fn startup_serves_direct_while_remote_policy_is_still_loading() {
+async fn startup_waits_for_remote_policy_before_accepting_connections() {
     let temp = tempfile::tempdir().unwrap();
     let netrc = temp.path().join("netrc");
     std::fs::write(&netrc, "").unwrap();
     let remote = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let pac_address = remote.local_addr().unwrap();
     let (release, wait) = tokio::sync::oneshot::channel();
+    let (requested, request_seen) = tokio::sync::oneshot::channel();
     let fetch_task = tokio::spawn(async move {
         let (mut client, _) = remote.accept().await.unwrap();
         let mut request = [0; 1024];
         let _ = client.read(&mut request).await.unwrap();
+        requested.send(()).unwrap();
         wait.await.unwrap();
         let script = "function FindProxyForURL(){return 'DIRECT';}";
         client
@@ -144,11 +146,17 @@ async fn startup_serves_direct_while_remote_policy_is_still_loading() {
     });
     let address = reserve_address();
     let mut child = process(address, &format!("http://{pac_address}/proxy.pac"), &netrc);
+    tokio::time::timeout(Duration::from_secs(5), request_seen)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(TcpStream::connect(address).await.is_err());
+    assert!(child.try_wait().unwrap().is_none());
+    release.send(()).unwrap();
+    fetch_task.await.unwrap();
     wait_for_listener(address, &mut child).await;
     let (origin_address, origin_task) = origin().await;
     assert_eq!(response_status(address, origin_address).await, 200);
-    release.send(()).unwrap();
-    fetch_task.await.unwrap();
     child.kill().await.unwrap();
     child.wait().await.unwrap();
     origin_task.abort();

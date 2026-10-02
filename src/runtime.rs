@@ -91,6 +91,11 @@ pub async fn run(a: MainArgs) -> Result<()> {
             builder = builder.listen(addr)
         }
     }
+    let script = load_pac(a.pac_file.as_deref(), discovered.as_deref()).await?;
+    policy
+        .set_script(script)
+        .await
+        .context("initial PAC load failed")?;
     let context = builder.bind().await?;
     for addr in context.local_addrs() {
         tracing::info!(%addr,"proxy listening")
@@ -105,15 +110,12 @@ pub async fn run(a: MainArgs) -> Result<()> {
     let mut direct = signal(SignalKind::user_defined1())?;
     #[cfg(unix)]
     let mut term = signal(SignalKind::terminate())?;
-    let mut initial = Box::pin(load_pac(a.pac_file.as_deref(), discovered.as_deref()));
-    let mut initial_pending = a.pac_file.is_some() || discovered.is_some();
     #[cfg(unix)]
     let listener_failed = loop {
         tokio::select! {
             _=tokio::signal::ctrl_c()=>break false,
             _=term.recv()=>break false,
             _=context.shutdown_notified()=>break true,
-            loaded=&mut initial,if initial_pending=>{initial_pending=false;match loaded{Ok(s)=>if let Err(e)=policy.set_script(s).await{tracing::error!(%e,"PAC load failed; using direct policy")},Err(e)=>tracing::error!(%e,"PAC load failed; using direct policy")}},
             _=hup.recv()=>{
                 let result = match load_pac(a.pac_file.as_deref(), discovered.as_deref()).await {
                     Ok(script) => policy.set_script(script).await,
@@ -135,7 +137,6 @@ pub async fn run(a: MainArgs) -> Result<()> {
         tokio::select! {
             _=tokio::signal::ctrl_c()=>break false,
             _=context.shutdown_notified()=>break true,
-            loaded=&mut initial,if initial_pending=>{initial_pending=false;match loaded{Ok(s)=>if let Err(e)=policy.set_script(s).await{tracing::error!(%e,"PAC load failed; using direct policy")},Err(e)=>tracing::error!(%e,"PAC load failed; using direct policy")}}
         }
     };
     if !drain(context, Duration::from_secs(a.graceful_shutdown_timeout)).await {

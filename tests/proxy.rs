@@ -21,7 +21,9 @@ async fn supplied_stream_serves_management_and_notifies_shutdown() {
         Arc::new(Policy::new(None).unwrap()),
         ConnectionOptions::default(),
     )
-    .serve_stream(server_io, "127.0.0.1:12345".parse().unwrap());
+    .serve_stream(server_io, "127.0.0.1:12345".parse().unwrap())
+    .await
+    .unwrap();
     client
         .write_all(b"GET /missing HTTP/1.1\r\nHost: proxy.test\r\nConnection: close\r\n\r\n")
         .await
