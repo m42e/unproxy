@@ -36,6 +36,18 @@ impl Pac {
         Ok(pac)
     }
     pub fn set_script(&mut self, source: Option<&str>) -> Result<()> {
+        let mut candidate = Self {
+            context: Context::default(),
+            ip: self.ip.clone(),
+            source: None,
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            last_prune: Instant::now(),
+        };
+        candidate.install_script(source)?;
+        *self = candidate;
+        Ok(())
+    }
+    fn install_script(&mut self, source: Option<&str>) -> Result<()> {
         self.context = Context::default();
         self.cache.lock().unwrap().clear();
         self.last_prune = Instant::now();
