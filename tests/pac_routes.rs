@@ -5,7 +5,9 @@ use std::str::FromStr;
 fn proxy_directives_require_separators_and_trim_outer_whitespace() {
     assert_eq!(Route::from_str("  DIRECT \t").unwrap(), Route::Direct);
     assert_eq!(
-        Route::from_str(" HTTPS\t [2001:db8::1]:8443 ").unwrap().to_string(),
+        Route::from_str(" HTTPS\t [2001:db8::1]:8443 ")
+            .unwrap()
+            .to_string(),
         "HTTPS [2001:db8::1]:8443"
     );
     for malformed in [
@@ -19,7 +21,9 @@ fn proxy_directives_require_separators_and_trim_outer_whitespace() {
         assert!(Route::from_str(malformed).is_err(), "{malformed}");
     }
     assert_eq!(
-        Routes::from_str("PROXY proxy.example:3128; HTTPS [::1]:8443").unwrap().to_string(),
+        Routes::from_str("PROXY proxy.example:3128; HTTPS [::1]:8443")
+            .unwrap()
+            .to_string(),
         "HTTP proxy.example:3128; HTTPS [::1]:8443"
     );
 }
@@ -39,5 +43,17 @@ fn endpoint_accepts_only_well_formed_bracketed_ipv6() {
         "host name:80",
     ] {
         assert!(Endpoint::from_str(malformed).is_err(), "{malformed}");
+    }
+}
+
+#[test]
+fn rejects_mismatched_hostname_brackets_and_unicode_whitespace() {
+    for endpoint in [
+        "example]:80",
+        "example[:80",
+        "proxy\u{a0}.test:80",
+        "proxy\\evil:80",
+    ] {
+        assert!(endpoint.parse::<Endpoint>().is_err(), "{endpoint}");
     }
 }

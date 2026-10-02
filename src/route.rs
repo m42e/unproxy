@@ -50,7 +50,9 @@ impl FromStr for Endpoint {
         if host.is_empty() {
             bail!("host missing")
         }
-        if host.bytes().any(|b| b.is_ascii_whitespace()) || host.contains(['@', '/', '?', '#']) {
+        if host.chars().any(char::is_whitespace)
+            || host.contains(['@', '/', '?', '#', '[', ']', '\\'])
+        {
             bail!("invalid host in endpoint")
         }
         if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
