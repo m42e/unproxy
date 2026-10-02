@@ -49,13 +49,13 @@ impl FromStr for Endpoint {
         if host.is_empty() {
             bail!("host missing")
         }
+        if host.bytes().any(|b| b.is_ascii_whitespace()) || host.contains(['@', '/', '?', '#']) {
+            bail!("invalid host in endpoint")
+        }
         if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
             bail!("invalid numeric port")
         }
         let port = port.parse::<u16>().context("port out of range")?;
-        if port == 0 {
-            bail!("port must be nonzero")
-        }
         Ok(Self {
             host: host.to_owned(),
             port,
@@ -84,13 +84,14 @@ impl FromStr for Route {
         if s == "DIRECT" {
             return Ok(Self::Direct);
         }
-        let (kind, endpoint) = s
-            .split_once(' ')
+        let mut tokens = s.split_whitespace();
+        let kind = tokens
+            .next()
             .ok_or_else(|| anyhow!("invalid PAC directive: {s}"))?;
-        if endpoint.is_empty()
-            || endpoint.trim() != endpoint
-            || endpoint.contains(char::is_whitespace)
-        {
+        let endpoint = tokens
+            .next()
+            .ok_or_else(|| anyhow!("invalid PAC directive: {s}"))?;
+        if tokens.next().is_some() {
             bail!("invalid PAC endpoint")
         }
         let e = endpoint.parse()?;
@@ -137,10 +138,6 @@ pub struct Destination {
 }
 impl Destination {
     pub fn from_uri(uri: &Uri) -> Result<Self> {
-        let scheme = uri
-            .scheme_str()
-            .ok_or_else(|| anyhow!("URI scheme missing"))?
-            .to_ascii_lowercase();
         let authority = uri
             .authority()
             .ok_or_else(|| anyhow!("URI authority missing"))?;
@@ -148,23 +145,41 @@ impl Destination {
         if host.is_empty() {
             bail!("URI host missing")
         }
+        let scheme = match uri.scheme_str() {
+            Some(s) => s.to_ascii_lowercase(),
+            None if authority.port_u16() == Some(443) => "https".to_owned(),
+            None => "http".to_owned(),
+        };
         let default = match scheme.as_str() {
             "http" => 80,
             "https" => 443,
             _ => 0,
         };
-        let port = authority
-            .port_u16()
-            .or_else(|| (default > 0).then_some(default))
-            .ok_or_else(|| anyhow!("URI port missing or invalid"))?;
+        let port = if authority.port().is_some() {
+            authority
+                .port_u16()
+                .ok_or_else(|| anyhow!("URI port invalid"))?
+        } else {
+            (default > 0)
+                .then_some(default)
+                .ok_or_else(|| anyhow!("URI port missing"))?
+        };
         let path = match uri.path_and_query() {
             Some(p) if !p.as_str().is_empty() => p.as_str().to_owned(),
             _ => "/".into(),
         };
-        let pac_url = uri.to_string();
+        let pac_url = if uri.scheme().is_none() {
+            format!("{scheme}://{}{path}", authority.as_str())
+        } else {
+            uri.to_string()
+        };
         Ok(Self {
             endpoint: Endpoint {
-                host: host.to_owned(),
+                host: host
+                    .strip_prefix('[')
+                    .and_then(|h| h.strip_suffix(']'))
+                    .unwrap_or(host)
+                    .to_owned(),
                 port,
             },
             pac_url,

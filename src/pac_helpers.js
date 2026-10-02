@@ -30,10 +30,11 @@ function dateRange(...a) {
   else if(a.length===2&&t[0]==='d'&&t[1]==='m'){lo=mk(cy,cm,a[0]);hi=mk(cy,month(a[1])+1,0,true);}
   else if(a.length===2&&t[0]==='m'&&t[1]==='y'){lo=mk(a[1],month(a[0]),1);hi=mk(a[1],11,31,true);}
   else if(a.length===4&&t.join('')==='dmdm'){lo=mk(cy,month(a[1]),a[0]);hi=mk(cy,month(a[3]),a[2],true);}
+  else if(a.length===4&&t.join('')==='mymy'){lo=mk(a[1],month(a[0]),1);hi=mk(a[3],month(a[2])+1,0,true);}
   else if(a.length===6&&t.join('')==='dmydmy'){lo=mk(a[2],month(a[1]),a[0]);hi=mk(a[5],month(a[4]),a[3],true);}else return false;
   const now=mk(cy,cm,cd); return lo<=hi?now>=lo&&now<=hi:now>=lo||now<=hi;
 }
 function timeRange(...a) {let g=a[a.length-1]==='GMT';if(g)a.pop();if(a.length===0)return false;if(![1,2,4,6].includes(a.length))throw new Error('invalid timeRange arity');let d=new Date(),h=g?d.getUTCHours():d.getHours(),m=g?d.getUTCMinutes():d.getMinutes(),s=g?d.getUTCSeconds():d.getSeconds(),v=h*3600+m*60+s;let l,r;if(a.length===1)return h===a[0];if(a.length===2)return h>=a[0]&&h<=a[1];if(a.length===4)l=a[0]*3600+a[1]*60,r=a[2]*3600+a[3]*60+59;else l=a[0]*3600+a[1]*60+a[2],r=a[3]*3600+a[4]*60+a[5];return l<=r?v>=l&&v<=r:v>=l||v<=r;}
-function DomainTable(domains) { if(!Array.isArray(domains)) throw new TypeError('DomainTable expects an array'); this._domains=domains.map(x=>{if(typeof x!=='string')throw new TypeError('domain must be a string');return x.replace(/^[\s.]+|[\s.]+$/g,'');}); }
-DomainTable.prototype.contains=function(d){if(typeof d!=='string')throw new TypeError('domain must be a string');d=d.replace(/^[\s.]+|[\s.]+$/g,'');return this._domains.some(x=>d===x||d.endsWith('.'+x));};
+function DomainTable(domains) { if(!Array.isArray(domains)) throw new TypeError('DomainTable expects an array'); this._domains=domains.map(x=>{if(typeof x!=='string')throw new TypeError('domain must be a string');return x.replace(/^[\t\n\v\f\r .]+|[\t\n\v\f\r .]+$/g,'');}); }
+DomainTable.prototype.contains=function(d){if(typeof d!=='string')throw new TypeError('domain must be a string');d=d.replace(/^[\t\n\v\f\r .]+|[\t\n\v\f\r .]+$/g,'');return this._domains.some(x=>d===x||d.endsWith('.'+x));};
 var _dnsCache = new _DnsCache();

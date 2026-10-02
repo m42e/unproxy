@@ -28,6 +28,9 @@ fn endpoint_and_pac_directives_are_strict_and_normalized() {
             .to_string(),
         "HTTP proxy.test:8080"
     );
+    assert!("PROXYx host.test:80".parse::<Route>().is_err());
+    assert!("PROXY host.test:80 extra".parse::<Route>().is_err());
+    assert!("PROXY user@host.test:80".parse::<Route>().is_err());
 }
 
 #[test]
@@ -54,6 +57,8 @@ fn pac_state_helpers_and_ip_survive_script_replacement() {
 fn domain_table_uses_union_label_suffixes() {
     let mut p=Pac::new(Some("const t=new DomainTable([' example.org. ', 'sub.example.org']); function FindProxyForURL(){return t.contains('x.sub.example.org') && !t.contains('notexample.org') ? 'DIRECT':'BAD';}" )).unwrap();
     assert_eq!(p.evaluate("x", "x").unwrap().to_string(), "DIRECT");
+    let mut overlap=Pac::new(Some("const t=new DomainTable(['example.org','sub.example.org']); function FindProxyForURL(){return t.contains('a.example.org') && t.contains('x.sub.example.org') && !t.contains('badexample.org') ? 'DIRECT':'BAD';}" )).unwrap();
+    assert_eq!(overlap.evaluate("x", "x").unwrap().to_string(), "DIRECT");
 }
 
 #[test]
@@ -68,7 +73,10 @@ fn pac_helper_surface_covers_globs_masks_ranges_and_dns_cache_hook() {
           convert_addr('192.168.1.2')===-1062731518 &&
           isInNet('192.168.1.9','192.168.1.0','255.255.255.0') &&
           weekdayRange(wd) && dateRange(day) && dateRange(month) &&
-          timeRange(d.getHours()) && timeRange()===false &&
+          timeRange(d.getHours()) && timeRange(d.getHours(),d.getHours()) &&
+          timeRange(d.getHours(),d.getMinutes(),d.getHours(),d.getMinutes()) &&
+          timeRange(d.getHours(),d.getMinutes(),d.getSeconds(),d.getHours(),d.getMinutes(),d.getSeconds()) &&
+          timeRange()===false &&
           typeof _dnsCache==='object' && new DomainTable(['example.org','sub.example.org']).contains('x.sub.example.org')
           ? 'DIRECT' : 'PROXY fail.invalid:1';
       }
@@ -82,6 +90,16 @@ fn pac_helper_surface_covers_globs_masks_ranges_and_dns_cache_hook() {
     assert!(bad.evaluate("x", "x").is_err());
     let mut wrong = Pac::new(Some("function FindProxyForURL(){ return 4; }")).unwrap();
     assert!(wrong.evaluate("x", "x").is_err());
+    let mut wrong_helper = Pac::new(Some(
+        "function FindProxyForURL(){ shExpMatch(1,'*'); return 'DIRECT'; }",
+    ))
+    .unwrap();
+    assert!(wrong_helper.evaluate("x", "x").is_err());
+    let mut wrong_domain = Pac::new(Some(
+        "function FindProxyForURL(){ new DomainTable([1]); return 'DIRECT'; }",
+    ))
+    .unwrap();
+    assert!(wrong_domain.evaluate("x", "x").is_err());
 }
 
 #[test]
@@ -93,4 +111,58 @@ fn ip_update_preserves_javascript_state_and_dns_cache() {
         p.evaluate("x", "x").unwrap().to_string(),
         "HTTPS p.test:443"
     );
+}
+
+#[test]
+fn helper_ranges_cover_valid_arity_wrap_gmt_and_empty_cases() {
+    let mut p=Pac::new(Some(r#"
+      function FindProxyForURL(){
+        const d=new Date(), day=d.getDate(), mon=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][d.getMonth()], year=d.getFullYear();
+        const wd=['SUN','MON','TUE','WED','THU','FRI','SAT'][d.getDay()], gday=d.getUTCDate(), gmon=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][d.getUTCMonth()], gy=d.getUTCFullYear(), gwd=['SUN','MON','TUE','WED','THU','FRI','SAT'][d.getUTCDay()];
+        return dateRange(day) && dateRange(day,day) && dateRange(mon) && dateRange(mon,mon) && dateRange(year) && dateRange(year,year) && dateRange(day,mon) && dateRange(mon,year) && dateRange(day,mon,day,mon) && dateRange(mon,year,mon,year) && dateRange(day,mon,year,day,mon,year) &&
+          dateRange(gday,'GMT') && dateRange(gmon,'GMT') && dateRange(gy,'GMT') && dateRange(gday,gmon,'GMT') && dateRange(gmon,gy,'GMT') && dateRange(gday,gmon,gday,gmon,'GMT') && dateRange(gday,gmon,gy,gday,gmon,gy,'GMT') &&
+          weekdayRange(wd) && weekdayRange(wd,wd) && weekdayRange(wd,wd,'GMT') && weekdayRange('bad')===false && dateRange()===false && weekdayRange()===false && timeRange()===false &&
+          (function(){try{timeRange(1,2,3);return false}catch(_){return true}})() ? 'DIRECT':'PROXY fail.invalid:1';
+      }
+    "#)).unwrap();
+    assert_eq!(p.evaluate("x", "x").unwrap().to_string(), "DIRECT");
+}
+
+#[test]
+fn script_replacement_clears_dns_cache_and_missing_functions_error() {
+    let mut p = Pac::new(Some(
+        "function FindProxyForURL(){ dnsResolve('nonexistent.invalid'); return 'DIRECT'; }",
+    ))
+    .unwrap();
+    p.evaluate("x", "x").unwrap();
+    assert_eq!(p.cache_snapshot().len(), 1);
+    p.evaluate("x", "x").unwrap();
+    assert_eq!(p.cache_snapshot().len(), 1);
+    p.set_script(Some("function FindProxyForURL(){return 'DIRECT'}"))
+        .unwrap();
+    assert_eq!(p.cache_snapshot().len(), 0);
+    for src in [
+        "",
+        "var FindProxyForURL=1;",
+        "function FindProxyForURL(){throw new Error('no')}",
+    ] {
+        let mut q = Pac::new(Some(src)).unwrap();
+        assert!(q.evaluate("x", "x").is_err());
+    }
+}
+
+#[test]
+fn uri_destinations_supply_defaults_and_preserve_path_query() {
+    use unproxy::route::Destination;
+    let uri: http::Uri = "https://[::1]/a?q=1".parse().unwrap();
+    let d = Destination::from_uri(&uri).unwrap();
+    assert_eq!(d.endpoint.host, "::1");
+    assert_eq!(d.endpoint.port, 443);
+    assert_eq!(d.path, "/a?q=1");
+    assert_eq!(d.scheme, "https");
+    assert!(Destination::from_uri(&"file://example.test/path".parse().unwrap()).is_err());
+    let authority: http::Uri = "example.test:443".parse().unwrap();
+    let c = Destination::from_uri(&authority).unwrap();
+    assert_eq!(c.scheme, "https");
+    assert_eq!(c.pac_url, "https://example.test:443/");
 }

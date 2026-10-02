@@ -1,9 +1,16 @@
-use anyhow::{Context, Result, bail};
-use unproxy::{pac::Pac, route::Destination};
+use anyhow::{Context, Result};
+use unproxy::pac::Pac;
 use std::{env, fs};
 
 fn run() -> Result<()> {
-    let mut args = env::args().skip(1);
+    let raw_args: Vec<String> = env::args().skip(1).collect();
+    if raw_args.first().is_some_and(|s| s == "-h" || s == "--help") {
+        println!(
+            "Usage: paceval <local-pac-file> [url ...]\nEvaluate URIs using a local PAC file."
+        );
+        return Ok(());
+    }
+    let mut args = raw_args.into_iter();
     let file = args
         .next()
         .ok_or_else(|| anyhow::anyhow!("usage: paceval <local-pac-file> [url ...]"))?;
@@ -14,12 +21,12 @@ fn run() -> Result<()> {
         let host = uri
             .host()
             .ok_or_else(|| anyhow::anyhow!("URI has no host: {raw}"))?;
-        // Validate destination components for absolute URIs. Authority-form inputs
-        // remain useful to PAC scripts and use their authority as the host.
-        if uri.scheme().is_some() {
-            let _ = Destination::from_uri(&uri)
-                .with_context(|| format!("invalid destination URI {raw}"))?;
-        }
+        let host = host
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(host);
+        // PAC evaluation accepts any parseable URI form with a host, including
+        // authority-only inputs whose scheme is inferred by the proxy layer.
         let routes = pac
             .evaluate(&raw, host)
             .with_context(|| format!("evaluate {raw}"))?;

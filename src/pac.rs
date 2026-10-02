@@ -39,6 +39,7 @@ impl Pac {
         self.context = Context::default();
         self.cache.lock().unwrap().clear();
         self.last_prune = Instant::now();
+        self.source = source.map(str::to_owned);
         let dns_cache = self.cache.clone();
         let dns = unsafe {
             NativeFunction::from_closure(move |_this, args, ctx| {
@@ -120,7 +121,6 @@ impl Pac {
                 "if (typeof _dnsCache === 'undefined') var _dnsCache = new _DnsCache();",
             ))
             .map_err(|e| anyhow!("PAC cache initialization: {e}"))?;
-        self.source = source.map(str::to_owned);
         Ok(())
     }
     pub fn set_ip(&mut self, ip: IpAddr) {
