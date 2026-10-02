@@ -75,7 +75,7 @@ pub fn netrc_default() -> Option<PathBuf> {
     dirs::home_dir().map(|p| p.join(".netrc"))
 }
 #[derive(Parser, Debug, Clone)]
-#[command(name = "unproxy", version)]
+#[command(name = "unproxy", version = crate::VERSION, args_override_self = true)]
 pub struct MainArgs {
     #[arg(short='v',long="verbose",action=clap::ArgAction::Count)]
     pub verbose: u8,
@@ -91,7 +91,8 @@ pub struct MainArgs {
     pub pac_file: Option<String>,
     #[arg(long = "my-ip-address")]
     pub my_ip_address: Option<String>,
-    #[arg(long = "netrc-file", conflicts_with = "negotiate")]
+    #[arg(long = "netrc-file")]
+    #[cfg_attr(feature = "negotiate", arg(conflicts_with = "negotiate"))]
     pub netrc_file: Option<PathBuf>,
     #[cfg(feature = "negotiate")]
     #[arg(short='n',long="negotiate",num_args=0..=1,default_missing_value="",action=clap::ArgAction::Append)]
@@ -156,21 +157,36 @@ impl MainArgs {
             .collect()
     }
 }
-pub fn parse_main() -> Result<MainArgs> {
-    let mut args = env::args_os().collect::<Vec<_>>();
-    let program = args.first().cloned().unwrap_or_default();
+fn merged_args(args: Vec<std::ffi::OsString>, read_settings: bool) -> Vec<std::ffi::OsString> {
+    let program = args.first().cloned().unwrap_or_else(|| "unproxy".into());
     let mut all = vec![program];
-    if env::var_os("UNPROXY_NORC").is_none_or(|v| v.is_empty()) {
+    if read_settings {
         if let Some(p) = settings_path() {
             all.extend(token_file(&p).into_iter().map(Into::into));
         }
     }
-    all.extend(args.drain(1..));
-    Ok(MainArgs::parse_from(all))
+    all.extend(args.into_iter().skip(1));
+    all
+}
+/// Parse current process arguments and honor UNPROXY_NORC.
+pub fn parse_main() -> Result<MainArgs> {
+    let args = env::args_os().collect::<Vec<_>>();
+    let read = env::var_os("UNPROXY_NORC").is_none_or(|v| v.is_empty());
+    Ok(MainArgs::parse_from(merged_args(args, read)))
+}
+/// Parse supplied arguments, optionally adding settings tokens. Intended for embedders.
+pub fn try_parse_main_from(
+    args: Vec<std::ffi::OsString>,
+    read_settings: bool,
+) -> std::result::Result<MainArgs, clap::Error> {
+    MainArgs::try_parse_from(merged_args(args, read_settings))
+}
+pub fn parse_main_from(args: Vec<std::ffi::OsString>, read_settings: bool) -> Result<MainArgs> {
+    try_parse_main_from(args, read_settings).map_err(|e| anyhow!(e.to_string()))
 }
 pub fn verbosity_level(v: u8, q: u8) -> Option<&'static str> {
-    match (v as i16 - q as i16).clamp(-2, 2) {
-        -2 => Some("error"),
+    match v as i16 - q as i16 {
+        i16::MIN..=-2 => None,
         -1 => Some("warn"),
         0 => Some("info"),
         1 => Some("debug"),
@@ -190,6 +206,21 @@ mod tests {
                 .listen_addrs()
                 .is_err()
         )
+    }
+    #[test]
+    fn scalar_command_line_values_override_rc_values_and_verbosity_can_disable_logs() {
+        let a =
+            MainArgs::try_parse_from(["x", "--connect-timeout", "4", "--connect-timeout", "0.25"])
+                .unwrap();
+        assert_eq!(a.connect_timeout, Duration::from_millis(250));
+        assert_eq!(verbosity_level(0, 2), None);
+        assert_eq!(verbosity_level(0, 1), Some("warn"));
+        assert_eq!(verbosity_level(2, 0), Some("trace"));
+    }
+    #[test]
+    fn rejects_unusable_durations() {
+        assert!(MainArgs::try_parse_from(["x", "--connect-timeout", "NaN"]).is_err());
+        assert!(MainArgs::try_parse_from(["x", "--connect-timeout", "-1"]).is_err());
     }
     #[test]
     fn token_lines() {

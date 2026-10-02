@@ -1,17 +1,17 @@
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use std::{env, fs, net::SocketAddr, path::PathBuf};
 #[derive(Parser, Debug)]
-#[command(name="dnsdetox",version=unproxy::DNS_VERSION)]
+#[command(name="dnsdetox",version=unproxy::DNS_VERSION,args_override_self=true)]
 struct Args {
     #[arg(long, default_value_t = 5353)]
     port: u16,
     #[arg(long)]
     proxy: Option<String>,
-    #[arg(long)]
-    primary: Option<String>,
+    #[arg(long, required = true)]
+    primary: Option<SocketAddr>,
     #[arg(long, default_value = "https://8.8.8.8/dns-query")]
-    secondary: String,
+    secondary: http::Uri,
 }
 fn config() -> Option<PathBuf> {
     let mut p = vec![];
@@ -24,9 +24,11 @@ fn config() -> Option<PathBuf> {
         p.push("/usr/local/etc/dnsdetox/dnsdetoxrc".into());
     }
     #[cfg(windows)]
-    {
-        p.push("dnsdetoxrc".into());
-        p.push("dnsdetoxrc.txt".into());
+    if let Ok(e) = env::current_exe() {
+        if let Some(d) = e.parent() {
+            p.push(d.join("dnsdetoxrc"));
+            p.push(d.join("dnsdetoxrc.txt"));
+        }
     }
     p.into_iter().find(|x| fs::read(x).is_ok())
 }
@@ -46,38 +48,53 @@ async fn main() -> Result<()> {
     }
     argv.extend(env::args_os().skip(1));
     let a = Args::parse_from(argv);
-    let primary: SocketAddr = a
-        .primary
-        .ok_or_else(|| anyhow!("--primary is required (IP:PORT)"))?
-        .parse()?;
+    let primary = a.primary.ok_or_else(|| anyhow!("--primary is required"))?;
     let proxy = a
         .proxy
         .or_else(|| env::var("http_proxy").ok())
         .unwrap_or_else(|| "http://127.0.0.1:3128".into());
-    let secondary: http::Uri = a.secondary.parse()?;
+    let secondary = a.secondary;
+    unproxy::dns::validate_secondary_uri(&secondary).context("invalid secondary DNS URI")?;
     let p: http::Uri = proxy.parse()?;
-    let pe = p
+    let authority = p
         .authority()
-        .ok_or_else(|| anyhow!("proxy URL requires host and port"))?;
-    let endpoint = unproxy::route::Endpoint {
-        host: pe.host().to_string(),
-        port: pe
-            .port_u16()
-            .or_else(|| {
-                if p.scheme_str() == Some("https") {
-                    Some(443)
-                } else if p.scheme_str() == Some("http") {
-                    Some(80)
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| anyhow!("proxy URL must use HTTP or HTTPS"))?,
-    };
-    let route = match p.scheme_str() {
-        Some("http") => unproxy::route::Route::Http(endpoint),
-        Some("https") => unproxy::route::Route::Https(endpoint),
+        .ok_or_else(|| anyhow!("proxy URL requires a host"))?;
+    if authority.as_str().contains('@') {
+        return Err(anyhow!("proxy URL user information is not supported"));
+    }
+    let scheme = p
+        .scheme_str()
+        .ok_or_else(|| anyhow!("proxy URL requires an HTTP or HTTPS scheme"))?;
+    let default_port = match scheme {
+        "http" => 80,
+        "https" => 443,
         _ => return Err(anyhow!("proxy URL must use HTTP or HTTPS")),
+    };
+    let port = match authority.port() {
+        Some(port) => port
+            .as_str()
+            .parse::<u16>()
+            .map_err(|_| anyhow!("invalid proxy port"))?,
+        None => default_port,
+    };
+    if port == 0 {
+        return Err(anyhow!("proxy port must be nonzero"));
+    }
+    let endpoint = unproxy::route::Endpoint {
+        host: authority
+            .host()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_owned(),
+        port,
+    };
+    if endpoint.host.is_empty() {
+        return Err(anyhow!("proxy URL requires a host"));
+    }
+    let route = if scheme == "http" {
+        unproxy::route::Route::Http(endpoint)
+    } else {
+        unproxy::route::Route::Https(endpoint)
     };
     let options = unproxy::net::ConnectionOptions::default();
     tracing_subscriber::fmt()

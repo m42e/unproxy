@@ -53,7 +53,51 @@ fn need(b: &[u8], p: usize, n: usize) -> Result<()> {
         Ok(())
     }
 }
-fn skip_name(b: &[u8], mut p: usize) -> Result<usize> {
+fn skip_name(b: &[u8], start: usize) -> Result<usize> {
+    fn validate(
+        b: &[u8],
+        mut p: usize,
+        seen: &mut std::collections::HashSet<usize>,
+        depth: u8,
+    ) -> Result<()> {
+        if depth > 32 {
+            return Err(anyhow!("DNS compression chain too deep"));
+        }
+        let mut wire_len = 0usize;
+        loop {
+            need(b, p, 1)?;
+            let n = b[p];
+            if n & 0xc0 == 0xc0 {
+                need(b, p, 2)?;
+                let off = ((n as usize & 0x3f) << 8) | b[p + 1] as usize;
+                if off >= p {
+                    return Err(anyhow!("invalid DNS compression pointer"));
+                }
+                if !seen.insert(off) {
+                    return Err(anyhow!("DNS compression pointer loop"));
+                }
+                validate(b, off, seen, depth + 1)?;
+                return Ok(());
+            }
+            if n & 0xc0 != 0 {
+                return Err(anyhow!("invalid DNS label tag"));
+            }
+            p += 1;
+            if n == 0 {
+                return Ok(());
+            }
+            if n > 63 {
+                return Err(anyhow!("invalid DNS label length"));
+            }
+            wire_len += n as usize + 1;
+            if wire_len > 255 {
+                return Err(anyhow!("DNS name exceeds 255 bytes"));
+            }
+            need(b, p, n as usize)?;
+            p += n as usize;
+        }
+    }
+    let mut p = start;
     let mut steps = 0;
     loop {
         need(b, p, 1)?;
@@ -61,9 +105,12 @@ fn skip_name(b: &[u8], mut p: usize) -> Result<usize> {
         if n & 0xc0 == 0xc0 {
             need(b, p, 2)?;
             let off = ((n as usize & 0x3f) << 8) | b[p + 1] as usize;
-            if off >= b.len() {
-                return Err(anyhow!("DNS compression pointer out of bounds"));
+            if off >= p {
+                return Err(anyhow!("invalid DNS compression pointer"));
             }
+            let mut seen = std::collections::HashSet::new();
+            seen.insert(off);
+            validate(b, off, &mut seen, 0)?;
             return Ok(p + 2);
         }
         if n & 0xc0 != 0 {
@@ -84,7 +131,7 @@ fn skip_name(b: &[u8], mut p: usize) -> Result<usize> {
         }
     }
 }
-async fn primary(query: &[u8], server: SocketAddr) -> Result<Vec<u8>> {
+pub async fn exchange_primary(query: &[u8], server: SocketAddr) -> Result<Vec<u8>> {
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
     sock.connect(server).await?;
     let n = timeout(Duration::from_millis(500), sock.send(query))
@@ -105,26 +152,29 @@ async fn primary(query: &[u8], server: SocketAddr) -> Result<Vec<u8>> {
 pub async fn doh_on_stream(
     stream: crate::net::BoxedIo,
     host: &str,
+    host_header: &str,
     path: &str,
     query: &[u8],
+    tls_connector: &tokio_native_tls::TlsConnector,
 ) -> Result<Vec<u8>> {
     use bytes::Bytes;
     use http::{Request, header};
     use http_body_util::{BodyExt, Full};
     use hyper_util::rt::TokioIo;
-    let cx = tokio_native_tls::TlsConnector::from(native_tls::TlsConnector::new()?);
-    let tls = timeout(Duration::from_millis(1500), cx.connect(host, stream))
-        .await
-        .context("DoH TLS timeout")??;
+    let tls = timeout(
+        Duration::from_millis(1500),
+        tls_connector.connect(host, stream),
+    )
+    .await
+    .context("DoH TLS timeout")??;
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
         .await
         .context("DoH HTTP handshake")?;
     tokio::spawn(async move {
         let _ = connection.await;
     });
-    let uri: http::Uri = format!("https://{host}{path}").parse()?;
-    let request = Request::post(uri)
-        .header(header::HOST, host)
+    let request = Request::post(path)
+        .header(header::HOST, host_header)
         .header(header::ACCEPT, "application/dns-message")
         .header(header::CONTENT_TYPE, "application/dns-message")
         .body(Full::new(Bytes::copy_from_slice(query)))?;
@@ -137,15 +187,34 @@ pub async fn doh_on_stream(
     Ok(response.into_body().collect().await?.to_bytes().to_vec())
 }
 
+/// Validate an HTTPS DNS endpoint URI and all explicitly supplied ports.
+pub fn validate_secondary_uri(uri: &http::Uri) -> Result<()> {
+    if uri.scheme_str() != Some("https") {
+        return Err(anyhow!("secondary DNS URI must use HTTPS"));
+    }
+    let authority = uri
+        .authority()
+        .ok_or_else(|| anyhow!("secondary DNS URI requires a host"))?;
+    if authority.host().is_empty() {
+        return Err(anyhow!("secondary DNS URI requires a host"));
+    }
+    if authority.port().is_some() && authority.port_u16().is_none() {
+        return Err(anyhow!("invalid secondary DNS port"));
+    }
+    if authority.port_u16() == Some(0) {
+        return Err(anyhow!("secondary DNS port must be nonzero"));
+    }
+    crate::route::Destination::from_uri(uri)?;
+    Ok(())
+}
+
 async fn secondary(
     query: &[u8],
     uri: &http::Uri,
     proxy: &crate::route::Route,
     options: &crate::net::ConnectionOptions,
 ) -> Result<Vec<u8>> {
-    if uri.scheme_str() != Some("https") {
-        return Err(anyhow!("secondary DNS URI must use HTTPS"));
-    }
+    validate_secondary_uri(uri)?;
     let dest = crate::route::Destination::from_uri(uri)?;
     let stream = timeout(
         Duration::from_millis(1500),
@@ -159,17 +228,46 @@ async fn secondary(
     )
     .await
     .context("DoH proxy tunnel timeout")??;
+    let host_header = uri
+        .authority()
+        .ok_or_else(|| anyhow!("DoH URI authority missing"))?
+        .as_str()
+        .to_owned();
     doh_on_stream(
         stream,
         &dest.endpoint.host,
+        &host_header,
         if dest.path.is_empty() {
             "/"
         } else {
             &dest.path
         },
         query,
+        &options.tls,
     )
     .await
+}
+
+/// Apply the specified primary response fallback test, after validating all declared sections.
+pub fn needs_fallback(response: &[u8]) -> Result<bool> {
+    let c = parse_counts(response)?;
+    Ok(c.questions > 0 && c.answers == 0)
+}
+
+/// Exchange one wire-format query through the primary resolver and apply conditional DoH fallback.
+pub async fn exchange(
+    query: &[u8],
+    primary_addr: SocketAddr,
+    secondary_uri: &http::Uri,
+    proxy: &crate::route::Route,
+    options: &crate::net::ConnectionOptions,
+) -> Result<Vec<u8>> {
+    let answer = exchange_primary(query, primary_addr).await?;
+    if needs_fallback(&answer)? {
+        secondary(query, secondary_uri, proxy, options).await
+    } else {
+        Ok(answer)
+    }
 }
 
 /// Start the loopback DNS listener with primary-to-DoH fallback.
@@ -196,16 +294,8 @@ pub async fn serve(
         let proxy = proxy.clone();
         let options = options.clone();
         tokio::spawn(async move {
-            let answer = async {
-                let primary = primary(&q, primary_addr).await?;
-                let c = parse_counts(&primary)?;
-                if c.questions > 0 && c.answers == 0 {
-                    secondary(&q, &secondary_uri, &proxy, &options).await
-                } else {
-                    Ok(primary)
-                }
-            }
-            .await;
+            let answer =
+                async { exchange(&q, primary_addr, &secondary_uri, &proxy, &options).await }.await;
             match answer {
                 Ok(ans) => {
                     if let Err(e) = socket.send_to(&ans, peer).await {
@@ -222,7 +312,7 @@ mod tests {
     use super::*;
     #[test]
     fn strict_counts() {
-        let mut b = vec![0; 12];
+        let mut b = vec![0; 17];
         b[5] = 1;
         assert_eq!(parse_counts(&b).unwrap().questions, 1);
         b.truncate(12);

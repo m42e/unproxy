@@ -1,16 +1,29 @@
 use unproxy::auth::{AuthFactory, CredentialStore};
 #[test]
 fn credentials_replace_atomically_and_hide_secrets() {
-    let store=CredentialStore::parse("machine corp.test login alice password secret\ndefault login guest").unwrap();
-    assert_eq!(store.hosts(),vec!["corp.test"]);
+    let store = CredentialStore::parse(
+        "machine corp.test login alice password secret\ndefault login guest",
+    )
+    .unwrap();
+    assert_eq!(store.hosts(), vec!["corp.test"]);
     assert!(!format!("{store:?}").contains("secret"));
     assert!(store.replace_netrc("machine broken").is_err());
-    assert_eq!(store.hosts(),vec!["corp.test"]);
+    assert_eq!(store.hosts(), vec!["corp.test"]);
 }
 #[tokio::test]
 async fn basic_and_no_auth_headers() {
-    let store=CredentialStore::parse("machine proxy.test login u password p").unwrap();
-    let v=AuthFactory::basic(store).authorization("proxy.test").await.unwrap().unwrap();
-    assert_eq!(v,"Basic dTpw");
-    assert!(AuthFactory::default().authorization("proxy.test").await.unwrap().is_none());
+    let store = CredentialStore::parse("machine proxy.test login u password p").unwrap();
+    let v = AuthFactory::basic(store)
+        .authorization("proxy.test")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v, "Basic dTpw");
+    assert!(
+        AuthFactory::default()
+            .authorization("proxy.test")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
