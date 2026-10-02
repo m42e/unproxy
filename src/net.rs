@@ -252,10 +252,10 @@ async fn read_pac_body(io: &mut BoxedIo, header: &str) -> Result<Vec<u8>> {
             k.eq_ignore_ascii_case(name).then(|| v.trim())
         })
     };
-    if let Some(length) = value("content-length") {
-        if length.parse::<usize>().context("invalid Content-Length")? > MAX_PAC_BYTES {
-            bail!("PAC response exceeds 8 MiB")
-        }
+    if let Some(length) = value("content-length")
+        && length.parse::<usize>().context("invalid Content-Length")? > MAX_PAC_BYTES
+    {
+        bail!("PAC response exceeds 8 MiB")
     }
     if value("transfer-encoding").is_some_and(|v| {
         v.split(',')

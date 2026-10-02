@@ -12,7 +12,9 @@ use futures_util::{
     future::BoxFuture,
     stream::{FuturesUnordered, StreamExt},
 };
-use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri};
+use http::{
+    HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri, Version,
+};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Incoming, service::service_fn};
 use hyper_util::rt::TokioIo;
@@ -25,6 +27,7 @@ use tokio::{
 use tokio_util::task::TaskTracker;
 
 use crate::{
+    access::{AccessEntry, AccessOutcome},
     net::{self, BoxedIo, ConnectionOptions},
     pac::Policy,
     route::{Destination, Endpoint, PathOrUri, Route, Routes},
@@ -180,19 +183,7 @@ impl ContextBuilder {
             }));
         }
         let pac_source = self.pac_source.clone();
-        let policy = self.policy.clone();
-        let pac_load = pac_source.clone().map(|source| {
-            tokio::spawn(async move {
-                match load_pac_source(&source).await {
-                    Ok(script) => {
-                        if let Err(e) = policy.set_script(Some(script)).await {
-                            tracing::error!("loading PAC source failed: {e:#}")
-                        }
-                    }
-                    Err(e) => tracing::error!("loading PAC source failed: {e:#}"),
-                }
-            })
-        });
+        let pac_load = spawn_pac_load(pac_source.clone(), self.policy.clone());
         Ok(Context {
             local_addrs,
             events,
@@ -217,6 +208,7 @@ impl ContextBuilder {
         let policy = self.policy.clone();
         let pac_source = self.pac_source.clone();
         let inline_script = self.inline_script.clone();
+        let pac_load = spawn_pac_load(pac_source.clone(), policy.clone());
         let cfg = self;
         let ev = events.clone();
         let task_tracker = tracker.clone();
@@ -232,7 +224,7 @@ impl ContextBuilder {
             policy,
             pac_source,
             inline_script,
-            pac_load: None,
+            pac_load,
         }
     }
 
@@ -249,6 +241,7 @@ impl ContextBuilder {
         let tasks = tracker.clone();
         let policy = self.policy.clone();
         let source = self.pac_source.clone();
+        let pac_load = spawn_pac_load(source.clone(), policy.clone());
         let join = tokio::spawn(async move {
             let mut sessions = tokio::task::JoinSet::new();
             loop {
@@ -265,7 +258,7 @@ impl ContextBuilder {
             policy,
             pac_source: source,
             inline_script: self.inline_script.clone(),
-            pac_load: None,
+            pac_load,
         }
     }
 }
@@ -295,6 +288,21 @@ async fn load_pac_source(source: &PathOrUri) -> Result<String> {
     }
 }
 
+fn spawn_pac_load(source: Option<PathOrUri>, policy: Arc<Policy>) -> Option<JoinHandle<()>> {
+    source.map(|source| {
+        tokio::spawn(async move {
+            match load_pac_source(&source).await {
+                Ok(script) => {
+                    if let Err(e) = policy.set_script(Some(script)).await {
+                        tracing::error!("loading PAC source failed: {e:#}")
+                    }
+                }
+                Err(e) => tracing::error!("loading PAC source failed: {e:#}"),
+            }
+        })
+    })
+}
+
 impl Context {
     pub fn local_addrs(&self) -> &[SocketAddr] {
         &self.local_addrs
@@ -302,11 +310,27 @@ impl Context {
     pub fn subscribe(&self) -> broadcast::Receiver<String> {
         self.events.subscribe()
     }
+    pub fn publish_access(&self, entry: AccessEntry) {
+        let _ = self.events.send(entry.to_string());
+    }
     pub fn shutdown(&self) {
-        let _ = self.shutdown.send(true);
+        self.shutdown.send_replace(true);
     }
     pub fn is_shutdown(&self) -> bool {
         *self.shutdown.subscribe().borrow()
+    }
+    /// Wait until the proxy has been explicitly stopped or an accept loop
+    /// has terminated after repeated fatal socket errors.
+    pub async fn shutdown_notified(&self) {
+        let mut receiver = self.shutdown.subscribe();
+        loop {
+            if *receiver.borrow_and_update() {
+                return;
+            }
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
     }
     pub fn policy(&self) -> Arc<Policy> {
         self.policy.clone()
@@ -396,7 +420,7 @@ async fn accept_loop(
             Some(_)=active.join_next(),if !active.is_empty()=>{},
             result=listener.accept()=>match result {
                 Ok((stream,peer))=>{failures=0;let cfg=cfg.clone();let events=events.clone();let tracker=tracker.clone();let rx=shutdown.clone();active.spawn(async move {serve_client(stream,peer,cfg,events,tracker,rx).await;});},
-                Err(e)=>{tracing::warn!("accept failed: {e}");if !matches!(e.kind(),std::io::ErrorKind::ConnectionAborted|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::OutOfMemory){failures+=1;if failures>=32{tracing::error!("stopping after 32 consecutive accept failures");let _=shutdown_tx.send(true);break;}}tokio::time::sleep(Duration::from_millis(500)).await;}
+                Err(e)=>{tracing::warn!("accept failed: {e}");if !matches!(e.kind(),std::io::ErrorKind::ConnectionAborted|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::OutOfMemory){failures+=1;if failures>=32{tracing::error!("stopping after 32 consecutive accept failures");shutdown_tx.send_replace(true);break;}}tokio::time::sleep(Duration::from_millis(500)).await;}
             }
         }
     }
@@ -516,8 +540,8 @@ async fn handle(
 ) -> Result<Response<OutBody>, std::convert::Infallible> {
     let start = Instant::now();
     let method = req.method().clone();
-    let original = req.uri().to_string();
-    let version = format!("{:?}", req.version());
+    let request_uri = req.uri().clone();
+    let request_version = req.version();
     let user_agent = req
         .headers()
         .get(http::header::USER_AGENT)
@@ -640,15 +664,13 @@ async fn handle(
     let Some((route, stream, tunneled)) = chosen else {
         publish(
             &events,
-            peer,
-            &method,
-            &original,
-            &version,
-            "DIRECT",
-            &format!("error: could not connect to {}", destination.endpoint),
-            None,
-            user_agent.as_deref(),
-            start,
+            AccessEntry::for_request(
+                peer,
+                Some(Route::Direct),
+                &req,
+                start.elapsed(),
+                AccessOutcome::Error(format!("could not connect to {}", destination.endpoint)),
+            ),
         );
         return Ok(error_response(
             StatusCode::BAD_GATEWAY,
@@ -665,7 +687,6 @@ async fn handle(
             )
             .unwrap();
         let on = hyper::upgrade::on(&mut req);
-        let route_name = route.to_string();
         tracker.spawn(async move {
             if let Ok(upgraded) = on.await {
                 let mut client = TokioIo::new(upgraded);
@@ -688,17 +709,16 @@ async fn handle(
         });
         publish(
             &events,
-            peer,
-            &method,
-            &original,
-            &version,
-            &route_name,
-            "200",
-            None,
-            req.headers()
-                .get(http::header::USER_AGENT)
-                .and_then(|v| v.to_str().ok()),
-            start,
+            AccessEntry::for_request(
+                peer,
+                Some(route.clone()),
+                &req,
+                start.elapsed(),
+                AccessOutcome::Response {
+                    status: StatusCode::OK,
+                    content_length: None,
+                },
+            ),
         );
         return Ok(response);
     }
@@ -711,8 +731,8 @@ async fn handle(
         &cfg.options,
         peer,
         &method,
-        &original,
-        &version,
+        &request_uri,
+        request_version,
         start,
         user_agent.as_deref(),
         &events,
@@ -724,15 +744,17 @@ async fn handle(
             tracing::debug!("forward failed: {e:#}");
             publish(
                 &events,
-                peer,
-                &method,
-                &original,
-                &version,
-                &route.to_string(),
-                &format!("error: {e:#}"),
-                None,
-                user_agent.as_deref(),
-                start,
+                AccessEntry {
+                    timestamp: chrono::Local::now().fixed_offset(),
+                    peer,
+                    route: Some(route.clone()),
+                    method: method.clone(),
+                    uri: request_uri,
+                    version: request_version,
+                    elapsed: start.elapsed(),
+                    outcome: AccessOutcome::Error(format!("{e:#}")),
+                    user_agent,
+                },
             );
             Ok(error_response(
                 StatusCode::BAD_GATEWAY,
@@ -742,6 +764,8 @@ async fn handle(
     }
 }
 
+// Each argument is an independent input to the request-scoped route selector.
+#[allow(clippy::too_many_arguments)]
 async fn select_route(
     routes: &Routes,
     destination: &Endpoint,
@@ -831,6 +855,8 @@ fn connect_destination(uri: &Uri) -> Option<Destination> {
         scheme: scheme.into(),
     })
 }
+// This private adapter needs request metadata for routing, auth, and access reporting.
+#[allow(clippy::too_many_arguments)]
 async fn forward(
     req: Request<Incoming>,
     stream: BoxedIo,
@@ -840,8 +866,8 @@ async fn forward(
     options: &ConnectionOptions,
     peer: SocketAddr,
     method: &Method,
-    original: &str,
-    version: &str,
+    original_uri: &Uri,
+    client_version: Version,
     start: Instant,
     user_agent: Option<&str>,
     events: &broadcast::Sender<String>,
@@ -862,10 +888,10 @@ async fn forward(
         Route::Http(e) | Route::Https(e) => Some(e),
         Route::Direct => None,
     };
-    if let Some(proxy) = proxy.filter(|_| !tunneled) {
-        if let Some(v) = options.auth.authorization(&proxy.host).await? {
-            parts.headers.insert("proxy-authorization", v);
-        }
+    if let Some(proxy) = proxy.filter(|_| !tunneled)
+        && let Some(v) = options.auth.authorization(&proxy.host).await?
+    {
+        parts.headers.insert("proxy-authorization", v);
     }
     parts
         .headers
@@ -873,7 +899,7 @@ async fn forward(
     let uri = if matches!(route, Route::Direct) || tunneled {
         format!(
             "{}{}",
-            dest.path.starts_with('/').then_some("").unwrap_or("/"),
+            if dest.path.starts_with('/') { "" } else { "/" },
             dest.path
         )
         .parse::<Uri>()?
@@ -900,58 +926,34 @@ async fn forward(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok());
     let mut response = response.map(http_body_util::BodyExt::boxed);
-    sanitize(&mut response.headers_mut());
-    publish(
-        events,
+    sanitize(response.headers_mut());
+    let mut entry = AccessEntry::for_request(
         peer,
-        method,
-        original,
-        version,
-        &route.to_string(),
-        &status.as_u16().to_string(),
-        len,
-        user_agent,
-        start,
+        Some(route.clone()),
+        &Request::builder()
+            .method(method.clone())
+            .uri(original_uri.clone())
+            .version(client_version)
+            .body(())
+            .unwrap(),
+        start.elapsed(),
+        AccessOutcome::Response {
+            status,
+            content_length: len,
+        },
     );
+    entry.elapsed = start.elapsed();
+    entry.timestamp = chrono::Local::now().fixed_offset();
+    entry.user_agent = user_agent.map(str::to_owned);
+    publish(events, entry);
     Ok(response)
 }
-fn publish(
-    events: &broadcast::Sender<String>,
-    peer: SocketAddr,
-    m: &Method,
-    u: &str,
-    v: &str,
-    route: &str,
-    status: &str,
-    bytes: Option<u64>,
-    agent: Option<&str>,
-    start: Instant,
-) {
-    let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
-    let quote = |s: &str| {
-        s.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-    };
-    let status_text = if let Some(error) = status.strip_prefix("error:") {
-        format!("error: \"{}\"", quote(error.trim()))
-    } else {
-        format!(
-            "{status} {}b",
-            bytes.map(|b| b.to_string()).unwrap_or_else(|| "-".into())
-        )
-    };
-    let line = format!(
-        "{timestamp} {peer} {route} \"{}\" {:.3}s {status_text} \"{}\"",
-        quote(&format!("{m} {u} {v}")),
-        start.elapsed().as_secs_f64(),
-        quote(agent.unwrap_or("-"))
-    );
-    let _ = events.send(line);
+fn publish(events: &broadcast::Sender<String>, entry: AccessEntry) {
+    let _ = events.send(entry.to_string());
 }
 fn event_response(events: broadcast::Sender<String>) -> Response<OutBody> {
-    let stream = async_stream::stream! {let mut rx=events.subscribe(); loop {match rx.recv().await {Ok(s)=>yield Ok::<hyper::body::Frame<Bytes>,hyper::Error>(hyper::body::Frame::data(Bytes::from(format!("data:{s}\n\n")))),Err(broadcast::error::RecvError::Lagged(n))=>yield Ok(hyper::body::Frame::data(Bytes::from(format!("event:lagged\ndata:{n}\n\n")))),Err(_)=>break}}};
+    let mut rx = events.subscribe();
+    let stream = async_stream::stream! {loop {match rx.recv().await {Ok(s)=>yield Ok::<hyper::body::Frame<Bytes>,hyper::Error>(hyper::body::Frame::data(Bytes::from(format!("data:{s}\n\n")))),Err(broadcast::error::RecvError::Lagged(n))=>yield Ok(hyper::body::Frame::data(Bytes::from(format!("event:lagged\ndata:{n}\n\n")))),Err(_)=>break}}};
     let body = http_body_util::BodyExt::boxed(http_body_util::StreamBody::new(stream));
     Response::builder()
         .status(StatusCode::OK)

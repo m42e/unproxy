@@ -15,6 +15,36 @@ async fn start(policy: Policy) -> unproxy::proxy::Context {
 }
 
 #[tokio::test]
+async fn supplied_stream_serves_management_and_notifies_shutdown() {
+    let (mut client, server_io) = tokio::io::duplex(4096);
+    let context = ContextBuilder::new(
+        Arc::new(Policy::new(None).unwrap()),
+        ConnectionOptions::default(),
+    )
+    .serve_stream(server_io, "127.0.0.1:12345".parse().unwrap());
+    client
+        .write_all(b"GET /missing HTTP/1.1\r\nHost: proxy.test\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = [0; 1024];
+    let count = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        client.read(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(response[..count].starts_with(b"HTTP/1.1 404"));
+    context.shutdown();
+    context.shutdown_notified().await;
+    assert!(
+        context
+            .wait_timeout(std::time::Duration::from_secs(1))
+            .await
+    );
+}
+
+#[tokio::test]
 async fn generated_pac_uses_local_host_header() {
     let server = start(Policy::new(None).unwrap()).await;
     let addr = server.local_addrs()[0];
@@ -413,10 +443,10 @@ async fn forwards_stream_and_removes_hop_headers() {
                 break;
             }
             request.extend_from_slice(&chunk[..n]);
-            if request.windows(4).any(|w| w == b"\r\n\r\n") {
-                if request.windows(5).any(|w| w == b"hello") {
-                    break;
-                }
+            if request.windows(4).any(|w| w == b"\r\n\r\n")
+                && request.windows(5).any(|w| w == b"hello")
+            {
+                break;
             }
         }
         socket
@@ -443,7 +473,10 @@ async fn forwards_stream_and_removes_hop_headers() {
     let sent = String::from_utf8_lossy(&sent);
     assert!(sent.starts_with("POST /upload?q=1 HTTP/1.1"));
     assert!(sent.to_ascii_lowercase().contains("host: preserved.test"));
-    assert!(sent.to_ascii_lowercase().contains("authorization: basic origin"));
+    assert!(
+        sent.to_ascii_lowercase()
+            .contains("authorization: basic origin")
+    );
     assert!(!sent.to_ascii_lowercase().contains("proxy-authorization"));
     assert!(!sent.to_ascii_lowercase().contains("x-remove"));
     proxy.shutdown();
@@ -497,7 +530,10 @@ async fn chunked_request_body_streams_to_origin() {
     let raw = origin_task.await.unwrap();
     let raw = String::from_utf8_lossy(&raw);
     assert!(raw.starts_with("POST /bulk HTTP/1.1"));
-    assert!(raw.to_ascii_lowercase().contains("transfer-encoding: chunked"));
+    assert!(
+        raw.to_ascii_lowercase()
+            .contains("transfer-encoding: chunked")
+    );
     for byte in b"abcd" {
         assert!(
             raw.as_bytes()
