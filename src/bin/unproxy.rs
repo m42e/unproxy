@@ -1,5 +1,6 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use anyhow::Result;
-#[cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 #[tokio::main]
 async fn main() -> Result<()> {
     #[cfg(windows)]
