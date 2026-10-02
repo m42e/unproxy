@@ -116,6 +116,15 @@ impl Pac {
         self.context
             .eval(Source::from_bytes(script))
             .map_err(|e| anyhow!("PAC script: {e}"))?;
+        if source.is_some() {
+            let callable = self
+                .context
+                .eval(Source::from_bytes("typeof FindProxyForURL === 'function'"))
+                .map_err(|e| anyhow!("PAC entry point validation: {e}"))?;
+            if !callable.as_boolean().unwrap_or(false) {
+                bail!("PAC script is missing callable FindProxyForURL")
+            }
+        }
         self.context
             .eval(Source::from_bytes(
                 "if (typeof _dnsCache === 'undefined') var _dnsCache = new _DnsCache();",
@@ -138,7 +147,7 @@ impl Pac {
             .context
             .eval(Source::from_bytes(
                 format!(
-                    "FindProxyForURL({}, {})",
+                    "typeof FindProxyForURL !== 'function' ? (() => {{ throw new Error('PAC script is missing callable FindProxyForURL'); }})() : FindProxyForURL({}, {})",
                     serde_json::to_string(url)?,
                     serde_json::to_string(host)?
                 )
