@@ -208,3 +208,73 @@ async fn direct_signal_reload_and_failed_reload_preserve_service() {
     child.wait().await.unwrap();
     origin_task.abort();
 }
+
+#[tokio::test]
+async fn invalid_configured_startup_policy_exits_unsuccessfully() {
+    let temp = tempfile::tempdir().unwrap();
+    let netrc = temp.path().join("netrc");
+    std::fs::write(&netrc, "").unwrap();
+    let pac = temp.path().join("bad.pac");
+    for body in [
+        "function {",
+        "function FindProxyForUrl(){return 'DIRECT';}",
+        "var FindProxyForURL=1;",
+    ] {
+        std::fs::write(&pac, body).unwrap();
+        let address = reserve_address();
+        let mut child = process(address, pac.to_str().unwrap(), &netrc);
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!status.success());
+        assert!(TcpStream::connect(address).await.is_err());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_ip_survives_startup_hup_usr1_and_whole_list_restore() {
+    let temp = tempfile::tempdir().unwrap();
+    let netrc = temp.path().join("netrc");
+    std::fs::write(&netrc, "").unwrap();
+    let first = temp.path().join("direct.pac");
+    let second = temp.path().join("override.pac");
+    std::fs::write(&first, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+    std::fs::write(&second, "const startupIP=myIpAddress(); function FindProxyForURL(){return startupIP==='2001:db8::42' && myIpAddress()==='2001:db8::42' ? 'DIRECT; PROXY 127.0.0.1:1':'BAD';}").unwrap();
+    let address = reserve_address();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_unproxy"))
+        .env("UNPROXY_NORC", "1")
+        .args([
+            "--listen",
+            &address.to_string(),
+            "--my-ip-address",
+            "2001:db8::42",
+            "--graceful-shutdown-timeout",
+            "1",
+            "--netrc-file",
+        ])
+        .arg(&netrc)
+        .arg("--pac-file")
+        .arg(&first)
+        .arg("--pac-file")
+        .arg(&second)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    wait_for_listener(address, &mut child).await;
+    let (origin_address, origin_task) = origin().await;
+    assert_eq!(response_status(address, origin_address).await, 200);
+    let pid = child.id().unwrap() as i32;
+    for signal in [libc::SIGUSR1, libc::SIGHUP] {
+        assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(response_status(address, origin_address).await, 200);
+    }
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+    origin_task.abort();
+}

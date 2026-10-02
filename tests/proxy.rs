@@ -773,6 +773,7 @@ async fn policy_errors_return_502_without_origin_connections_and_publish_access(
             "throw new Error('policy denied')",
             "return 42",
             "return 'PROXYbroken:3128'",
+            "while(true){}",
         ] {
             let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let target = origin.local_addr().unwrap();
