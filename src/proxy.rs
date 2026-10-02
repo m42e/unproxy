@@ -27,7 +27,7 @@ use tokio_util::task::TaskTracker;
 use crate::{
     net::{self, BoxedIo, ConnectionOptions},
     pac::Policy,
-    route::{Destination, Endpoint, Route, Routes},
+    route::{Destination, Endpoint, PathOrUri, Route, Routes},
 };
 
 type OutBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -44,6 +44,9 @@ pub struct ContextBuilder {
     force_tunnel: bool,
     server_keepalive: net::Keepalive,
     shutdown_timeout: Duration,
+    bound_addrs: Vec<SocketAddr>,
+    pac_source: Option<PathOrUri>,
+    inline_script: Option<String>,
 }
 impl Clone for ContextBuilder {
     fn clone(&self) -> Self {
@@ -59,6 +62,9 @@ impl Clone for ContextBuilder {
             force_tunnel: self.force_tunnel,
             server_keepalive: self.server_keepalive.clone(),
             shutdown_timeout: self.shutdown_timeout,
+            bound_addrs: self.bound_addrs.clone(),
+            pac_source: self.pac_source.clone(),
+            inline_script: self.inline_script.clone(),
         }
     }
 }
@@ -76,6 +82,9 @@ impl ContextBuilder {
             force_tunnel: false,
             server_keepalive: net::Keepalive::default(),
             shutdown_timeout: Duration::from_secs(30),
+            bound_addrs: vec![],
+            pac_source: None,
+            inline_script: None,
         }
     }
     pub fn listen(mut self, addr: SocketAddr) -> Self {
@@ -118,6 +127,17 @@ impl ContextBuilder {
         self.force_tunnel = v;
         self
     }
+    pub fn inline_pac(mut self, source: Option<String>) -> Result<Self> {
+        self.policy = Arc::new(Policy::new(source.clone())?);
+        self.pac_source = None;
+        self.inline_script = source;
+        Ok(self)
+    }
+    pub fn pac_source(mut self, source: PathOrUri) -> Self {
+        self.pac_source = Some(source);
+        self.inline_script = None;
+        self
+    }
     pub async fn bind(mut self) -> Result<Context> {
         let mut listeners = std::mem::take(&mut self.sockets);
         let addrs = if !listeners.is_empty() {
@@ -138,6 +158,9 @@ impl ContextBuilder {
             .iter()
             .map(TcpListener::local_addr)
             .collect::<std::io::Result<Vec<_>>>()?;
+        if local_addrs.iter().any(|addr| addr.ip().is_unspecified()) {
+            anyhow::bail!("unspecified listener addresses are not allowed")
+        }
         if listeners.is_empty() {
             anyhow::bail!("no proxy listeners were configured or supplied")
         }
@@ -145,21 +168,41 @@ impl ContextBuilder {
         let (events, _) = broadcast::channel(16);
         let tracker = TaskTracker::new();
         let mut joins = Vec::new();
+        self.bound_addrs = local_addrs.clone();
         for listener in listeners {
             let cfg = self.clone();
             let rx = rx.clone();
             let events = events.clone();
             let tracker = tracker.clone();
+            let shutdown_tx = shutdown.clone();
             joins.push(tokio::spawn(async move {
-                accept_loop(listener, cfg, rx, events, tracker).await
+                accept_loop(listener, cfg, rx, shutdown_tx, events, tracker).await
             }));
         }
+        let pac_source = self.pac_source.clone();
+        let policy = self.policy.clone();
+        let pac_load = pac_source.clone().map(|source| {
+            tokio::spawn(async move {
+                match load_pac_source(&source).await {
+                    Ok(script) => {
+                        if let Err(e) = policy.set_script(Some(script)).await {
+                            tracing::error!("loading PAC source failed: {e:#}")
+                        }
+                    }
+                    Err(e) => tracing::error!("loading PAC source failed: {e:#}"),
+                }
+            })
+        });
         Ok(Context {
             local_addrs,
             events,
             shutdown,
             tracker,
             joins,
+            policy: self.policy.clone(),
+            pac_source,
+            inline_script: self.inline_script.clone(),
+            pac_load,
         })
     }
     /// Serve one already-connected client stream. The returned context exposes
@@ -168,14 +211,17 @@ impl ContextBuilder {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let (shutdown, mut rx) = watch::channel(false);
+        let (shutdown, rx) = watch::channel(false);
         let (events, _) = broadcast::channel(16);
         let tracker = TaskTracker::new();
+        let policy = self.policy.clone();
+        let pac_source = self.pac_source.clone();
+        let inline_script = self.inline_script.clone();
         let cfg = self;
         let ev = events.clone();
         let task_tracker = tracker.clone();
         let join = tokio::spawn(async move {
-            tokio::select! {_=rx.changed()=>{},_=serve_io(stream,peer,None,cfg,ev,task_tracker.clone())=>{}}
+            serve_io(stream, peer, None, cfg, ev, task_tracker, rx).await;
         });
         Context {
             local_addrs: vec![],
@@ -183,6 +229,43 @@ impl ContextBuilder {
             shutdown,
             tracker,
             joins: vec![join],
+            policy,
+            pac_source,
+            inline_script,
+            pac_load: None,
+        }
+    }
+
+    pub fn serve_connections<S, St>(self, mut input: St) -> Context
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        St: futures_util::Stream<Item = std::io::Result<(S, SocketAddr)>> + Unpin + Send + 'static,
+    {
+        let (shutdown, mut rx) = watch::channel(false);
+        let (events, _) = broadcast::channel(16);
+        let tracker = TaskTracker::new();
+        let cfg = self.clone();
+        let ev = events.clone();
+        let tasks = tracker.clone();
+        let policy = self.policy.clone();
+        let source = self.pac_source.clone();
+        let join = tokio::spawn(async move {
+            let mut sessions = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {_=rx.changed()=>break,Some(_)=sessions.join_next(),if !sessions.is_empty()=>{},next=input.next()=>match next{Some(Ok((stream,peer)))=>{let cfg=cfg.clone();let ev=ev.clone();let tracker=tasks.clone();let session_shutdown=rx.clone();sessions.spawn(async move{serve_io(stream,peer,None,cfg,ev,tracker,session_shutdown).await;});},Some(Err(e))=>tracing::warn!("supplied connection stream failed: {e}"),None=>break}}
+            }
+            while sessions.join_next().await.is_some() {}
+        });
+        Context {
+            local_addrs: vec![],
+            events,
+            shutdown,
+            tracker,
+            joins: vec![join],
+            policy,
+            pac_source: source,
+            inline_script: self.inline_script.clone(),
+            pac_load: None,
         }
     }
 }
@@ -193,7 +276,25 @@ pub struct Context {
     shutdown: watch::Sender<bool>,
     tracker: TaskTracker,
     joins: Vec<JoinHandle<()>>,
+    policy: Arc<Policy>,
+    pac_source: Option<PathOrUri>,
+    inline_script: Option<String>,
+    pac_load: Option<JoinHandle<()>>,
 }
+
+async fn load_pac_source(source: &PathOrUri) -> Result<String> {
+    match source {
+        PathOrUri::Path(path) => {
+            let bytes = tokio::fs::read(path)
+                .await
+                .with_context(|| format!("reading PAC file {}", path.display()))?;
+            String::from_utf8(bytes)
+                .with_context(|| format!("PAC file {} is not UTF-8", path.display()))
+        }
+        PathOrUri::Uri(uri) => net::fetch_remote_pac(&uri.to_string()).await,
+    }
+}
+
 impl Context {
     pub fn local_addrs(&self) -> &[SocketAddr] {
         &self.local_addrs
@@ -207,15 +308,72 @@ impl Context {
     pub fn is_shutdown(&self) -> bool {
         *self.shutdown.subscribe().borrow()
     }
+    pub fn policy(&self) -> Arc<Policy> {
+        self.policy.clone()
+    }
+    pub async fn set_script(&self, script: Option<String>) -> Result<()> {
+        self.policy.set_script(script).await
+    }
+    pub async fn set_ip(&self, ip: std::net::IpAddr) -> Result<()> {
+        self.policy.set_ip(ip).await
+    }
+    pub async fn load_pac(&self, source: &PathOrUri) -> Result<()> {
+        let script = load_pac_source(source).await?;
+        self.policy.set_script(Some(script)).await
+    }
+    pub async fn reload_pac(&self) -> Result<()> {
+        if let Some(script) = &self.inline_script {
+            return self.policy.set_script(Some(script.clone())).await;
+        }
+        match &self.pac_source {
+            Some(source) => self.load_pac(source).await,
+            None => self.policy.set_script(None).await,
+        }
+    }
+    pub async fn clear_policy(&self) -> Result<()> {
+        self.policy.set_script(None).await
+    }
     pub async fn wait(mut self) {
         for j in self.joins.drain(..) {
             let _ = j.await;
+        }
+        if let Some(load) = self.pac_load.take() {
+            let _ = load.await;
         }
         self.tracker.close();
         self.tracker.wait().await;
     }
     pub async fn wait_timeout(self, d: Duration) -> bool {
-        tokio::time::timeout(d, self.wait()).await.is_ok()
+        let mut this = self;
+        this.shutdown();
+        let started = tokio::time::Instant::now();
+        let listeners = tokio::time::timeout(d, async {
+            for join in &mut this.joins {
+                let _ = join.await;
+            }
+            if let Some(load) = &mut this.pac_load {
+                let _ = load.await;
+            }
+        })
+        .await
+        .is_ok();
+        if !listeners {
+            for join in &this.joins {
+                join.abort();
+            }
+            if let Some(load) = &this.pac_load {
+                load.abort();
+            }
+            for join in &mut this.joins {
+                let _ = join.await;
+            }
+        }
+        this.tracker.close();
+        let remaining = d.saturating_sub(started.elapsed());
+        let tracked = tokio::time::timeout(remaining, this.tracker.wait())
+            .await
+            .is_ok();
+        listeners && tracked
     }
 }
 
@@ -223,18 +381,22 @@ async fn accept_loop(
     listener: TcpListener,
     cfg: ContextBuilder,
     mut shutdown: watch::Receiver<bool>,
+    shutdown_tx: watch::Sender<bool>,
     events: broadcast::Sender<String>,
     tracker: TaskTracker,
 ) {
     let mut active = tokio::task::JoinSet::new();
     let mut failures = 0u32;
     loop {
+        if *shutdown.borrow() {
+            break;
+        }
         tokio::select! {
             _=shutdown.changed()=>break,
             Some(_)=active.join_next(),if !active.is_empty()=>{},
             result=listener.accept()=>match result {
-                Ok((stream,peer))=>{failures=0;let cfg=cfg.clone();let events=events.clone();let tracker=tracker.clone();active.spawn(async move {serve_client(stream,peer,cfg,events,tracker).await;});},
-                Err(e)=>{tracing::warn!("accept failed: {e}");if !matches!(e.kind(),std::io::ErrorKind::ConnectionAborted|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::OutOfMemory){failures+=1;if failures>=32{tracing::error!("stopping after 32 consecutive accept failures");break;}}tokio::time::sleep(Duration::from_millis(500)).await;}
+                Ok((stream,peer))=>{failures=0;let cfg=cfg.clone();let events=events.clone();let tracker=tracker.clone();let rx=shutdown.clone();active.spawn(async move {serve_client(stream,peer,cfg,events,tracker,rx).await;});},
+                Err(e)=>{tracing::warn!("accept failed: {e}");if !matches!(e.kind(),std::io::ErrorKind::ConnectionAborted|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::OutOfMemory){failures+=1;if failures>=32{tracing::error!("stopping after 32 consecutive accept failures");let _=shutdown_tx.send(true);break;}}tokio::time::sleep(Duration::from_millis(500)).await;}
             }
         }
     }
@@ -251,10 +413,11 @@ async fn serve_client(
     cfg: ContextBuilder,
     events: broadcast::Sender<String>,
     tracker: TaskTracker,
+    shutdown: watch::Receiver<bool>,
 ) {
     let _ = net::configure_keepalive(&stream, &cfg.server_keepalive);
     let local = stream.local_addr().ok();
-    serve_io(stream, peer, local, cfg, events, tracker).await;
+    serve_io(stream, peer, local, cfg, events, tracker, shutdown).await;
 }
 async fn serve_io<S>(
     stream: S,
@@ -263,9 +426,11 @@ async fn serve_io<S>(
     cfg: ContextBuilder,
     events: broadcast::Sender<String>,
     tracker: TaskTracker,
+    mut shutdown: watch::Receiver<bool>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let shutdown_timeout = cfg.shutdown_timeout;
     let io = TokioIo::new(stream);
     let service = service_fn(move |req| {
         let cfg = cfg.clone();
@@ -273,10 +438,19 @@ async fn serve_io<S>(
         let tracker = tracker.clone();
         async move { handle(req, peer, local, cfg, events, tracker).await }
     });
-    let _ = hyper::server::conn::http1::Builder::new()
+    let connection = hyper::server::conn::http1::Builder::new()
         .serve_connection(io, service)
-        .with_upgrades()
-        .await;
+        .with_upgrades();
+    tokio::pin!(connection);
+    if *shutdown.borrow() {
+        connection.as_mut().graceful_shutdown();
+        let _ = tokio::time::timeout(shutdown_timeout, &mut connection).await;
+        return;
+    }
+    tokio::select! {
+        _=&mut connection=>{},
+        _=shutdown.changed()=>{connection.as_mut().graceful_shutdown();let _=tokio::time::timeout(shutdown_timeout,&mut connection).await;}
+    }
 }
 
 fn full(status: StatusCode, content_type: &str, body: String) -> Response<OutBody> {
@@ -395,19 +569,26 @@ async fn handle(
         Destination::from_uri(req.uri()).ok()
     };
     let Some(destination) = destination else {
-        return Ok(error_response(
-            StatusCode::BAD_REQUEST,
-            "Invalid destination URI",
-        ));
+        let status = if connect {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        return Ok(error_response(status, "Invalid destination URI"));
     };
-    if let Some(local) = local {
+    {
         let host = destination.endpoint.host.trim_matches(['[', ']']);
-        let loops_back = host
-            .parse::<std::net::IpAddr>()
-            .ok()
-            .is_some_and(|ip| ip == local.ip() && destination.endpoint.port == local.port())
-            || (host.eq_ignore_ascii_case("localhost")
-                && destination.endpoint.port == local.port());
+        let candidates = cfg.bound_addrs.iter().copied().chain(local);
+        let port = destination.endpoint.port;
+        let loops_back = host.parse::<std::net::IpAddr>().ok().is_some_and(|ip| {
+            candidates.clone().any(|addr| {
+                addr.port() == port
+                    && (addr.ip() == ip || (addr.ip().is_loopback() && ip.is_loopback()))
+            })
+        }) || (host.eq_ignore_ascii_case("localhost")
+            && candidates
+                .clone()
+                .any(|addr| addr.port() == port && addr.ip().is_loopback()));
         if loops_back {
             return Ok(error_response(
                 StatusCode::BAD_REQUEST,
@@ -635,6 +816,9 @@ fn connect_destination(uri: &Uri) -> Option<Destination> {
     let auth = uri.authority()?;
     let host = auth.host().trim_start_matches('[').trim_end_matches(']');
     let port = auth.port_u16()?;
+    if host.is_empty() || port == 0 {
+        return None;
+    }
     let scheme = if port == 443 { "https" } else { "http" };
     let endpoint = Endpoint {
         host: host.into(),
