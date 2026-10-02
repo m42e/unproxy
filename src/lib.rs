@@ -7,6 +7,7 @@ pub mod pac;
 pub mod platform;
 pub mod proxy;
 pub mod route;
+pub mod tools;
 pub const VERSION: &str = env!("PRODUCT_VERSION");
 pub const DNS_VERSION: &str = "0.6.0";
 pub const PLATFORM: &str = env!("PRODUCT_PLATFORM");

@@ -41,10 +41,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Security_Authentication_Identity", "Win32_Foundation"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
 [dev-dependencies]
 tempfile = "3"
 
 [profile.release]
 lto = "thin"
 strip = true
-
