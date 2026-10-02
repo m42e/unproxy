@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow};
 use clap::Parser;
 use std::{
     env, fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -90,7 +90,7 @@ pub struct MainArgs {
     #[arg(short = 'p', long = "pac-file")]
     pub pac_file: Option<String>,
     #[arg(long = "my-ip-address")]
-    pub my_ip_address: Option<String>,
+    pub my_ip_address: Option<IpAddr>,
     #[arg(long = "netrc-file")]
     #[cfg_attr(feature = "negotiate", arg(conflicts_with = "negotiate"))]
     pub netrc_file: Option<PathBuf>,

@@ -24,3 +24,12 @@ fn settings_are_whitespace_tokens() {
     );
     let _ = fs::remove_file(p);
 }
+
+#[test]
+fn my_ip_address_accepts_both_families_and_rejects_invalid_values() {
+    for ip in ["192.0.2.7", "2001:db8::7"] {
+        let args = MainArgs::try_parse_from(["unproxy", "--my-ip-address", ip]).unwrap();
+        assert_eq!(args.my_ip_address, Some(ip.parse().unwrap()));
+    }
+    assert!(MainArgs::try_parse_from(["unproxy", "--my-ip-address", "not-an-ip"]).is_err());
+}

@@ -59,9 +59,8 @@ pub async fn run(a: MainArgs) -> Result<()> {
         return Err(anyhow!("PAC file does not exist: {p}"));
     }
     let policy = Arc::new(Policy::new(None)?);
-    if let Some(ip) = a.my_ip_address.as_deref() {
-        policy.set_ip(ip.parse()?).await?;
-    }
+    let effective_ip = select_pac_ip(a.my_ip_address, crate::platform::default_interface_ipv4);
+    policy.set_ip(effective_ip).await?;
     let auth = load_auth(&a)?;
     let options = ConnectionOptions {
         auth,
@@ -115,8 +114,8 @@ pub async fn run(a: MainArgs) -> Result<()> {
             _=term.recv()=>break false,
             _=context.shutdown_notified()=>break true,
             loaded=&mut initial,if initial_pending=>{initial_pending=false;match loaded{Ok(s)=>if let Err(e)=policy.set_script(s).await{tracing::error!(%e,"PAC load failed; using direct policy")},Err(e)=>tracing::error!(%e,"PAC load failed; using direct policy")}},
-            _=hup.recv()=>{match load_pac(a.pac_file.as_deref(),discovered.as_deref()).await{Ok(s)=>if let Err(e)=policy.set_script(s).await{context.shutdown();let _=context.wait_timeout(Duration::from_secs(a.graceful_shutdown_timeout)).await;return Err(e).context("PAC reload failed")},Err(e)=>{context.shutdown();let _=context.wait_timeout(Duration::from_secs(a.graceful_shutdown_timeout)).await;return Err(e).context("PAC reload failed")}};policy.set_ip(crate::platform::default_interface_ipv4()).await?;},
-            _=direct.recv()=>{policy.set_script(None).await?;policy.set_ip(crate::platform::default_interface_ipv4()).await?;}
+            _=hup.recv()=>{match load_pac(a.pac_file.as_deref(),discovered.as_deref()).await{Ok(s)=>if let Err(e)=policy.set_script(s).await{context.shutdown();let _=context.wait_timeout(Duration::from_secs(a.graceful_shutdown_timeout)).await;return Err(e).context("PAC reload failed")},Err(e)=>{context.shutdown();let _=context.wait_timeout(Duration::from_secs(a.graceful_shutdown_timeout)).await;return Err(e).context("PAC reload failed")}};policy.set_ip(effective_ip).await?;},
+            _=direct.recv()=>{policy.set_script(None).await?;policy.set_ip(effective_ip).await?;}
         }
     };
     #[cfg(not(unix))]
@@ -206,4 +205,31 @@ pub fn embedded_entry(args: Vec<OsString>) -> Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(run(a))
+}
+
+/// Detect once at startup; manual and native updates retain this effective address.
+fn select_pac_ip(
+    override_ip: Option<std::net::IpAddr>,
+    detect: impl FnOnce() -> std::net::IpAddr,
+) -> std::net::IpAddr {
+    override_ip.unwrap_or_else(detect)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn effective_ip_prefers_override_and_detects_only_when_needed() {
+        for ip in ["192.0.2.42", "2001:db8::42"] {
+            let ip = ip.parse().unwrap();
+            assert_eq!(
+                select_pac_ip(Some(ip), || panic!("override must avoid detection")),
+                ip
+            );
+        }
+        for ip in ["192.0.2.7", "127.0.0.1"] {
+            let ip = ip.parse().unwrap();
+            assert_eq!(select_pac_ip(None, || ip), ip);
+        }
+    }
 }
