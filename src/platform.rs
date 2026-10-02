@@ -185,7 +185,7 @@ mod macos_preferences {
             let mut item = AuthorizationItem {name: c"system.preferences".as_ptr(), value_len: 0, value: std::ptr::null_mut(), flags: 0};
             let rights = AuthorizationRights { count: 1, items: &mut item };
             let mut auth = std::ptr::null_mut();
-            let status = AuthorizationCreate(&rights, std::ptr::null(), 1 | 2 | 8, &mut auth);
+            let status = AuthorizationCreate(&rights, std::ptr::null(), 1 | 2 | 16, &mut auth);
             anyhow::ensure!(status == 0, "authorization failed: {status}");
             let auth = Authorization(auth);
             let name = string("Unproxy");

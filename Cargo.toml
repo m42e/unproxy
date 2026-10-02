@@ -9,6 +9,7 @@ build = "build.rs"
 [features]
 default = ["negotiate"]
 negotiate = []
+vendored-tls = ["native-tls/vendored"]
 
 [dependencies]
 anyhow = "1.0"

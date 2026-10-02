@@ -44,7 +44,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: rustup target add ${{ matrix.target }}
       - run: cargo install cross --locked
-      - run: cross build --locked --target ${{ matrix.target }} --bins
+      - run: cross build --locked --target ${{ matrix.target }} --features vendored-tls --bins
   macos-x86:
     runs-on: macos-14
     steps:

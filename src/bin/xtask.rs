@@ -128,7 +128,7 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
             if cfg!(target_os = "macos") {
                 let hooks = output.join(format!(".hooks-{}", std::process::id())); std::fs::create_dir_all(&hooks)?;
                 for hook in ["preinstall", "postinstall"] { executable(&PathBuf::from(format!("assets/macos-{hook}")), &hooks.join(hook))?; }
-                run(Command::new("pkgbuild").arg("--root").arg(&staging).args(["--identifier", "de.m42e.unproxy", "--version", unproxy::VERSION, "--install-location", "/", "--scripts"]).arg(&hooks).arg(output.join(format!("{package_name}.pkg"))))?;
+                run(Command::new("pkgbuild").arg("--root").arg(&staging).args(["--identifier", "de.m42e.unproxy", "--version", unproxy::VERSION.split('+').next().unwrap(), "--install-location", "/", "--scripts"]).arg(&hooks).arg(output.join(format!("{package_name}.pkg"))))?;
                 std::fs::remove_dir_all(hooks)?;
             } else {
                 package_name.push_str("-staging"); zip(&staging, &output.join(format!("{package_name}.zip")))?;
@@ -145,6 +145,7 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
             std::fs::write(app.join("Info.plist"), info_plist("de.m42e.unproxy.app", "unproxy-app", "11.1"))?;
             std::fs::write(helper.join("Info.plist"), info_plist("de.m42e.unproxy.login-helper", "unproxy-login-helper", "10.14"))?;
             std::fs::copy("assets/app-entitlements.plist", app.join("entitlements.plist"))?;
+            std::fs::copy("assets/child-entitlements.plist", app.join("child-entitlements.plist"))?;
             zip(&staging, &output.join(format!("{package_name}-app.zip")))?;
         }
     }
@@ -176,6 +177,8 @@ fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
     anyhow::ensure!(repository.is_empty() || (repository.split('/').count() == 2 && repository.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_/ .".contains(&b)) && !repository.contains(' ')), "repository must be OWNER/NAME");
     landing = landing.replace("@REPOSITORY@", &html_escape(repository));
     std::fs::write(output.join("index.html"), landing)?;
+    let archive = if output.is_absolute() { output.join("source.zip") } else { std::env::current_dir()?.join(output).join("source.zip") };
+    run(Command::new("git").args(["archive", "--format=zip", "HEAD", "-o"]).arg(archive))?;
     println!("Documentation and landing page written to {}", output.display()); Ok(())
 }
 fn markdown(text: &str) -> String {
