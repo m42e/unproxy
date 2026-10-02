@@ -1,0 +1,781 @@
+//! HTTP/1 forward proxy and embedded management endpoints.
+
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use anyhow::{Context as _, Result};
+use bytes::Bytes;
+use futures_util::{
+    future::BoxFuture,
+    stream::{FuturesUnordered, StreamExt},
+};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri};
+use http_body_util::{BodyExt, Full};
+use hyper::{body::Incoming, service::service_fn};
+use hyper_util::rt::TokioIo;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::{TcpListener, TcpStream},
+    sync::{broadcast, watch},
+    task::JoinHandle,
+};
+use tokio_util::task::TaskTracker;
+
+use crate::{
+    net::{self, BoxedIo, ConnectionOptions},
+    pac::Policy,
+    route::{Destination, Endpoint, Route, Routes},
+};
+
+type OutBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
+
+pub struct ContextBuilder {
+    policy: Arc<Policy>,
+    options: ConnectionOptions,
+    listens: Vec<SocketAddr>,
+    sockets: Vec<TcpListener>,
+    timeout: Duration,
+    direct_fallback: bool,
+    race: bool,
+    parallel: usize,
+    force_tunnel: bool,
+    server_keepalive: net::Keepalive,
+    shutdown_timeout: Duration,
+}
+impl Clone for ContextBuilder {
+    fn clone(&self) -> Self {
+        Self {
+            policy: self.policy.clone(),
+            options: self.options.clone(),
+            listens: self.listens.clone(),
+            sockets: vec![],
+            timeout: self.timeout,
+            direct_fallback: self.direct_fallback,
+            race: self.race,
+            parallel: self.parallel,
+            force_tunnel: self.force_tunnel,
+            server_keepalive: self.server_keepalive.clone(),
+            shutdown_timeout: self.shutdown_timeout,
+        }
+    }
+}
+impl ContextBuilder {
+    pub fn new(policy: Arc<Policy>, options: ConnectionOptions) -> Self {
+        Self {
+            policy,
+            options,
+            listens: vec![],
+            sockets: vec![],
+            timeout: Duration::from_secs(30),
+            direct_fallback: false,
+            race: false,
+            parallel: 1,
+            force_tunnel: false,
+            server_keepalive: net::Keepalive::default(),
+            shutdown_timeout: Duration::from_secs(30),
+        }
+    }
+    pub fn listen(mut self, addr: SocketAddr) -> Self {
+        self.listens.push(addr);
+        self
+    }
+    /// Serve sockets supplied by a service manager or embedding application.
+    pub fn listeners(mut self, sockets: Vec<TcpListener>) -> Self {
+        self.sockets.extend(sockets);
+        self
+    }
+    pub fn bind_listener(self, socket: TcpListener) -> Self {
+        self.listeners(vec![socket])
+    }
+    pub fn server_keepalive(mut self, options: net::Keepalive) -> Self {
+        self.server_keepalive = options;
+        self
+    }
+    pub fn shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.shutdown_timeout = timeout;
+        self
+    }
+    pub fn connect_timeout(mut self, v: Duration) -> Self {
+        self.timeout = v;
+        self
+    }
+    pub fn direct_fallback(mut self, v: bool) -> Self {
+        self.direct_fallback = v;
+        self
+    }
+    pub fn race_connect(mut self, v: bool) -> Self {
+        self.race = v;
+        self
+    }
+    pub fn parallel_connect(mut self, v: usize) -> Self {
+        self.parallel = v.max(1);
+        self
+    }
+    pub fn force_tunnel(mut self, v: bool) -> Self {
+        self.force_tunnel = v;
+        self
+    }
+    pub async fn bind(mut self) -> Result<Context> {
+        let mut listeners = std::mem::take(&mut self.sockets);
+        let addrs = if !listeners.is_empty() {
+            vec![]
+        } else if self.listens.is_empty() {
+            vec!["127.0.0.1:3128".parse().unwrap()]
+        } else {
+            self.listens.clone()
+        };
+        for addr in addrs {
+            listeners.push(
+                TcpListener::bind(addr)
+                    .await
+                    .with_context(|| format!("binding {addr}"))?,
+            );
+        }
+        let local_addrs = listeners
+            .iter()
+            .map(TcpListener::local_addr)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        if listeners.is_empty() {
+            anyhow::bail!("no proxy listeners were configured or supplied")
+        }
+        let (shutdown, rx) = watch::channel(false);
+        let (events, _) = broadcast::channel(16);
+        let tracker = TaskTracker::new();
+        let mut joins = Vec::new();
+        for listener in listeners {
+            let cfg = self.clone();
+            let rx = rx.clone();
+            let events = events.clone();
+            let tracker = tracker.clone();
+            joins.push(tokio::spawn(async move {
+                accept_loop(listener, cfg, rx, events, tracker).await
+            }));
+        }
+        Ok(Context {
+            local_addrs,
+            events,
+            shutdown,
+            tracker,
+            joins,
+        })
+    }
+    /// Serve one already-connected client stream. The returned context exposes
+    /// shutdown and completion just like a listener-backed server.
+    pub fn serve_stream<S>(self, stream: S, peer: SocketAddr) -> Context
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (shutdown, mut rx) = watch::channel(false);
+        let (events, _) = broadcast::channel(16);
+        let tracker = TaskTracker::new();
+        let cfg = self;
+        let ev = events.clone();
+        let task_tracker = tracker.clone();
+        let join = tokio::spawn(async move {
+            tokio::select! {_=rx.changed()=>{},_=serve_io(stream,peer,None,cfg,ev,task_tracker.clone())=>{}}
+        });
+        Context {
+            local_addrs: vec![],
+            events,
+            shutdown,
+            tracker,
+            joins: vec![join],
+        }
+    }
+}
+
+pub struct Context {
+    local_addrs: Vec<SocketAddr>,
+    events: broadcast::Sender<String>,
+    shutdown: watch::Sender<bool>,
+    tracker: TaskTracker,
+    joins: Vec<JoinHandle<()>>,
+}
+impl Context {
+    pub fn local_addrs(&self) -> &[SocketAddr] {
+        &self.local_addrs
+    }
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.events.subscribe()
+    }
+    pub fn shutdown(&self) {
+        let _ = self.shutdown.send(true);
+    }
+    pub fn is_shutdown(&self) -> bool {
+        *self.shutdown.subscribe().borrow()
+    }
+    pub async fn wait(mut self) {
+        for j in self.joins.drain(..) {
+            let _ = j.await;
+        }
+        self.tracker.close();
+        self.tracker.wait().await;
+    }
+    pub async fn wait_timeout(self, d: Duration) -> bool {
+        tokio::time::timeout(d, self.wait()).await.is_ok()
+    }
+}
+
+async fn accept_loop(
+    listener: TcpListener,
+    cfg: ContextBuilder,
+    mut shutdown: watch::Receiver<bool>,
+    events: broadcast::Sender<String>,
+    tracker: TaskTracker,
+) {
+    let mut active = tokio::task::JoinSet::new();
+    let mut failures = 0u32;
+    loop {
+        tokio::select! {
+            _=shutdown.changed()=>break,
+            Some(_)=active.join_next(),if !active.is_empty()=>{},
+            result=listener.accept()=>match result {
+                Ok((stream,peer))=>{failures=0;let cfg=cfg.clone();let events=events.clone();let tracker=tracker.clone();active.spawn(async move {serve_client(stream,peer,cfg,events,tracker).await;});},
+                Err(e)=>{tracing::warn!("accept failed: {e}");if !matches!(e.kind(),std::io::ErrorKind::ConnectionAborted|std::io::ErrorKind::ConnectionReset|std::io::ErrorKind::OutOfMemory){failures+=1;if failures>=32{tracing::error!("stopping after 32 consecutive accept failures");break;}}tokio::time::sleep(Duration::from_millis(500)).await;}
+            }
+        }
+    }
+    tracker.close();
+    let _ = tokio::time::timeout(cfg.shutdown_timeout, async {
+        while active.join_next().await.is_some() {}
+        tracker.wait().await
+    })
+    .await;
+}
+async fn serve_client(
+    stream: TcpStream,
+    peer: SocketAddr,
+    cfg: ContextBuilder,
+    events: broadcast::Sender<String>,
+    tracker: TaskTracker,
+) {
+    let _ = net::configure_keepalive(&stream, &cfg.server_keepalive);
+    let local = stream.local_addr().ok();
+    serve_io(stream, peer, local, cfg, events, tracker).await;
+}
+async fn serve_io<S>(
+    stream: S,
+    peer: SocketAddr,
+    local: Option<SocketAddr>,
+    cfg: ContextBuilder,
+    events: broadcast::Sender<String>,
+    tracker: TaskTracker,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(stream);
+    let service = service_fn(move |req| {
+        let cfg = cfg.clone();
+        let events = events.clone();
+        let tracker = tracker.clone();
+        async move { handle(req, peer, local, cfg, events, tracker).await }
+    });
+    let _ = hyper::server::conn::http1::Builder::new()
+        .serve_connection(io, service)
+        .with_upgrades()
+        .await;
+}
+
+fn full(status: StatusCode, content_type: &str, body: String) -> Response<OutBody> {
+    Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, content_type)
+        .header(http::header::CONNECTION, "close")
+        .body(
+            Full::new(Bytes::from(body))
+                .map_err(|never| match never {})
+                .boxed(),
+        )
+        .unwrap()
+}
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+fn error_response(status: StatusCode, err: impl std::fmt::Display) -> Response<OutBody> {
+    let err = html_escape(&err.to_string());
+    let body = format!(
+        "<!doctype html><html><head><title>{status}</title></head><body><h1>{status}</h1><p>{err}</p><footer>unproxy {}</footer></body></html>",
+        crate::VERSION
+    );
+    full(status, "text/html; charset=utf-8", body)
+}
+fn sanitize(headers: &mut HeaderMap) {
+    let nominated: Vec<HeaderName> = headers
+        .get_all(http::header::CONNECTION)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(','))
+        .filter_map(|s| HeaderName::from_bytes(s.trim().as_bytes()).ok())
+        .collect();
+    for n in [
+        "connection",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    ] {
+        headers.remove(n);
+    }
+    for n in nominated {
+        headers.remove(n);
+    }
+}
+
+async fn handle(
+    mut req: Request<Incoming>,
+    peer: SocketAddr,
+    local: Option<SocketAddr>,
+    cfg: ContextBuilder,
+    events: broadcast::Sender<String>,
+    tracker: TaskTracker,
+) -> Result<Response<OutBody>, std::convert::Infallible> {
+    let start = Instant::now();
+    let method = req.method().clone();
+    let original = req.uri().to_string();
+    let version = format!("{:?}", req.version());
+    let user_agent = req
+        .headers()
+        .get(http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let connect = method == Method::CONNECT;
+    if !connect && req.uri().authority().is_none() {
+        let path = req.uri().path();
+        if method != Method::GET {
+            return Ok(error_response(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "Only GET is supported for local resources",
+            ));
+        }
+        return Ok(match path {
+            "/" => full(
+                StatusCode::OK,
+                "text/html; charset=utf-8",
+                format!(
+                    "<!doctype html><title>unproxy</title><h1>unproxy</h1><p>{}</p>",
+                    crate::VERSION
+                ),
+            ),
+            "/proxy.pac" => {
+                let host = req
+                    .headers()
+                    .get(http::header::HOST)
+                    .and_then(|v| v.to_str().ok())
+                    .filter(|h| h.parse::<http::uri::Authority>().is_ok())
+                    .unwrap_or("127.0.0.1:3128");
+                full(
+                    StatusCode::OK,
+                    "application/x-ns-proxy-autoconfig",
+                    format!("function FindProxyForURL(url, host) {{ return \"PROXY {host}\"; }}\n"),
+                )
+            }
+            "/access.html" => full(
+                StatusCode::OK,
+                "text/html; charset=utf-8",
+                access_html().into(),
+            ),
+            "/access.log" => event_response(events),
+            _ => error_response(StatusCode::NOT_FOUND, "Resource not found"),
+        });
+    }
+    let destination = if connect {
+        connect_destination(req.uri())
+    } else {
+        Destination::from_uri(req.uri()).ok()
+    };
+    let Some(destination) = destination else {
+        return Ok(error_response(
+            StatusCode::BAD_REQUEST,
+            "Invalid destination URI",
+        ));
+    };
+    if let Some(local) = local {
+        let host = destination.endpoint.host.trim_matches(['[', ']']);
+        let loops_back = host
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .is_some_and(|ip| ip == local.ip() && destination.endpoint.port == local.port())
+            || (host.eq_ignore_ascii_case("localhost")
+                && destination.endpoint.port == local.port());
+        if loops_back {
+            return Ok(error_response(
+                StatusCode::BAD_REQUEST,
+                "proxy request targets this listener",
+            ));
+        }
+    }
+    let route_input = if connect {
+        let scheme = if destination.endpoint.port == 443 {
+            "https"
+        } else {
+            "http"
+        };
+        format!("{scheme}://{}/", destination.endpoint)
+    } else {
+        destination.pac_url.clone()
+    };
+    let mut routes = cfg
+        .policy
+        .evaluate(route_input.clone(), destination.endpoint.host.clone())
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("PAC evaluation failed: {e:#}");
+            Routes(vec![Route::Direct])
+        });
+    if cfg.direct_fallback && !routes.0.iter().any(|r| matches!(r, Route::Direct)) {
+        routes.0.push(Route::Direct)
+    }
+    if routes.0.is_empty() {
+        routes.0.push(Route::Direct)
+    }
+    // Preserve policy order. Sequential selection also bounds socket use and gives deterministic behavior.
+    let attempt_timeout = if connect || cfg.force_tunnel {
+        cfg.timeout.saturating_mul(2)
+    } else {
+        cfg.timeout
+    };
+    let chosen = select_route(
+        &routes,
+        &destination.endpoint,
+        connect,
+        cfg.force_tunnel,
+        &cfg.options,
+        attempt_timeout,
+        cfg.parallel,
+        cfg.race,
+    )
+    .await;
+    let Some((route, stream, tunneled)) = chosen else {
+        publish(
+            &events,
+            peer,
+            &method,
+            &original,
+            &version,
+            "DIRECT",
+            &format!("error: could not connect to {}", destination.endpoint),
+            None,
+            user_agent.as_deref(),
+            start,
+        );
+        return Ok(error_response(
+            StatusCode::BAD_GATEWAY,
+            format!("Could not connect to {}", destination.endpoint),
+        ));
+    };
+    if connect {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(
+                Full::new(Bytes::new())
+                    .map_err(|never| match never {})
+                    .boxed(),
+            )
+            .unwrap();
+        let on = hyper::upgrade::on(&mut req);
+        let route_name = route.to_string();
+        tracker.spawn(async move {
+            if let Ok(upgraded) = on.await {
+                let mut client = TokioIo::new(upgraded);
+                let mut upstream = stream;
+                if let Err(error) = net::relay(&mut client, &mut upstream).await {
+                    match error.source.kind() {
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe => {
+                            tracing::debug!(%error,"CONNECT relay ended")
+                        }
+                        std::io::ErrorKind::NotConnected
+                            if error.a_read == error.b_written
+                                && error.b_read == error.a_written =>
+                        {
+                            tracing::debug!(%error,"CONNECT relay ended without lost bytes")
+                        }
+                        _ => tracing::warn!(elapsed=?start.elapsed(),%error,"CONNECT relay failed"),
+                    }
+                }
+            }
+        });
+        publish(
+            &events,
+            peer,
+            &method,
+            &original,
+            &version,
+            &route_name,
+            "200",
+            None,
+            req.headers()
+                .get(http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok()),
+            start,
+        );
+        return Ok(response);
+    }
+    match forward(
+        req,
+        stream,
+        &destination,
+        &route,
+        tunneled,
+        &cfg.options,
+        peer,
+        &method,
+        &original,
+        &version,
+        start,
+        user_agent.as_deref(),
+        &events,
+    )
+    .await
+    {
+        Ok(response) => Ok(response),
+        Err(e) => {
+            tracing::debug!("forward failed: {e:#}");
+            publish(
+                &events,
+                peer,
+                &method,
+                &original,
+                &version,
+                &route.to_string(),
+                &format!("error: {e:#}"),
+                None,
+                user_agent.as_deref(),
+                start,
+            );
+            Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("Upstream exchange failed: {e:#}"),
+            ))
+        }
+    }
+}
+
+async fn select_route(
+    routes: &Routes,
+    destination: &Endpoint,
+    connect: bool,
+    force_tunnel: bool,
+    options: &ConnectionOptions,
+    timeout: Duration,
+    parallel: usize,
+    race: bool,
+) -> Option<(Route, BoxedIo, bool)> {
+    type Attempt = BoxFuture<'static, (usize, Route, bool, anyhow::Result<BoxedIo>)>;
+    let mut pending: FuturesUnordered<Attempt> = FuturesUnordered::new();
+    let mut next = 0usize;
+    let mut in_flight = 0usize;
+    let mut results: Vec<Option<Option<(Route, BoxedIo, bool)>>> = std::iter::repeat_with(|| None)
+        .take(routes.0.len())
+        .collect();
+    let mut next_ordered = 0usize;
+    let max = parallel.max(1);
+    let launch = |idx: usize, pending: &mut FuturesUnordered<Attempt>, in_flight: &mut usize| {
+        let route = routes.0[idx].clone();
+        let dest = destination.clone();
+        let options = options.clone();
+        let tunnel = (connect || force_tunnel) && !matches!(route, Route::Direct);
+        pending.push(Box::pin(async move {
+            let result = net::connect(&route, &dest, tunnel, &options, timeout).await;
+            (idx, route, tunnel, result)
+        }));
+        *in_flight += 1;
+    };
+    while next < routes.0.len() && in_flight < max {
+        launch(next, &mut pending, &mut in_flight);
+        next += 1;
+    }
+    while let Some((idx, route, tunnel, result)) = pending.next().await {
+        in_flight -= 1;
+        let failed = match result {
+            Ok(stream) => {
+                if race {
+                    return Some((route, stream, tunnel));
+                }
+                results[idx] = Some(Some((route, stream, tunnel)));
+                false
+            }
+            Err(e) => {
+                tracing::debug!("route {route} failed for {destination}: {e:#}");
+                results[idx] = Some(None);
+                true
+            }
+        };
+        // A failed attempt frees a slot for the next policy entry.
+        if failed {
+            while next < routes.0.len() && in_flight < max {
+                launch(next, &mut pending, &mut in_flight);
+                next += 1;
+            }
+        }
+        if !race {
+            while next_ordered < results.len() {
+                match results[next_ordered].take() {
+                    Some(Some(winner)) => return Some(winner),
+                    Some(None) => next_ordered += 1,
+                    None => break,
+                }
+            }
+        }
+    }
+    None
+}
+
+fn connect_destination(uri: &Uri) -> Option<Destination> {
+    let auth = uri.authority()?;
+    let host = auth.host().trim_start_matches('[').trim_end_matches(']');
+    let port = auth.port_u16()?;
+    let scheme = if port == 443 { "https" } else { "http" };
+    let endpoint = Endpoint {
+        host: host.into(),
+        port,
+    };
+    Some(Destination {
+        pac_url: format!("{scheme}://{endpoint}/"),
+        endpoint,
+        path: "/".into(),
+        scheme: scheme.into(),
+    })
+}
+async fn forward(
+    req: Request<Incoming>,
+    stream: BoxedIo,
+    dest: &Destination,
+    route: &Route,
+    tunneled: bool,
+    options: &ConnectionOptions,
+    peer: SocketAddr,
+    method: &Method,
+    original: &str,
+    version: &str,
+    start: Instant,
+    user_agent: Option<&str>,
+    events: &broadcast::Sender<String>,
+) -> Result<Response<OutBody>> {
+    let (mut parts, body) = req.into_parts();
+    sanitize(&mut parts.headers);
+    if !parts.headers.contains_key(http::header::HOST) {
+        let host = if dest.endpoint.host.contains(':') {
+            format!("[{}]", dest.endpoint.host)
+        } else {
+            dest.endpoint.host.clone()
+        };
+        parts
+            .headers
+            .insert(http::header::HOST, HeaderValue::from_str(&host)?);
+    }
+    let proxy = match route {
+        Route::Http(e) | Route::Https(e) => Some(e),
+        Route::Direct => None,
+    };
+    if let Some(proxy) = proxy.filter(|_| !tunneled) {
+        if let Some(v) = options.auth.authorization(&proxy.host).await? {
+            parts.headers.insert("proxy-authorization", v);
+        }
+    }
+    parts
+        .headers
+        .insert(http::header::CONNECTION, HeaderValue::from_static("close"));
+    let uri = if matches!(route, Route::Direct) || tunneled {
+        format!(
+            "{}{}",
+            dest.path.starts_with('/').then_some("").unwrap_or("/"),
+            dest.path
+        )
+        .parse::<Uri>()?
+    } else {
+        parts.uri.clone()
+    };
+    parts.uri = uri;
+    let request = Request::from_parts(parts, body);
+    let io = TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
+        .handshake(io)
+        .await?;
+    tokio::spawn(async move {
+        let _ = conn.with_upgrades().await;
+    });
+    let response = sender.send_request(request).await?;
+    let status = response.status();
+    if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
+        anyhow::bail!("upstream returned HTTP 407");
+    }
+    let len = response
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok());
+    let mut response = response.map(http_body_util::BodyExt::boxed);
+    sanitize(&mut response.headers_mut());
+    publish(
+        events,
+        peer,
+        method,
+        original,
+        version,
+        &route.to_string(),
+        &status.as_u16().to_string(),
+        len,
+        user_agent,
+        start,
+    );
+    Ok(response)
+}
+fn publish(
+    events: &broadcast::Sender<String>,
+    peer: SocketAddr,
+    m: &Method,
+    u: &str,
+    v: &str,
+    route: &str,
+    status: &str,
+    bytes: Option<u64>,
+    agent: Option<&str>,
+    start: Instant,
+) {
+    let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
+    let quote = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    };
+    let status_text = if let Some(error) = status.strip_prefix("error:") {
+        format!("error: \"{}\"", quote(error.trim()))
+    } else {
+        format!(
+            "{status} {}b",
+            bytes.map(|b| b.to_string()).unwrap_or_else(|| "-".into())
+        )
+    };
+    let line = format!(
+        "{timestamp} {peer} {route} \"{}\" {:.3}s {status_text} \"{}\"",
+        quote(&format!("{m} {u} {v}")),
+        start.elapsed().as_secs_f64(),
+        quote(agent.unwrap_or("-"))
+    );
+    let _ = events.send(line);
+}
+fn event_response(events: broadcast::Sender<String>) -> Response<OutBody> {
+    let stream = async_stream::stream! {let mut rx=events.subscribe(); loop {match rx.recv().await {Ok(s)=>yield Ok::<hyper::body::Frame<Bytes>,hyper::Error>(hyper::body::Frame::data(Bytes::from(format!("data:{s}\n\n")))),Err(broadcast::error::RecvError::Lagged(n))=>yield Ok(hyper::body::Frame::data(Bytes::from(format!("event:lagged\ndata:{n}\n\n")))),Err(_)=>break}}};
+    let body = http_body_util::BodyExt::boxed(http_body_util::StreamBody::new(stream));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(http::header::CONTENT_TYPE, "text/event-stream")
+        .header("cache-control", "no-store")
+        .body(body)
+        .unwrap()
+}
+fn access_html() -> &'static str {
+    "<!doctype html><meta charset=utf-8><title>unproxy access log</title><h1>Access log</h1><button id=stop>Stop</button><pre id=log></pre><script>const s=new EventSource('access.log');s.onmessage=e=>{const p=document.createElement('div');p.textContent=e.data;document.querySelector('#log').append(p)};s.addEventListener('lagged',e=>console.warn('access events dropped',e.data));s.onerror=e=>console.warn('access stream error',e);document.querySelector('#stop').onclick=()=>s.close();</script>"
+}
