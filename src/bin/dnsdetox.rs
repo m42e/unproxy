@@ -24,11 +24,11 @@ fn config() -> Option<PathBuf> {
         p.push("/usr/local/etc/dnsdetox/dnsdetoxrc".into());
     }
     #[cfg(windows)]
-    if let Ok(e) = env::current_exe() {
-        if let Some(d) = e.parent() {
-            p.push(d.join("dnsdetoxrc"));
-            p.push(d.join("dnsdetoxrc.txt"));
-        }
+    if let Ok(e) = env::current_exe()
+        && let Some(d) = e.parent()
+    {
+        p.push(d.join("dnsdetoxrc"));
+        p.push(d.join("dnsdetoxrc.txt"));
     }
     p.into_iter().find(|x| fs::read(x).is_ok())
 }

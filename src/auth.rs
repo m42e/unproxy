@@ -593,6 +593,23 @@ struct SecBufferDesc {
     buffers: *mut SecBuffer,
 }
 #[cfg(all(feature = "negotiate", windows))]
+type InitializeSecurityContextW = unsafe extern "system" fn(
+    *mut SecHandle,
+    *mut SecHandle,
+    *const u16,
+    u32,
+    u32,
+    u32,
+    *mut SecBufferDesc,
+    u32,
+    *mut SecHandle,
+    *mut SecBufferDesc,
+    *mut u32,
+    *mut i64,
+) -> i32;
+#[cfg(all(feature = "negotiate", windows))]
+type SspiHandleAction = unsafe extern "system" fn(*mut SecHandle) -> i32;
+#[cfg(all(feature = "negotiate", windows))]
 pub struct NegotiateContext {
     lib: libloading::Library,
     cred: SecHandle,
@@ -652,22 +669,8 @@ impl NegotiateContext {
     }
     pub fn step(&mut self, _server_token: Option<&[u8]>) -> Result<Option<Vec<u8>>> {
         unsafe {
-            let init: libloading::Symbol<
-                unsafe extern "system" fn(
-                    *mut SecHandle,
-                    *mut SecHandle,
-                    *const u16,
-                    u32,
-                    u32,
-                    u32,
-                    *mut SecBufferDesc,
-                    u32,
-                    *mut SecHandle,
-                    *mut SecBufferDesc,
-                    *mut u32,
-                    *mut i64,
-                ) -> i32,
-            > = self.lib.get(b"InitializeSecurityContextW\0")?;
+            let init: libloading::Symbol<InitializeSecurityContextW> =
+                self.lib.get(b"InitializeSecurityContextW\0")?;
             let _ = _server_token; // The Windows adapter intentionally ignores server challenge tokens.
             let in_desc: *mut SecBufferDesc = std::ptr::null_mut();
             let mut prior = self.ctx;
@@ -720,25 +723,15 @@ impl NegotiateContext {
 impl Drop for NegotiateContext {
     fn drop(&mut self) {
         unsafe {
-            if self.ctx.a != 0 || self.ctx.b != 0 {
-                if let Ok(f) = self
-                    .lib
-                    .get::<unsafe extern "system" fn(*mut SecHandle) -> i32>(
-                        b"DeleteSecurityContext\0",
-                    )
-                {
-                    f(&mut self.ctx);
-                }
+            if (self.ctx.a != 0 || self.ctx.b != 0)
+                && let Ok(f) = self.lib.get::<SspiHandleAction>(b"DeleteSecurityContext\0")
+            {
+                f(&mut self.ctx);
             }
-            if self.cred.a != 0 || self.cred.b != 0 {
-                if let Ok(f) = self
-                    .lib
-                    .get::<unsafe extern "system" fn(*mut SecHandle) -> i32>(
-                        b"FreeCredentialsHandle\0",
-                    )
-                {
-                    f(&mut self.cred);
-                }
+            if (self.cred.a != 0 || self.cred.b != 0)
+                && let Ok(f) = self.lib.get::<SspiHandleAction>(b"FreeCredentialsHandle\0")
+            {
+                f(&mut self.cred);
             }
         }
     }

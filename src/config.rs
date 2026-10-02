@@ -43,11 +43,11 @@ pub fn settings_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     p.push("/opt/unproxy/etc/unproxyrc".into());
     #[cfg(windows)]
-    if let Ok(e) = env::current_exe() {
-        if let Some(d) = e.parent() {
-            p.push(d.join("unproxyrc"));
-            p.push(d.join("unproxyrc.txt"));
-        }
+    if let Ok(e) = env::current_exe()
+        && let Some(d) = e.parent()
+    {
+        p.push(d.join("unproxyrc"));
+        p.push(d.join("unproxyrc.txt"));
     }
     first_readable(p)
 }
@@ -64,10 +64,10 @@ pub fn pac_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     p.push("/opt/unproxy/etc/proxy.pac".into());
     #[cfg(windows)]
-    if let Ok(e) = env::current_exe() {
-        if let Some(d) = e.parent() {
-            p.push(d.join("proxy.pac"))
-        }
+    if let Ok(e) = env::current_exe()
+        && let Some(d) = e.parent()
+    {
+        p.push(d.join("proxy.pac"))
     }
     p.into_iter().find(|p| p.is_file())
 }
