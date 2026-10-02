@@ -10,6 +10,7 @@ use std::{
 use tokio::sync::oneshot;
 
 const DEFAULT_SCRIPT: &str = "function FindProxyForURL(url, host) { return 'DIRECT'; }";
+const LOOP_ITERATION_LIMIT: u64 = 1_000_000;
 
 #[derive(Clone, Debug)]
 struct CacheEntry {
@@ -60,6 +61,9 @@ impl Pac {
     }
     fn install_script(&mut self, source: Option<&str>) -> Result<()> {
         self.context = Context::default();
+        self.context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(LOOP_ITERATION_LIMIT);
         self.cache.lock().unwrap().clear();
         self.last_prune = Instant::now();
         self.source = source.map(str::to_owned);
