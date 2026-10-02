@@ -146,6 +146,11 @@ impl ChildLifecycle {
         self.start(exe, prefs)
     }
 }
+impl Drop for ChildLifecycle {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
 
 #[cfg(target_os = "macos")]
 pub fn run_app() -> Result<()> {
@@ -196,6 +201,7 @@ mod native {
     }
     unsafe extern "C-unwind" fn action(_this: *mut AnyObject, _cmd: Sel, sender: *mut AnyObject) {
         let tag: i64 = unsafe { msg_send![sender, tag] };
+        let mut terminate = false;
         if let Some(shared) = STATE.lock().unwrap().as_ref() {
             let mut s = shared.lock().unwrap();
             match tag {
@@ -220,12 +226,15 @@ mod native {
                 }
                 6 => {
                     let _ = s.child.stop();
-                    let app: *mut AnyObject =
-                        unsafe { msg_send![objc2::class!(NSApplication), sharedApplication] };
-                    let _: () = unsafe { msg_send![app, terminate:ptr::null_mut::<AnyObject>()] };
+                    terminate = true;
                 }
                 _ => {}
             }
+        }
+        if terminate {
+            let app: *mut AnyObject =
+                unsafe { msg_send![objc2::class!(NSApplication), sharedApplication] };
+            let _: () = unsafe { msg_send![app, terminate:ptr::null_mut::<AnyObject>()] };
         }
     }
     unsafe extern "C-unwind" fn rebuild_menu(
@@ -322,6 +331,16 @@ mod native {
             unsafe { msg_send![objc2::class!(NSApplication), sharedApplication] };
         let _: () = unsafe { msg_send![app,terminate:ptr::null_mut::<AnyObject>()] };
     }
+    unsafe extern "C-unwind" fn application_will_terminate(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        _notification: *mut AnyObject,
+    ) {
+        if let Some(shared) = STATE.lock().unwrap().as_ref() {
+            let mut s = shared.lock().unwrap();
+            let _ = s.child.stop();
+        }
+    }
     fn main_app_is_running() -> bool {
         let apps: *mut AnyObject = unsafe {
             msg_send![objc2::class!(NSRunningApplication),runningApplicationsWithBundleIdentifier:cocoa_string(APP_BUNDLE_ID)]
@@ -356,6 +375,10 @@ mod native {
                 sel!(terminateHelper:),
                 helper_terminate as unsafe extern "C-unwind" fn(_, _, _),
             );
+            cb.add_method(
+                sel!(applicationWillTerminate:),
+                application_will_terminate as unsafe extern "C-unwind" fn(_, _, _),
+            );
         }
         cb.register()
     }
@@ -367,6 +390,7 @@ mod native {
             sel!(networkAvailable:),
             sel!(networkUnavailable:),
             sel!(terminateHelper:),
+            sel!(applicationWillTerminate:),
         ] {
             let method = cls.instance_method(selector).ok_or_else(|| {
                 anyhow::anyhow!("missing Objective-C selector {:?}", selector.name())
@@ -550,6 +574,7 @@ mod native {
         let _: () = unsafe { msg_send![button, setTitle:cocoa_string("Proxy")] };
         let cls = action_class();
         let target: *mut AnyObject = unsafe { msg_send![cls, new] };
+        let _: () = unsafe { msg_send![app, setDelegate:target] };
         let center: *mut AnyObject = unsafe {
             msg_send![
                 objc2::class!(NSDistributedNotificationCenter),
