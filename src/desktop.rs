@@ -125,6 +125,7 @@ impl ChildLifecycle {
         }
         let mut c = Command::new(exe);
         c.args(prefs.child_args())
+            .env("UNPROXY_NORC", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());

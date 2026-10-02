@@ -43,6 +43,41 @@ fn app_bundle_paths_point_to_packaged_child_and_login_item() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn embedded_child_gets_no_rc_environment_without_suppressing_cli_arguments() {
+    use std::{
+        os::unix::fs::PermissionsExt,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("norrc-value");
+    let program = temp.path().join("child-fixture.sh");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$UNPROXY_NORC\" > '{}'\nexec sleep 30\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&program).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&program, perms).unwrap();
+    let prefs = Preferences::default();
+    assert!(prefs.child_args().contains(&"--pac-file".into()));
+    let mut child = ChildLifecycle::default();
+    child.start(&program, &prefs).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "1");
+    child.stop().unwrap();
+}
+
 #[test]
 fn preferences_roundtrip_and_child_lifecycle_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
