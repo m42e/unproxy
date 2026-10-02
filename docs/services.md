@@ -35,6 +35,16 @@ executable path matches your installation. Native installers unload the current
 and legacy com.github.m42e.unproxy agents and enable the replacement for
 the current console user when a GUI session exists.
 
+The daemon observes macOS Kerberos internal-network notifications while its
+launch agent runs; no second notification service or agent is needed. It
+assumes availability at startup, routes new decisions directly when notified
+that the internal network is unavailable, and reloads its configured PAC
+source when availability returns. These events require the organization's
+Kerberos SSO configuration and do not detect generic network reachability. A
+failed PAC restore is retried on the next available notification. SIGHUP
+remains the manual PAC reload control and SIGUSR1 selects direct mode without
+changing native notification state.
+
 Systemd activation uses LISTEN_FDS, LISTEN_FDNAMES and optional LISTEN_PID.
 Descriptors start at 3; every matching name is adopted with ownership transfer.
 No match is a diagnosed error. macOS uses launch_activate_socket. Windows does

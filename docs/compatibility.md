@@ -12,13 +12,24 @@ Forced CONNECT uses origin-form targets inside the resulting ordinary-HTTP
 tunnel rather than the reference's absolute form. Negative, non-finite and
 overflowing durations are rejected. Date/time helper boundaries are normalized
 and GMT uses UTC construction. Initial inline scripts report load failures.
-PAC initialization/evaluation has a 2-second deadline and instruction budget.
-An explicit script replacement resets the runtime before script execution;
-there is no last-known-good guarantee. Startup file/network loading remains
-asynchronous. Default request evaluation errors still select DIRECT, while
-`--strict-policy` fails closed. Ordinary absolute-form HTTPS receives 400 and
-requires CONNECT. Management routes require a loopback peer and listener Host
-or an explicit embedded alias.
+PAC initialization/evaluation has a 2-second deadline, instruction budget and
+100,000-iteration loop limit. Explicit script replacement resets the runtime only
+after the replacement validates. Startup awaits every configured file or URL;
+failed reloads preserve the active policy. Ordered sources use isolated runtimes.
+Evaluation errors return 502 and publish access errors, including with direct
+fallback enabled. Startup IP detection is retained for every manual/native update,
+and overrides remain authoritative. Ordinary absolute-form HTTPS receives 400 and
+requires CONNECT. Management routes require a loopback peer and listener Host or
+an explicit embedded alias.
+
+macOS Kerberos availability notifications deliberately switch new decisions to
+DIRECT and restore the complete source list. Failed automatic restores retry on
+the next available notification; duplicate successful states are ignored.
+
+The DNS companion already used valid Rust 2024 receiver bindings. Workspace/bin
+build and tests continue to cover it; no DNS packet or transport change was needed
+for #632. The DNS resolver is bounded and each evaluation permits at most four
+uncached lookups.
 
 Primary DNS errors do not trigger broader fallback. Native login helper enabling
 remains unconditional; no working Autostart or app system-proxy UI is claimed.

@@ -118,17 +118,19 @@ fn runtime_products_have_usable_help_and_versions() {
 }
 
 #[tokio::test]
-async fn startup_serves_direct_while_remote_policy_is_still_loading() {
+async fn startup_waits_for_remote_policy_before_accepting_connections() {
     let temp = tempfile::tempdir().unwrap();
     let netrc = temp.path().join("netrc");
     std::fs::write(&netrc, "").unwrap();
     let remote = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let pac_address = remote.local_addr().unwrap();
     let (release, wait) = tokio::sync::oneshot::channel();
+    let (requested, request_seen) = tokio::sync::oneshot::channel();
     let fetch_task = tokio::spawn(async move {
         let (mut client, _) = remote.accept().await.unwrap();
         let mut request = [0; 1024];
         let _ = client.read(&mut request).await.unwrap();
+        requested.send(()).unwrap();
         wait.await.unwrap();
         let script = "function FindProxyForURL(){return 'DIRECT';}";
         client
@@ -144,11 +146,17 @@ async fn startup_serves_direct_while_remote_policy_is_still_loading() {
     });
     let address = reserve_address();
     let mut child = process(address, &format!("http://{pac_address}/proxy.pac"), &netrc);
+    tokio::time::timeout(Duration::from_secs(5), request_seen)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(TcpStream::connect(address).await.is_err());
+    assert!(child.try_wait().unwrap().is_none());
+    release.send(()).unwrap();
+    fetch_task.await.unwrap();
     wait_for_listener(address, &mut child).await;
     let (origin_address, origin_task) = origin().await;
     assert_eq!(response_status(address, origin_address).await, 200);
-    release.send(()).unwrap();
-    fetch_task.await.unwrap();
     child.kill().await.unwrap();
     child.wait().await.unwrap();
     origin_task.abort();
@@ -156,7 +164,7 @@ async fn startup_serves_direct_while_remote_policy_is_still_loading() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn direct_signal_reload_and_fatal_reload_error_follow_configured_policy() {
+async fn direct_signal_reload_and_failed_reload_preserve_service() {
     let temp = tempfile::tempdir().unwrap();
     let netrc = temp.path().join("netrc");
     std::fs::write(&netrc, "").unwrap();
@@ -190,10 +198,83 @@ async fn direct_signal_reload_and_fatal_reload_error_follow_configured_policy() 
     await_status(address, origin_address, 502).await;
     std::fs::remove_file(&pac).unwrap();
     assert_eq!(unsafe { libc::kill(pid, libc::SIGHUP) }, 0);
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
-        .await
-        .unwrap()
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(child.try_wait().unwrap().is_none());
+    assert_eq!(response_status(address, origin_address).await, 502);
+    std::fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGHUP) }, 0);
+    await_status(address, origin_address, 200).await;
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+    origin_task.abort();
+}
+
+#[tokio::test]
+async fn invalid_configured_startup_policy_exits_unsuccessfully() {
+    let temp = tempfile::tempdir().unwrap();
+    let netrc = temp.path().join("netrc");
+    std::fs::write(&netrc, "").unwrap();
+    let pac = temp.path().join("bad.pac");
+    for body in [
+        "function {",
+        "function FindProxyForUrl(){return 'DIRECT';}",
+        "var FindProxyForURL=1;",
+    ] {
+        std::fs::write(&pac, body).unwrap();
+        let address = reserve_address();
+        let mut child = process(address, pac.to_str().unwrap(), &netrc);
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!status.success());
+        assert!(TcpStream::connect(address).await.is_err());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_ip_survives_startup_hup_usr1_and_whole_list_restore() {
+    let temp = tempfile::tempdir().unwrap();
+    let netrc = temp.path().join("netrc");
+    std::fs::write(&netrc, "").unwrap();
+    let first = temp.path().join("direct.pac");
+    let second = temp.path().join("override.pac");
+    std::fs::write(&first, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+    std::fs::write(&second, "const startupIP=myIpAddress(); function FindProxyForURL(){return startupIP==='2001:db8::42' && myIpAddress()==='2001:db8::42' ? 'DIRECT; PROXY 127.0.0.1:1':'BAD';}").unwrap();
+    let address = reserve_address();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_unproxy"))
+        .env("UNPROXY_NORC", "1")
+        .args([
+            "--listen",
+            &address.to_string(),
+            "--my-ip-address",
+            "2001:db8::42",
+            "--graceful-shutdown-timeout",
+            "1",
+            "--netrc-file",
+        ])
+        .arg(&netrc)
+        .arg("--pac-file")
+        .arg(&first)
+        .arg("--pac-file")
+        .arg(&second)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
         .unwrap();
-    assert_eq!(status.code(), Some(1));
+    wait_for_listener(address, &mut child).await;
+    let (origin_address, origin_task) = origin().await;
+    assert_eq!(response_status(address, origin_address).await, 200);
+    let pid = child.id().unwrap() as i32;
+    for signal in [libc::SIGUSR1, libc::SIGHUP] {
+        assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(response_status(address, origin_address).await, 200);
+    }
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
     origin_task.abort();
 }

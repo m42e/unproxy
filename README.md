@@ -12,7 +12,11 @@ export https_proxy=http://127.0.0.1:3128
 export no_proxy=127.0.0.1,localhost,::1
 ```
 
-Use `--pac-file FILE_OR_URL` for upstream routing. No policy means DIRECT.
+Repeat `--pac-file FILE_OR_URL` for ordered, independent PAC policies. All sources
+load and validate before serving; reload failures retain the previous policy.
+No policy means DIRECT. PAC evaluation failures return 502, including with direct
+fallback enabled. macOS Kerberos SSO availability notifications switch the running
+daemon between policy and deliberate direct mode; see [platforms](docs/platforms.md).
 Basic/netrc is the command-line default; unauthenticated upstream routes can use
 the library's no-auth factory. Add `--negotiate` to use the current native identity.
 PAC execution is bounded. For fail-closed routing while a PAC file loads and when

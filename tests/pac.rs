@@ -183,14 +183,11 @@ fn script_replacement_clears_dns_cache_and_missing_functions_error() {
     p.set_script(Some("function FindProxyForURL(){return 'DIRECT'}"))
         .unwrap();
     assert_eq!(p.cache_snapshot().len(), 0);
-    for src in [
-        "",
-        "var FindProxyForURL=1;",
-        "function FindProxyForURL(){throw new Error('no')}",
-    ] {
-        let mut q = Pac::new(Some(src)).unwrap();
-        assert!(q.evaluate("x", "x").is_err());
+    for src in ["", "var FindProxyForURL=1;"] {
+        assert!(Pac::new(Some(src)).is_err());
     }
+    let mut q = Pac::new(Some("function FindProxyForURL(){throw new Error('no')}")).unwrap();
+    assert!(q.evaluate("x", "x").is_err());
 }
 
 #[test]

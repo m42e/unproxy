@@ -1,8 +1,9 @@
-use crate::route::Routes;
+use crate::route::{Route, Routes};
 use anyhow::{Context as _, Result, anyhow, bail};
 use boa_engine::{Context, JsString, JsValue, NativeFunction, Script, Source};
 use std::{
     collections::HashMap,
+    future::Future as _,
     net::{IpAddr, ToSocketAddrs},
     sync::{
         Arc, Mutex, OnceLock,
@@ -27,6 +28,17 @@ struct CacheEntry {
     value: Option<IpAddr>,
     at: Instant,
 }
+fn preferred_ip(ips: impl IntoIterator<Item = IpAddr>) -> Option<IpAddr> {
+    let mut first = None;
+    for ip in ips {
+        if ip.is_ipv4() {
+            return Some(ip);
+        }
+        first.get_or_insert(ip);
+    }
+    first
+}
+
 pub struct Pac {
     context: Context,
     ip: Arc<Mutex<IpAddr>>,
@@ -37,67 +49,41 @@ pub struct Pac {
 }
 impl Pac {
     pub fn new(source: Option<&str>) -> Result<Self> {
+        Self::new_with_ip(source, "127.0.0.1".parse().unwrap())
+    }
+    pub fn new_with_ip(source: Option<&str>, ip: IpAddr) -> Result<Self> {
         let mut pac = Self {
-            context: limited_context(),
-            ip: Arc::new(Mutex::new("127.0.0.1".parse().unwrap())),
+            context: Context::default(),
+            ip: Arc::new(Mutex::new(ip)),
             source: None,
             cache: Arc::new(Mutex::new(HashMap::new())),
             last_prune: Instant::now(),
             dns_budget: Arc::new(AtomicUsize::new(0)),
         };
-        pac.set_script(source)?;
+        pac.install_script(source)?;
         Ok(pac)
     }
     pub fn set_script(&mut self, source: Option<&str>) -> Result<()> {
-        self.prepare_script_context(source)?;
-        eval_script_sync(source.unwrap_or(DEFAULT_SCRIPT), &mut self.context)
-            .map_err(|e| anyhow!("PAC script: {e}"))?;
-        eval_script_sync(
-            "if (typeof _dnsCache === 'undefined') var _dnsCache = new _DnsCache();",
-            &mut self.context,
-        )
-        .map_err(|e| anyhow!("PAC cache initialization: {e}"))?;
+        let mut candidate = Self {
+            context: Context::default(),
+            ip: self.ip.clone(),
+            source: None,
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            last_prune: Instant::now(),
+            dns_budget: Arc::new(AtomicUsize::new(0)),
+        };
+        candidate.install_script(source)?;
+        *self = candidate;
         Ok(())
     }
-    async fn set_script_bounded(&mut self, source: Option<&str>) -> Result<()> {
-        if source.is_some_and(|s| s.len() > MAX_PAC_SCRIPT_BYTES) {
-            bail!("PAC script exceeds 8 MiB");
-        }
-        self.prepare_script_context(source)?;
-        tokio::time::timeout(PAC_EVAL_TIMEOUT, async {
-            let script = Script::parse(
-                Source::from_bytes(source.unwrap_or(DEFAULT_SCRIPT)),
-                None,
-                &mut self.context,
-            )
-            .map_err(|e| anyhow!("PAC script parse: {e}"))?;
-            script
-                .evaluate_async_with_budget(&mut self.context, PAC_EVAL_BUDGET)
-                .await
-                .map_err(|e| anyhow!("PAC script: {e}"))?;
-            let cache = Script::parse(
-                Source::from_bytes(
-                    "if (typeof _dnsCache === 'undefined') var _dnsCache = new _DnsCache();",
-                ),
-                None,
-                &mut self.context,
-            )
-            .map_err(|e| anyhow!("PAC cache initialization parse: {e}"))?;
-            cache
-                .evaluate_async_with_budget(&mut self.context, PAC_EVAL_BUDGET)
-                .await
-                .map_err(|e| anyhow!("PAC cache initialization: {e}"))?;
-            Ok::<(), anyhow::Error>(())
-        })
-        .await
-        .context("PAC script initialization exceeded its time limit")??;
-        Ok(())
-    }
-    fn prepare_script_context(&mut self, source: Option<&str>) -> Result<()> {
+    fn install_script(&mut self, source: Option<&str>) -> Result<()> {
         if source.is_some_and(|s| s.len() > MAX_PAC_SCRIPT_BYTES) {
             bail!("PAC script exceeds 8 MiB");
         }
         self.context = limited_context();
+        self.context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(PAC_LOOP_LIMIT);
         self.cache.lock().unwrap().clear();
         self.last_prune = Instant::now();
         self.source = source.map(str::to_owned);
@@ -170,39 +156,29 @@ impl Pac {
                 }),
             )
             .map_err(|e| anyhow!("register alert: {e}"))?;
-        self.context
-            .eval(Source::from_bytes(include_str!("pac_helpers.js")))
+        eval_script_sync(include_str!("pac_helpers.js"), &mut self.context)
             .map_err(|e| anyhow!("PAC helper initialization: {e}"))?;
-        let _ = source;
+        let script = source.unwrap_or(DEFAULT_SCRIPT);
+        eval_script_sync(script, &mut self.context).map_err(|e| anyhow!("PAC script: {e}"))?;
+        if source.is_some() {
+            let callable =
+                eval_script_sync("typeof FindProxyForURL === 'function'", &mut self.context)
+                    .map_err(|e| anyhow!("PAC entry point validation: {e}"))?;
+            if !callable.as_boolean().unwrap_or(false) {
+                bail!("PAC script is missing callable FindProxyForURL")
+            }
+        }
+        eval_script_sync(
+            "if (typeof _dnsCache === 'undefined') var _dnsCache = new _DnsCache();",
+            &mut self.context,
+        )
+        .map_err(|e| anyhow!("PAC cache initialization: {e}"))?;
         Ok(())
     }
     pub fn set_ip(&mut self, ip: IpAddr) {
         *self.ip.lock().unwrap() = ip;
     }
     pub fn evaluate(&mut self, url: &str, host: &str) -> Result<Routes> {
-        self.dns_budget.store(0, Ordering::Relaxed);
-        self.prune_cache();
-        let source = eval_source(url, host)?;
-        let val = eval_script_sync(&source, &mut self.context)
-            .map_err(|e| anyhow!("PAC evaluation: {e}"))?;
-        routes_from_value(val)
-    }
-    async fn evaluate_bounded(&mut self, url: &str, host: &str) -> Result<Routes> {
-        self.dns_budget.store(0, Ordering::Relaxed);
-        self.prune_cache();
-        let source = eval_source(url, host)?;
-        let script = Script::parse(Source::from_bytes(&source), None, &mut self.context)
-            .map_err(|e| anyhow!("PAC evaluation: {e}"))?;
-        let val = tokio::time::timeout(
-            PAC_EVAL_TIMEOUT,
-            script.evaluate_async_with_budget(&mut self.context, PAC_EVAL_BUDGET),
-        )
-        .await
-        .context("PAC evaluation exceeded its time limit")?
-        .map_err(|e| anyhow!("PAC evaluation: {e}"))?;
-        routes_from_value(val)
-    }
-    fn prune_cache(&mut self) {
         if self.last_prune.elapsed() >= Duration::from_secs(300) {
             self.cache
                 .lock()
@@ -210,6 +186,39 @@ impl Pac {
                 .retain(|_, v| v.at.elapsed() < Duration::from_secs(300));
             self.last_prune = Instant::now();
         }
+        self.dns_budget.store(0, Ordering::Relaxed);
+        let source = format!(
+            "FindProxyForURL({}, {})",
+            serde_json::to_string(url)?,
+            serde_json::to_string(host)?
+        );
+        let val = eval_script_sync(&source, &mut self.context)
+            .map_err(|e| anyhow!("PAC evaluation: {e}"))?;
+        if !val.is_string() {
+            bail!("FindProxyForURL returned a non-string value")
+        }
+        val.as_string().unwrap().to_std_string_escaped().parse()
+    }
+    async fn evaluate_bounded(&mut self, url: &str, host: &str) -> Result<Routes> {
+        self.dns_budget.store(0, Ordering::Relaxed);
+        let source = format!(
+            "FindProxyForURL({}, {})",
+            serde_json::to_string(url)?,
+            serde_json::to_string(host)?
+        );
+        let script = Script::parse(Source::from_bytes(&source), None, &mut self.context)
+            .map_err(|e| anyhow!("PAC evaluation parse: {e}"))?;
+        let value = tokio::time::timeout(
+            PAC_EVAL_TIMEOUT,
+            script.evaluate_async_with_budget(&mut self.context, PAC_EVAL_BUDGET),
+        )
+        .await
+        .context("PAC evaluation exceeded its time limit")?
+        .map_err(|e| anyhow!("PAC evaluation: {e}"))?;
+        if !value.is_string() {
+            bail!("FindProxyForURL returned a non-string value");
+        }
+        value.as_string().unwrap().to_std_string_escaped().parse()
     }
     pub fn cache_snapshot(&self) -> HashMap<String, Option<IpAddr>> {
         self.cache
@@ -221,40 +230,189 @@ impl Pac {
     }
 }
 
-fn eval_source(url: &str, host: &str) -> Result<String> {
-    Ok(format!(
-        "FindProxyForURL({}, {})",
-        serde_json::to_string(url)?,
-        serde_json::to_string(host)?
-    ))
+enum Job {
+    Eval(String, String, bool, oneshot::Sender<Result<Routes>>),
+    Scripts(Vec<String>, oneshot::Sender<Result<()>>),
+    Ip(IpAddr, oneshot::Sender<()>),
+    Snapshot(oneshot::Sender<HashMap<String, Option<IpAddr>>>),
 }
-fn routes_from_value(val: JsValue) -> Result<Routes> {
-    if !val.is_string() {
-        bail!("FindProxyForURL returned a non-string value")
+#[derive(Clone)]
+pub struct Policy {
+    tx: tokio::sync::mpsc::Sender<Job>,
+    loaded: Arc<AtomicBool>,
+}
+impl Policy {
+    pub fn new(source: Option<String>) -> Result<Self> {
+        Self::new_scripts(source.into_iter().collect())
     }
-    val.as_string().unwrap().to_std_string_escaped().parse()
+    pub fn new_scripts(scripts: Vec<String>) -> Result<Self> {
+        Self::new_scripts_with_ip(scripts, "127.0.0.1".parse().unwrap())
+    }
+    pub fn new_scripts_with_ip(scripts: Vec<String>, ip: IpAddr) -> Result<Self> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(PAC_QUEUE_CAPACITY);
+        let loaded = Arc::new(AtomicBool::new(!scripts.is_empty()));
+        let worker_loaded = loaded.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("pac-policy".into())
+            .spawn(move || {
+                let mut active_ip = ip;
+                let mut pacs = match scripts
+                    .iter()
+                    .map(|s| Pac::new_with_ip(Some(s), ip))
+                    .collect::<Result<Vec<_>>>()
+                {
+                    Ok(pacs) => {
+                        let _ = ready_tx.send(Ok(()));
+                        pacs
+                    }
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e.to_string()));
+                        return;
+                    }
+                };
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("PAC worker runtime");
+                while let Some(job) = rx.blocking_recv() {
+                    match job {
+                        Job::Eval(u, h, strict, r) => {
+                            let result = if strict && !worker_loaded.load(Ordering::Acquire) {
+                                Err(anyhow!("routing policy is unavailable"))
+                            } else {
+                                evaluate_scripts_bounded(&mut pacs, &u, &h, &runtime)
+                            };
+                            let _ = r.send(result);
+                        }
+                        Job::Scripts(scripts, r) => {
+                            worker_loaded.store(false, Ordering::Release);
+                            let replacement = scripts
+                                .iter()
+                                .map(|s| Pac::new_with_ip(Some(s), active_ip))
+                                .collect::<Result<Vec<_>>>();
+                            match replacement {
+                                Ok(new_pacs) => {
+                                    pacs = new_pacs;
+                                    worker_loaded.store(!scripts.is_empty(), Ordering::Release);
+                                    let _ = r.send(Ok(()));
+                                }
+                                Err(e) => {
+                                    worker_loaded.store(!pacs.is_empty(), Ordering::Release);
+                                    let _ = r.send(Err(e));
+                                }
+                            }
+                        }
+                        Job::Ip(ip, r) => {
+                            active_ip = ip;
+                            for pac in &mut pacs {
+                                pac.set_ip(ip);
+                            }
+                            let _ = r.send(());
+                        }
+                        Job::Snapshot(r) => {
+                            let mut snapshot = HashMap::new();
+                            for pac in &pacs {
+                                snapshot.extend(pac.cache_snapshot());
+                            }
+                            let _ = r.send(snapshot);
+                        }
+                    }
+                }
+            })
+            .context("start PAC worker")?;
+        ready_rx
+            .recv()
+            .map_err(|_| anyhow!("PAC worker failed to start"))?
+            .map_err(|e| anyhow!(e))?;
+        Ok(Self { tx, loaded })
+    }
+    pub async fn evaluate(&self, url: String, host: String) -> Result<Routes> {
+        self.evaluate_with_policy(url, host, false).await
+    }
+    pub async fn evaluate_strict(&self, url: String, host: String) -> Result<Routes> {
+        self.evaluate_with_policy(url, host, true).await
+    }
+    async fn evaluate_with_policy(
+        &self,
+        url: String,
+        host: String,
+        strict: bool,
+    ) -> Result<Routes> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Job::Eval(url, host, strict, tx))
+            .await
+            .map_err(|_| anyhow!("PAC worker stopped"))?;
+        rx.await.context("PAC worker stopped")?
+    }
+    pub fn is_loaded(&self) -> bool {
+        self.loaded.load(Ordering::Acquire)
+    }
+    pub fn mark_unloaded(&self) {
+        self.loaded.store(false, Ordering::Release);
+    }
+    pub async fn set_script(&self, script: Option<String>) -> Result<()> {
+        self.set_scripts(script.into_iter().collect()).await
+    }
+    pub async fn set_scripts(&self, scripts: Vec<String>) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Job::Scripts(scripts, tx))
+            .await
+            .map_err(|_| anyhow!("PAC worker stopped"))?;
+        rx.await.context("PAC worker stopped")?
+    }
+    pub async fn set_ip(&self, ip: IpAddr) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Job::Ip(ip, tx))
+            .await
+            .map_err(|_| anyhow!("PAC worker stopped"))?;
+        rx.await.context("PAC worker stopped")?;
+        Ok(())
+    }
+    pub async fn cache_snapshot(&self) -> Result<HashMap<String, Option<IpAddr>>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Job::Snapshot(tx))
+            .await
+            .map_err(|_| anyhow!("PAC worker stopped"))?;
+        rx.await.context("PAC worker stopped")
+    }
+}
+
+fn evaluate_scripts_bounded(
+    pacs: &mut [Pac],
+    url: &str,
+    host: &str,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Routes> {
+    for pac in pacs {
+        let routes = runtime.block_on(pac.evaluate_bounded(url, host))?;
+        if routes.0.iter().any(|route| !matches!(route, Route::Direct)) {
+            return Ok(routes);
+        }
+    }
+    Ok("DIRECT".parse().expect("DIRECT is valid"))
 }
 
 fn eval_script_sync(source: &str, context: &mut Context) -> Result<JsValue> {
     let script = Script::parse(Source::from_bytes(source), None, context)
         .map_err(|e| anyhow!("script parse: {e}"))?;
     let future = script.evaluate_async_with_budget(context, PAC_EVAL_BUDGET);
-    let result = poll_with_deadline(future, PAC_EVAL_TIMEOUT)
-        .context("script execution exceeded its time limit")?;
-    result.map_err(|e| anyhow!("script evaluation: {e}"))
-}
-
-fn poll_with_deadline<F: std::future::Future>(future: F, limit: Duration) -> Result<F::Output> {
     let waker = std::task::Waker::noop();
     let mut task_context = std::task::Context::from_waker(waker);
     let mut future = Box::pin(future);
     let started = Instant::now();
     loop {
-        if started.elapsed() >= limit {
-            bail!("operation exceeded its time limit");
+        if started.elapsed() >= PAC_EVAL_TIMEOUT {
+            bail!("script execution exceeded its time limit");
         }
         match future.as_mut().poll(&mut task_context) {
-            std::task::Poll::Ready(output) => return Ok(output),
+            std::task::Poll::Ready(value) => {
+                return value.map_err(|e| anyhow!("script evaluation: {e}"));
+            }
             std::task::Poll::Pending => std::thread::yield_now(),
         }
     }
@@ -282,7 +440,7 @@ fn resolve_hostname(host: &str) -> Option<IpAddr> {
                     let value = (host.as_str(), 0)
                         .to_socket_addrs()
                         .ok()
-                        .and_then(|mut addresses| addresses.next().map(|addr| addr.ip()));
+                        .and_then(|ips| preferred_ip(ips.map(|addr| addr.ip())));
                     let _ = reply.send(value);
                 }
             })
@@ -294,144 +452,17 @@ fn resolve_hostname(host: &str) -> Option<IpAddr> {
     reply_rx.recv_timeout(DNS_RESOLVE_TIMEOUT).ok().flatten()
 }
 
-enum Job {
-    Eval(String, String, bool, oneshot::Sender<Result<Routes>>),
-    Script(Option<String>, oneshot::Sender<Result<()>>),
-    Ip(IpAddr, oneshot::Sender<()>),
-    Snapshot(oneshot::Sender<HashMap<String, Option<IpAddr>>>),
-}
-#[derive(Clone)]
-pub struct Policy {
-    tx: tokio::sync::mpsc::Sender<Job>,
-    loaded: Arc<AtomicBool>,
-}
-impl Policy {
-    pub fn new(source: Option<String>) -> Result<Self> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(PAC_QUEUE_CAPACITY);
-        let loaded = Arc::new(AtomicBool::new(false));
-        let worker_loaded = loaded.clone();
-        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
-        std::thread::Builder::new()
-            .name("pac-policy".into())
-            .spawn(move || {
-                let mut pac = match Pac::new(None) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e.to_string()));
-                        return;
-                    }
-                };
-                worker_loaded.store(source.is_some(), Ordering::Release);
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("PAC worker runtime");
-                if let Err(e) = runtime.block_on(pac.set_script_bounded(source.as_deref())) {
-                    let _ = ready_tx.send(Err(e.to_string()));
-                    return;
-                }
-                let _ = ready_tx.send(Ok(()));
-                while let Some(job) = rx.blocking_recv() {
-                    match job {
-                        Job::Eval(u, h, strict, r) => {
-                            if strict && !worker_loaded.load(Ordering::Acquire) {
-                                let _ = r.send(Err(anyhow!("routing policy is unavailable")));
-                                continue;
-                            }
-                            let result = runtime.block_on(pac.evaluate_bounded(&u, &h));
-                            if result.is_err() {
-                                // Discard potentially corrupted VM state after budget/error paths.
-                                let source = pac.source.clone();
-                                if let Err(e) =
-                                    runtime.block_on(pac.set_script_bounded(source.as_deref()))
-                                {
-                                    tracing::error!(
-                                        "failed to reset PAC after evaluation error: {e:#}"
-                                    );
-                                    let _ = runtime.block_on(pac.set_script_bounded(None));
-                                    pac.source = None;
-                                    worker_loaded.store(false, Ordering::Release);
-                                }
-                            }
-                            let _ = r.send(result);
-                        }
-                        Job::Script(s, r) => {
-                            worker_loaded.store(false, Ordering::Release);
-                            let result = runtime.block_on(pac.set_script_bounded(s.as_deref()));
-                            worker_loaded.store(result.is_ok(), Ordering::Release);
-                            if result.is_err() {
-                                // Never let later requests execute a half-loaded script.
-                                let _ = runtime.block_on(pac.set_script_bounded(None));
-                                pac.source = None;
-                            }
-                            let _ = r.send(result);
-                        }
-                        Job::Ip(ip, r) => {
-                            pac.set_ip(ip);
-                            let _ = r.send(());
-                        }
-                        Job::Snapshot(r) => {
-                            let _ = r.send(pac.cache_snapshot());
-                        }
-                    }
-                }
-            })
-            .context("start PAC worker")?;
-        ready_rx
-            .recv()
-            .map_err(|_| anyhow!("PAC worker failed to start"))?
-            .map_err(|e| anyhow!(e))?;
-        Ok(Self { tx, loaded })
-    }
-    pub fn is_loaded(&self) -> bool {
-        self.loaded.load(Ordering::Acquire)
-    }
-    pub fn mark_unloaded(&self) {
-        self.loaded.store(false, Ordering::Release);
-    }
-    pub async fn evaluate(&self, url: String, host: String) -> Result<Routes> {
-        self.evaluate_with_policy(url, host, false).await
-    }
-    pub async fn evaluate_strict(&self, url: String, host: String) -> Result<Routes> {
-        self.evaluate_with_policy(url, host, true).await
-    }
-    async fn evaluate_with_policy(
-        &self,
-        url: String,
-        host: String,
-        strict: bool,
-    ) -> Result<Routes> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Job::Eval(url, host, strict, tx))
-            .await
-            .map_err(|_| anyhow!("PAC worker stopped"))?;
-        rx.await.context("PAC worker stopped")?
-    }
-    pub async fn set_script(&self, script: Option<String>) -> Result<()> {
-        self.mark_unloaded();
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Job::Script(script, tx))
-            .await
-            .map_err(|_| anyhow!("PAC worker stopped"))?;
-        rx.await.context("PAC worker stopped")?
-    }
-    pub async fn set_ip(&self, ip: IpAddr) -> Result<()> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Job::Ip(ip, tx))
-            .await
-            .map_err(|_| anyhow!("PAC worker stopped"))?;
-        rx.await.context("PAC worker stopped")?;
-        Ok(())
-    }
-    pub async fn cache_snapshot(&self) -> Result<HashMap<String, Option<IpAddr>>> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Job::Snapshot(tx))
-            .await
-            .map_err(|_| anyhow!("PAC worker stopped"))?;
-        rx.await.context("PAC worker stopped")
+#[cfg(test)]
+mod tests {
+    use super::preferred_ip;
+    use std::net::IpAddr;
+
+    #[test]
+    fn dns_prefers_first_ipv4_then_falls_back_to_first_ipv6() {
+        let ips = ["::1", "192.0.2.2", "192.0.2.3"].map(|ip| ip.parse::<IpAddr>().unwrap());
+        assert_eq!(preferred_ip(ips), Some("192.0.2.2".parse().unwrap()));
+        let ips = ["::1", "2001:db8::1"].map(|ip| ip.parse::<IpAddr>().unwrap());
+        assert_eq!(preferred_ip(ips), Some("::1".parse().unwrap()));
+        assert_eq!(preferred_ip([]), None);
     }
 }

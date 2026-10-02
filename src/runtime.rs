@@ -7,7 +7,7 @@ use crate::{
     proxy::ContextBuilder,
 };
 use anyhow::{Context, Result, anyhow};
-use std::{ffi::OsString, fs, path::Path, sync::Arc, time::Duration};
+use std::{ffi::OsString, fs, sync::Arc, time::Duration};
 
 /// Run the primary proxy process with already parsed settings.
 pub async fn run(a: MainArgs) -> Result<()> {
@@ -46,22 +46,19 @@ pub async fn run(a: MainArgs) -> Result<()> {
             .try_init()
             .ok();
     }
-    let discovered = if a.pac_file.is_none() {
+    let sources: Vec<crate::route::PathOrUri> = if a.pac_file.is_empty() {
         config::pac_path()
+            .into_iter()
+            .map(crate::route::PathOrUri::Path)
+            .collect()
     } else {
-        None
+        a.pac_file
+            .iter()
+            .map(|source| source.parse())
+            .collect::<Result<_>>()?
     };
-    if let Some(p) = a.pac_file.as_deref()
-        && !p.starts_with("http://")
-        && !p.starts_with("https://")
-        && !Path::new(p).is_file()
-    {
-        return Err(anyhow!("PAC file does not exist: {p}"));
-    }
-    let policy = Arc::new(Policy::new(None)?);
-    if let Some(ip) = a.my_ip_address.as_deref() {
-        policy.set_ip(ip.parse()?).await?;
-    }
+    let effective_ip = select_pac_ip(a.my_ip_address, crate::platform::default_interface_ipv4);
+    let policy = Arc::new(Policy::new_scripts_with_ip(vec![], effective_ip)?);
     let auth = load_auth(&a)?;
     let options = ConnectionOptions {
         auth,
@@ -89,7 +86,8 @@ pub async fn run(a: MainArgs) -> Result<()> {
         .parallel_connect(a.parallel_connect)
         .force_tunnel(a.proxytunnel)
         .server_keepalive(server_keepalive)
-        .shutdown_timeout(Duration::from_secs(a.graceful_shutdown_timeout));
+        .shutdown_timeout(Duration::from_secs(a.graceful_shutdown_timeout))
+        .pac_sources(sources.clone());
     if let Some(name) = a.activate_socket.as_deref() {
         builder = builder.listeners(crate::platform::activated_listeners(name)?)
     } else {
@@ -101,7 +99,7 @@ pub async fn run(a: MainArgs) -> Result<()> {
     for addr in context.local_addrs() {
         tracing::info!(%addr,"proxy listening")
     }
-    tracing::info!(pac_source=?a.pac_file.as_deref().or_else(||discovered.as_ref().and_then(|p|p.to_str())),"proxy started");
+    tracing::info!(pac_sources=?sources,"proxy started");
 
     #[cfg(unix)]
     use tokio::signal::unix::{SignalKind, signal};
@@ -111,17 +109,44 @@ pub async fn run(a: MainArgs) -> Result<()> {
     let mut direct = signal(SignalKind::user_defined1())?;
     #[cfg(unix)]
     let mut term = signal(SignalKind::terminate())?;
-    let mut initial = Box::pin(load_pac(a.pac_file.as_deref(), discovered.as_deref()));
-    let mut initial_pending = a.pac_file.is_some() || discovered.is_some();
+    #[cfg(target_os = "macos")]
+    let mut notifications = crate::network_notifications::NotificationAdapter::start()
+        .context("starting native network notification adapter")?;
+    #[cfg(target_os = "macos")]
+    let mut notification_ticks = tokio::time::interval(Duration::from_millis(100));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut notification_ticks = ();
+    #[cfg(target_os = "macos")]
+    let mut native_state = crate::network_notifications::TransitionState::new();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut notifications = ();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut native_state = crate::network_notifications::TransitionState::new();
     #[cfg(unix)]
     let listener_failed = loop {
         tokio::select! {
             _=tokio::signal::ctrl_c()=>break false,
             _=term.recv()=>break false,
             _=context.shutdown_notified()=>break true,
-            loaded=&mut initial,if initial_pending=>{initial_pending=false;match loaded{Ok(s)=>if let Err(e)=policy.set_script(s).await{tracing::error!(%e,"PAC load failed; using direct policy")},Err(e)=>tracing::error!(%e,"PAC load failed; using direct policy")}},
-            _=hup.recv()=>{match load_pac(a.pac_file.as_deref(),discovered.as_deref()).await{Ok(s)=>if let Err(e)=policy.set_script(s).await{context.shutdown();let _=context.wait_timeout(Duration::from_secs(a.graceful_shutdown_timeout)).await;return Err(e).context("PAC reload failed")},Err(e)=>{context.shutdown();let _=context.wait_timeout(Duration::from_secs(a.graceful_shutdown_timeout)).await;return Err(e).context("PAC reload failed")}};policy.set_ip(crate::platform::default_interface_ipv4()).await?;},
-            _=direct.recv()=>{policy.set_script(None).await?;policy.set_ip(crate::platform::default_interface_ipv4()).await?;}
+            _=next_network_tick(&mut notification_ticks)=>{
+                pump_network_events(&mut notifications);
+            },
+            Some(event)=next_network_event(&mut notifications)=>{
+                if let Err(error) = handle_network_event(&context, &mut native_state, event).await {
+                    tracing::error!(sources=?sources, error=%format!("{error:#}"), "native policy update failed; retaining previous policy");
+                }
+            },
+            _=hup.recv()=>{
+                let result = context.reload_pac().await;
+                if let Err(error) = result {
+                    tracing::error!(sources=?sources, %error, "PAC reload failed; retaining previous policy");
+                }
+            },
+            _=direct.recv()=>{
+                if let Err(error) = policy.set_script(None).await {
+                    tracing::error!(%error, "direct mode failed; retaining previous policy");
+                }
+            }
         }
     };
     #[cfg(not(unix))]
@@ -129,7 +154,6 @@ pub async fn run(a: MainArgs) -> Result<()> {
         tokio::select! {
             _=tokio::signal::ctrl_c()=>break false,
             _=context.shutdown_notified()=>break true,
-            loaded=&mut initial,if initial_pending=>{initial_pending=false;match loaded{Ok(s)=>if let Err(e)=policy.set_script(s).await{tracing::error!(%e,"PAC load failed; using direct policy")},Err(e)=>tracing::error!(%e,"PAC load failed; using direct policy")}}
         }
     };
     if !drain(context, Duration::from_secs(a.graceful_shutdown_timeout)).await {
@@ -141,6 +165,52 @@ pub async fn run(a: MainArgs) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn next_network_event(
+    adapter: &mut crate::network_notifications::NotificationAdapter,
+) -> Option<crate::network_notifications::NetworkEvent> {
+    adapter.recv().await
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+async fn next_network_event(_: &mut ()) -> Option<crate::network_notifications::NetworkEvent> {
+    std::future::pending().await
+}
+
+#[cfg(target_os = "macos")]
+async fn next_network_tick(interval: &mut tokio::time::Interval) {
+    interval.tick().await;
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+async fn next_network_tick(_: &mut ()) {
+    std::future::pending::<()>().await;
+}
+#[cfg(target_os = "macos")]
+fn pump_network_events(adapter: &mut crate::network_notifications::NotificationAdapter) {
+    adapter.pump();
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn pump_network_events(_: &mut ()) {}
+
+/// Apply a native observation using the same atomic operations as manual controls.
+/// A failed restore leaves service running and retries on the next available event.
+pub async fn handle_network_event(
+    context: &crate::proxy::Context,
+    state: &mut crate::network_notifications::TransitionState,
+    event: crate::network_notifications::NetworkEvent,
+) -> Result<bool> {
+    use crate::network_notifications::NetworkEvent;
+    let Some(event) = state.observe(event) else {
+        return Ok(false);
+    };
+    let result = match event {
+        NetworkEvent::Available => context.reload_pac().await,
+        NetworkEvent::Unavailable => context.clear_policy().await,
+    };
+    state.complete(event, result.is_ok());
+    result?;
+    Ok(true)
 }
 
 async fn drain(context: crate::proxy::Context, timeout: Duration) -> bool {
@@ -174,23 +244,6 @@ fn load_auth(a: &MainArgs) -> Result<AuthFactory> {
     };
     Ok(AuthFactory::basic(store))
 }
-async fn load_pac(explicit: Option<&str>, discovered: Option<&Path>) -> Result<Option<String>> {
-    if let Some(p) = explicit {
-        if p.starts_with("http://") || p.starts_with("https://") {
-            return Ok(Some(crate::net::fetch_remote_pac(p).await?));
-        }
-        return Ok(Some(
-            fs::read_to_string(p).with_context(|| format!("reading PAC file {p}"))?,
-        ));
-    }
-    if let Some(p) = discovered {
-        return Ok(Some(
-            fs::read_to_string(p).with_context(|| format!("reading PAC file {}", p.display()))?,
-        ));
-    }
-    Ok(None)
-}
-
 /// Callable process entry used by embedded applications. It deliberately skips rc files.
 pub fn embedded_entry(args: Vec<OsString>) -> Result<()> {
     let a = match config::try_parse_main_from(args, false) {
@@ -211,4 +264,31 @@ pub fn embedded_entry(args: Vec<OsString>) -> Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(run(a))
+}
+
+/// Detect once at startup; manual and native updates retain this effective address.
+fn select_pac_ip(
+    override_ip: Option<std::net::IpAddr>,
+    detect: impl FnOnce() -> std::net::IpAddr,
+) -> std::net::IpAddr {
+    override_ip.unwrap_or_else(detect)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn effective_ip_prefers_override_and_detects_only_when_needed() {
+        for ip in ["192.0.2.42", "2001:db8::42"] {
+            let ip = ip.parse().unwrap();
+            assert_eq!(
+                select_pac_ip(Some(ip), || panic!("override must avoid detection")),
+                ip
+            );
+        }
+        for ip in ["192.0.2.7", "127.0.0.1"] {
+            let ip = ip.parse().unwrap();
+            assert_eq!(select_pac_ip(None, || ip), ip);
+        }
+    }
 }

@@ -85,22 +85,18 @@ async fn supplied_connection_stream_loads_and_reloads_configured_pac() {
     .unwrap()
     .pac_source(PathOrUri::Path(path))
     .trusted_management_host("fixture")
-    .serve_connections(connections);
-    let policy = context.policy();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let routes = policy
-                .evaluate("http://destination.test/".into(), "destination.test".into())
-                .await
-                .unwrap();
-            if routes.to_string() == "HTTP example.test:8081" {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
+    .serve_connections(connections)
     .await
     .unwrap();
+    let policy = context.policy();
+    assert_eq!(
+        policy
+            .evaluate("http://destination.test/".into(), "destination.test".into())
+            .await
+            .unwrap()
+            .to_string(),
+        "HTTP example.test:8081"
+    );
     context.clear_policy().await.unwrap();
     assert_eq!(
         policy

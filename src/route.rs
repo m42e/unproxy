@@ -28,6 +28,7 @@ impl fmt::Display for Endpoint {
 impl FromStr for Endpoint {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self> {
+        let s = s.trim();
         let (host, port) = if let Some(bracketed) = s.strip_prefix('[') {
             let end = bracketed
                 .find(']')
@@ -49,7 +50,9 @@ impl FromStr for Endpoint {
         if host.is_empty() {
             bail!("host missing")
         }
-        if host.bytes().any(|b| b.is_ascii_whitespace()) || host.contains(['@', '/', '?', '#']) {
+        if host.chars().any(char::is_whitespace)
+            || host.contains(['@', '/', '?', '#', '[', ']', '\\'])
+        {
             bail!("invalid host in endpoint")
         }
         if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
@@ -81,6 +84,7 @@ impl fmt::Display for Route {
 impl FromStr for Route {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self> {
+        let s = s.trim();
         if s == "DIRECT" {
             return Ok(Self::Direct);
         }

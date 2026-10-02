@@ -2,9 +2,11 @@
 
 The library can be used without settings discovery or command-line parsing.
 Pac is a synchronous JavaScript environment. Policy offers asynchronous
-operations backed by one serialized worker; cloned handles share script state.
-Script replacement and DNS work occur on that worker, independently of async
-socket processing. PAC update/evaluation errors return through Result.
+operations backed by one serialized worker; cloned handles share the ordered
+collection state.
+Independent runtimes isolate per-source globals and DNS caches. Constructors
+validate every custom script before returning. Script replacement and DNS work
+occur on that worker, independently of async socket processing. PAC update/evaluation errors return through Result.
 
 ```rust
 use unproxy::{pac::Policy, net::ConnectionOptions, proxy::ContextBuilder};
@@ -46,7 +48,22 @@ observes the lifecycle and does not initiate shutdown; `wait_timeout` requests
 shutdown and cancels outstanding CONNECT relays after its grace period.
 
 For a source or embedding application, create/replace the policy explicitly,
-configure `ContextBuilder::inline_pac` or `pac_source`, or use the live context
-load/reload/clear methods. Source loading occurs asynchronously after binding.
-`serve_stream` and `serve_connections` support application-owned transports. DNS wire parsing and exchange APIs similarly operate independently of
-the companion CLI. See cargo doc --no-deps for signatures and examples.
+configure `ContextBuilder::inline_pac`/`inline_pacs` or `pac_source`/`pac_sources`,
+or use the live context load/reload/clear methods. `Policy::new_scripts` and
+`new_scripts_with_ip` construct ordered validated runtime collections;
+`set_scripts` replaces the whole set transactionally, retaining its effective IP.
+Single-script conveniences remain available. To initialize top-level myIpAddress,
+create the policy with `new_scripts_with_ip`, or set its IP before awaiting source
+initialization. Inline builder scripts are validated when serving is initialized.
+
+`bind`, `serve_stream` and `serve_connections` are asynchronous and return Result.
+They await configured source loading and validation before starting support tasks
+or serving, including application-owned transports. `Context::load_pacs` reads
+all sources before replacing the collection; `reload_pac` restores the configured
+builder source/script list after `clear_policy`. DNS wire parsing and exchange
+APIs similarly operate independently of the companion CLI. See cargo doc --no-deps for signatures and examples.
+
+On macOS, run `runtime::run` or `embedded_entry` on the process main thread.
+The daemon pumps the native run loop periodically for Kerberos SSO distributed
+notifications; callbacks enqueue states and the async process controller applies
+policy changes. The notification adapter is not Send.

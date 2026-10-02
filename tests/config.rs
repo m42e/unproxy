@@ -24,3 +24,41 @@ fn settings_are_whitespace_tokens() {
     );
     let _ = fs::remove_file(p);
 }
+
+#[test]
+fn my_ip_address_accepts_both_families_and_rejects_invalid_values() {
+    for ip in ["192.0.2.7", "2001:db8::7"] {
+        let args = MainArgs::try_parse_from(["unproxy", "--my-ip-address", ip]).unwrap();
+        assert_eq!(args.my_ip_address, Some(ip.parse().unwrap()));
+    }
+    assert!(MainArgs::try_parse_from(["unproxy", "--my-ip-address", "not-an-ip"]).is_err());
+}
+
+#[test]
+fn repeated_pac_sources_append_settings_before_cli_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("rc");
+    fs::write(
+        &settings,
+        "--pac-file first.pac\n-p http://example.test/second.pac\n",
+    )
+    .unwrap();
+    let mut tokens = vec!["unproxy".to_string()];
+    tokens.extend(token_file(&settings));
+    tokens.extend([
+        "--pac-file".into(),
+        "https://example.test/third.pac".into(),
+        "-p".into(),
+        "fourth.pac".into(),
+    ]);
+    let args = MainArgs::try_parse_from(tokens).unwrap();
+    assert_eq!(
+        args.pac_file,
+        [
+            "first.pac",
+            "http://example.test/second.pac",
+            "https://example.test/third.pac",
+            "fourth.pac"
+        ]
+    );
+}
