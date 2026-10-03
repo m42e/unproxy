@@ -2,7 +2,7 @@
 
 use std::{
     net::SocketAddr,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -34,6 +34,73 @@ use crate::{
 };
 
 type OutBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
+type ConnectedRoute = (Route, BoxedIo, bool, bool);
+type OrderedRouteResult = Option<Option<ConnectedRoute>>;
+
+#[derive(Clone)]
+struct RuntimeStatus(Arc<Mutex<RuntimeStatusData>>);
+
+#[derive(Clone)]
+struct RuntimeStatusData {
+    authentication_configured: bool,
+    upstream_state: String,
+    authentication_state: String,
+    upstream_checked_at: Option<i64>,
+}
+
+impl RuntimeStatus {
+    fn new(authentication_configured: bool) -> Self {
+        Self(Arc::new(Mutex::new(RuntimeStatusData {
+            authentication_configured,
+            upstream_state: "unknown".into(),
+            authentication_state: if authentication_configured {
+                "configured".into()
+            } else {
+                "disabled".into()
+            },
+            upstream_checked_at: None,
+        })))
+    }
+
+    fn observe(
+        &self,
+        route: &Route,
+        success: bool,
+        authentication_sent: bool,
+        error: Option<&str>,
+    ) {
+        if matches!(route, Route::Direct) {
+            return;
+        }
+        let Ok(mut status) = self.0.lock() else {
+            return;
+        };
+        status.upstream_state = if success { "ok" } else { "error" }.into();
+        status.authentication_state = if error.is_some_and(|e| e.contains("HTTP 407")) {
+            "rejected"
+        } else if success && authentication_sent {
+            "authenticated"
+        } else if status.authentication_configured {
+            "configured"
+        } else {
+            "disabled"
+        }
+        .into();
+        status.upstream_checked_at = Some(chrono::Utc::now().timestamp());
+    }
+
+    fn snapshot(&self) -> RuntimeStatusData {
+        self.0
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_else(|_| RuntimeStatusData {
+                authentication_configured: false,
+                upstream_state: "unknown".into(),
+                authentication_state: "unknown".into(),
+                upstream_checked_at: None,
+            })
+    }
+}
 
 pub struct ContextBuilder {
     policy: Arc<Policy>,
@@ -58,6 +125,7 @@ pub struct ContextBuilder {
     header_timeout: Duration,
     idle_timeout: Duration,
     strict_policy: bool,
+    runtime_status: RuntimeStatus,
 }
 impl Clone for ContextBuilder {
     fn clone(&self) -> Self {
@@ -84,11 +152,13 @@ impl Clone for ContextBuilder {
             header_timeout: self.header_timeout,
             idle_timeout: self.idle_timeout,
             strict_policy: self.strict_policy,
+            runtime_status: self.runtime_status.clone(),
         }
     }
 }
 impl ContextBuilder {
     pub fn new(policy: Arc<Policy>, options: ConnectionOptions) -> Self {
+        let runtime_status = RuntimeStatus::new(options.auth.is_configured());
         Self {
             policy,
             options,
@@ -112,6 +182,7 @@ impl ContextBuilder {
             header_timeout: Duration::from_secs(15),
             idle_timeout: Duration::from_secs(60),
             strict_policy: false,
+            runtime_status,
         }
     }
     pub fn listen(mut self, addr: SocketAddr) -> Self {
@@ -707,6 +778,21 @@ async fn handle(
                 "text/html; charset=utf-8",
                 access_html().into(),
             ),
+            "/status.json" => {
+                let status = cfg.runtime_status.snapshot();
+                full(
+                    StatusCode::OK,
+                    "application/json; charset=utf-8",
+                    serde_json::json!({
+                        "pac_loaded": cfg.policy.is_loaded(),
+                        "authentication_configured": status.authentication_configured,
+                        "upstream_state": status.upstream_state,
+                        "authentication_state": status.authentication_state,
+                        "upstream_checked_at": status.upstream_checked_at,
+                    })
+                    .to_string(),
+                )
+            }
             "/access.log" => event_response(events),
             _ => error_response(StatusCode::NOT_FOUND, "Resource not found"),
         });
@@ -809,12 +895,13 @@ async fn handle(
         connect,
         cfg.force_tunnel,
         &cfg.options,
+        &cfg.runtime_status,
         attempt_timeout,
         cfg.parallel,
         cfg.race,
     )
     .await;
-    let Some((route, stream, tunneled)) = chosen else {
+    let Some((route, stream, tunneled, mut authentication_sent)) = chosen else {
         publish(
             &events,
             AccessEntry::for_request(
@@ -898,11 +985,18 @@ async fn handle(
         start,
         user_agent.as_deref(),
         &events,
+        &mut authentication_sent,
     )
     .await
     {
-        Ok(response) => Ok(response),
+        Ok(response) => {
+            cfg.runtime_status
+                .observe(&route, true, authentication_sent, None);
+            Ok(response)
+        }
         Err(e) => {
+            cfg.runtime_status
+                .observe(&route, false, authentication_sent, Some(&format!("{e:#}")));
             tracing::debug!("forward failed: {e:#}");
             publish(
                 &events,
@@ -965,15 +1059,16 @@ async fn select_route(
     connect: bool,
     force_tunnel: bool,
     options: &ConnectionOptions,
+    runtime_status: &RuntimeStatus,
     timeout: Duration,
     parallel: usize,
     race: bool,
-) -> Option<(Route, BoxedIo, bool)> {
-    type Attempt = BoxFuture<'static, (usize, Route, bool, anyhow::Result<BoxedIo>)>;
+) -> Option<ConnectedRoute> {
+    type Attempt = BoxFuture<'static, (usize, Route, bool, anyhow::Result<(BoxedIo, bool)>)>;
     let mut pending: FuturesUnordered<Attempt> = FuturesUnordered::new();
     let mut next = 0usize;
     let mut in_flight = 0usize;
-    let mut results: Vec<Option<Option<(Route, BoxedIo, bool)>>> = std::iter::repeat_with(|| None)
+    let mut results: Vec<OrderedRouteResult> = std::iter::repeat_with(|| None)
         .take(routes.0.len())
         .collect();
     let mut next_ordered = 0usize;
@@ -984,7 +1079,7 @@ async fn select_route(
         let options = options.clone();
         let tunnel = (connect || force_tunnel) && !matches!(route, Route::Direct);
         pending.push(Box::pin(async move {
-            let result = net::connect(&route, &dest, tunnel, &options, timeout).await;
+            let result = net::connect_observed(&route, &dest, tunnel, &options, timeout).await;
             (idx, route, tunnel, result)
         }));
         *in_flight += 1;
@@ -996,14 +1091,18 @@ async fn select_route(
     while let Some((idx, route, tunnel, result)) = pending.next().await {
         in_flight -= 1;
         let failed = match result {
-            Ok(stream) => {
-                if race {
-                    return Some((route, stream, tunnel));
+            Ok((stream, authentication_sent)) => {
+                if tunnel {
+                    runtime_status.observe(&route, true, authentication_sent, None);
                 }
-                results[idx] = Some(Some((route, stream, tunnel)));
+                if race {
+                    return Some((route, stream, tunnel, authentication_sent));
+                }
+                results[idx] = Some(Some((route, stream, tunnel, authentication_sent)));
                 false
             }
             Err(e) => {
+                runtime_status.observe(&route, false, false, Some(&format!("{e:#}")));
                 tracing::debug!("route {route} failed for {destination}: {e:#}");
                 results[idx] = Some(None);
                 true
@@ -1066,6 +1165,7 @@ async fn forward(
     start: Instant,
     user_agent: Option<&str>,
     events: &broadcast::Sender<String>,
+    authentication_sent: &mut bool,
 ) -> Result<Response<OutBody>> {
     let (mut parts, body) = req.into_parts();
     sanitize(&mut parts.headers);
@@ -1087,6 +1187,7 @@ async fn forward(
     if let Some(proxy) = proxy.filter(|_| !tunneled)
         && let Some(v) = options.auth.authorization(&proxy.host).await?
     {
+        *authentication_sent = true;
         parts.headers.insert("proxy-authorization", v);
     }
     parts

@@ -47,10 +47,13 @@ if (-not (Test-Path $settingsFile)) {
         Set-Content -Encoding UTF8 $script:p.pacFile
 }
 $script:child = $null
+$script:lastExitCode = $null
+$script:runtimeStatus = $null
 $script:icon = [Windows.Forms.NotifyIcon]::new()
-$script:icon.Icon = [Drawing.SystemIcons]::Application
+$script:icon.Icon = [Drawing.Icon]::new(
+    (Join-Path $PSScriptRoot 'tray-icons\stopped-unloaded-unknown-disabled.ico'))
 $script:icon.Visible = $true
-$script:icon.Text = 'Unproxy stopped'
+$script:icon.Text = 'Unproxy Off | PAC ? | Up ? | Auth Off'
 
 function Save-Prefs {
     $script:p | ConvertTo-Json | Set-Content -Encoding UTF8 $settingsFile
@@ -63,9 +66,107 @@ function Log-Line([string]$line) {
     Add-Content -Encoding UTF8 $logFile $line
 }
 
+function Get-IconStates {
+    $authConfigured = ([bool]$script:p.negotiate -and $script:negotiateAvailable) -or
+        (Test-Path (Join-Path $env:USERPROFILE '.netrc'))
+    if ($script:child -and $script:runtimeStatus) {
+        $authConfigured = [bool]$script:runtimeStatus.authentication_configured
+    }
+    $service = if ($script:child) { 'running' }
+        elseif ($null -ne $script:lastExitCode) { 'failed' }
+        else { 'stopped' }
+    $pac = if (-not $script:child) { 'unloaded' }
+        elseif ($null -eq $script:runtimeStatus -or $null -eq $script:runtimeStatus.pac_loaded) { 'unknown' }
+        elseif ($script:runtimeStatus.pac_loaded) { 'loaded' }
+        else { 'unloaded' }
+    $recent = $false
+    if ($script:runtimeStatus -and $null -ne $script:runtimeStatus.upstream_checked_at) {
+        $age = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -
+            [long]$script:runtimeStatus.upstream_checked_at
+        $recent = $age -ge 0 -and $age -le 300
+    }
+    $upstream = if (-not $recent) { 'unknown' }
+        elseif ($script:runtimeStatus.upstream_state -eq 'ok') { 'ok' }
+        else { 'error' }
+    $auth = if ($recent -and $script:runtimeStatus.authentication_state -eq 'authenticated') {
+        'authenticated'
+    } elseif ($recent -and $script:runtimeStatus.authentication_state -eq 'rejected') {
+        'rejected'
+    } elseif ($authConfigured) {
+        'configured'
+    } else {
+        'disabled'
+    }
+    return @($service, $pac, $upstream, $auth)
+}
+
+function Update-TrayIcon {
+    $states = Get-IconStates
+    $key = $states -join '-'
+    if ($script:currentIconKey -ne $key) {
+        $path = Join-Path $PSScriptRoot "tray-icons\$key.ico"
+        if (Test-Path -LiteralPath $path) {
+            $next = [Drawing.Icon]::new($path)
+            $previous = $script:icon.Icon
+            $script:icon.Icon = $next
+            if ($previous) { $previous.Dispose() }
+            $script:currentIconKey = $key
+        }
+    }
+    $labels = switch ($states[0]) {
+        'running' { 'On' }
+        'failed' { 'Error' }
+        default { 'Off' }
+    }
+    $pacLabel = switch ($states[1]) {
+        'loaded' { 'Ready' }
+        'unloaded' { 'No' }
+        default { '?' }
+    }
+    $upstreamLabel = switch ($states[2]) {
+        'ok' { 'OK' }
+        'error' { 'Fail' }
+        default { '?' }
+    }
+    $authLabel = switch ($states[3]) {
+        'authenticated' { 'OK' }
+        'rejected' { '407' }
+        'configured' { 'Set' }
+        default { 'Off' }
+    }
+    $script:icon.Text = "Unproxy $labels | PAC $pacLabel | Up $upstreamLabel | Auth $authLabel"
+}
+
+function Read-RuntimeStatus {
+    if (-not $script:child) { return }
+    $port = if (Test-PortValid) { [long]$script:p.port } else { 3128 }
+    $client = [Net.Sockets.TcpClient]::new()
+    try {
+        $client.ReceiveTimeout = 250
+        $client.SendTimeout = 250
+        $client.Connect('127.0.0.1', $port)
+        $stream = $client.GetStream()
+        $request = [Text.Encoding]::ASCII.GetBytes(
+            "GET /status.json HTTP/1.1`r`nHost: 127.0.0.1:$port`r`nConnection: close`r`n`r`n")
+        $stream.Write($request, 0, $request.Length)
+        $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8)
+        $response = $reader.ReadToEnd()
+        $bodyStart = $response.IndexOf("`r`n`r`n")
+        if ($bodyStart -lt 0 -or -not $response.StartsWith('HTTP/1.1 200')) {
+            throw 'Status endpoint did not return HTTP 200.'
+        }
+        $script:runtimeStatus = $response.Substring($bodyStart + 4) | ConvertFrom-Json
+    } catch {
+        if ($script:runtimeStatus) { $script:runtimeStatus.pac_loaded = $null }
+    } finally {
+        $client.Dispose()
+    }
+}
+
 function Refresh-State {
     if ($script:child -and $script:child.HasExited) {
         $code = $script:child.ExitCode
+        $script:lastExitCode = $code
         Log-Line "$(Get-Date -Format o) proxy exited with code $code"
         $script:icon.ShowBalloonTip(
             5000, 'Unproxy',
@@ -74,10 +175,10 @@ function Refresh-State {
         $script:child = $null
     }
     if ($script:child) {
+        Read-RuntimeStatus
         $script:icon.Text = "Unproxy running on 127.0.0.1:$(if(Test-PortValid){$script:p.port}else{3128})"
-    } else {
-        $script:icon.Text = 'Unproxy stopped'
     }
+    Update-TrayIcon
 }
 
 function Stop-Proxy {
@@ -92,6 +193,7 @@ function Stop-Proxy {
             }
         } finally {
             $script:child = $null
+            $script:lastExitCode = $null
         }
     }
     Refresh-State
@@ -105,6 +207,8 @@ function Test-PortValid {
 function Start-Proxy {
     Refresh-State
     if ($script:child) { return }
+    $script:lastExitCode = $null
+    $script:runtimeStatus = $null
     $listenerPort = if (Test-PortValid) { [long]$script:p.port } else { 3128 }
     if (-not [IO.Path]::IsPathRooted([string]$script:p.pacFile)) {
         [Windows.Forms.MessageBox]::Show('PAC path must be absolute.', 'Unproxy') | Out-Null
@@ -149,10 +253,12 @@ function Start-Proxy {
         Start-Sleep -Milliseconds 250
         if ($script:child.HasExited) {
             $code = $script:child.ExitCode
+            $script:lastExitCode = $code
             $script:child = $null
             throw "Proxy exited during startup (code $code). See $logFile"
         }
     } catch {
+        $script:lastExitCode = -1
         Log-Line "$(Get-Date -Format o) start failed: $_"
         [Windows.Forms.MessageBox]::Show(
             "Could not start proxy: $_`nLog: $logFile", 'Unproxy') | Out-Null
@@ -207,6 +313,35 @@ function Set-Login([bool]$enabled) {
 function Build-Menu {
     Refresh-State
     $menu = [Windows.Forms.ContextMenuStrip]::new()
+    $states = Get-IconStates
+    $processLabel = switch ($states[0]) {
+        'running' { 'Running' }
+        'failed' { "Stopped unexpectedly (exit $($script:lastExitCode))" }
+        default { 'Stopped' }
+    }
+    $pacLabel = switch ($states[1]) {
+        'loaded' { 'Loaded' }
+        'unloaded' { 'Not loaded' }
+        default { 'Unknown' }
+    }
+    $upstreamLabel = switch ($states[2]) {
+        'ok' { 'Last proxy request succeeded' }
+        'error' { 'Last proxy request failed' }
+        default { 'No recent proxy request' }
+    }
+    $authLabel = switch ($states[3]) {
+        'authenticated' { 'Accepted on last request' }
+        'rejected' { 'Rejected by upstream (407)' }
+        'configured' { 'Configured; not verified yet' }
+        default { 'Not configured' }
+    }
+    foreach ($line in @(
+        "Proxy: $processLabel",
+        "PAC: $pacLabel",
+        "Upstream: $upstreamLabel",
+        "Authentication: $authLabel"
+    )) { [void]$menu.Items.Add($line) }
+    [void]$menu.Items.Add('-')
     $startLabel = if ($script:child) { 'Stop' } else { 'Start' }
     $startItem = $menu.Items.Add($startLabel)
     $startItem.add_Click({

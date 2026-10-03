@@ -324,9 +324,26 @@ pub async fn connect(
     options: &ConnectionOptions,
     timeout: Duration,
 ) -> Result<BoxedIo> {
+    connect_observed(route, destination, tunnel, options, timeout)
+        .await
+        .map(|(stream, _)| stream)
+}
+
+/// Establish a route and report whether the upstream accepted an auth header.
+/// The observation contains no credential data and is for local status reporting.
+pub async fn connect_observed(
+    route: &Route,
+    destination: &Endpoint,
+    tunnel: bool,
+    options: &ConnectionOptions,
+    timeout: Duration,
+) -> Result<(BoxedIo, bool)> {
     time::timeout(timeout, async {
         match route {
-            Route::Direct => Ok(Box::new(tcp(destination, options, timeout).await?) as BoxedIo),
+            Route::Direct => Ok((
+                Box::new(tcp(destination, options, timeout).await?) as BoxedIo,
+                false,
+            )),
             Route::Http(proxy) => {
                 proxy_connect(proxy, destination, tunnel, options, timeout, false).await
             }
@@ -346,13 +363,14 @@ async fn proxy_connect(
     options: &ConnectionOptions,
     timeout: Duration,
     tls: bool,
-) -> Result<BoxedIo> {
+) -> Result<(BoxedIo, bool)> {
     let stream: BoxedIo = Box::new(tcp(proxy, options, timeout).await?);
     let mut stream = if tls {
         secure(stream, &proxy.host, &options.tls).await?
     } else {
         stream
     };
+    let mut auth_sent = false;
     if tunnel {
         let authorization = time::timeout(
             Duration::from_secs(2),
@@ -360,6 +378,7 @@ async fn proxy_connect(
         )
         .await
         .context("upstream authorization timed out")??;
+        auth_sent = authorization.is_some();
         let authority = destination.authority();
         let mut request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
         if let Some(value) = authorization {
@@ -404,7 +423,7 @@ async fn proxy_connect(
             bail!("upstream proxy {proxy} rejected CONNECT with HTTP {status}");
         }
     }
-    Ok(stream)
+    Ok((stream, auth_sent))
 }
 
 const MAX_PAC_BYTES: usize = 8 * 1024 * 1024;

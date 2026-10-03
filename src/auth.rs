@@ -123,6 +123,12 @@ impl CredentialStore {
         v.sort();
         v
     }
+    fn is_configured(&self) -> bool {
+        self.0
+            .read()
+            .map(|credentials| !credentials.hosts.is_empty() || credentials.default.is_some())
+            .unwrap_or(false)
+    }
     fn get(&self, host: &str) -> Option<(String, String)> {
         let m = self.0.read().ok()?;
         m.hosts.get(host).cloned().or_else(|| m.default.clone())
@@ -243,6 +249,16 @@ impl AuthFactory {
     pub fn negotiate(hosts: Vec<String>) -> Self {
         Self {
             mode: AuthMode::Negotiate(hosts),
+        }
+    }
+    /// Whether this process has an authentication mode or credentials available.
+    /// This does not imply that every upstream host has matching credentials.
+    pub fn is_configured(&self) -> bool {
+        match &self.mode {
+            AuthMode::None => false,
+            AuthMode::Basic(credentials) => credentials.is_configured(),
+            #[cfg(feature = "negotiate")]
+            AuthMode::Negotiate(_) => true,
         }
     }
     pub async fn authorization(&self, host: &str) -> Result<Option<HeaderValue>> {

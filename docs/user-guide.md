@@ -10,6 +10,11 @@ Ubuntu, start the service with:
 systemctl --user enable --now unproxy
 ```
 
+The tray icon's four lights show the local proxy, loaded PAC policy, latest
+upstream result, and authentication state. Upstream and authentication stay
+unknown or unverified until a request uses an upstream proxy; those results are
+treated as stale after five minutes. Hover the icon or open its menu for labels.
+
 To run the command directly instead, open a terminal and run:
 
 ```sh

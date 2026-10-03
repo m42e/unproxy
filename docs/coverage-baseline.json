@@ -1,0 +1,595 @@
+{
+  "captured_on": "2026-10-03",
+  "source_commit_at_capture": "f621a9d199798f1721d7534335d69717dc058046",
+  "host": "aarch64-apple-darwin",
+  "rustc": "1.98.1 (48a229cea 2026-09-01)",
+  "llvm": "22.1.8",
+  "cargo_llvm_cov": "0.8.5",
+  "feature_evidence": "Existing test-lib-unproxy fingerprint declares default and negotiate. Original collection command and completeness are not recorded.",
+  "collection": "Reports regenerated from existing target/llvm-cov-target profiles; no tests rerun.",
+  "scope": "Default cargo llvm-cov report scope, without new filename exclusions or build-script inclusion.",
+  "missing_line_note": "show-missing-lines enumerates fewer locations than summary missed-line counts for some files. Preserve both; use summary totals for budgeting, ranges as source anchors.",
+  "totals": {
+    "branches": {
+      "count": 0,
+      "covered": 0,
+      "notcovered": 0,
+      "percent": 0
+    },
+    "functions": {
+      "count": 618,
+      "covered": 425,
+      "percent": 68.77022653721683
+    },
+    "instantiations": {
+      "count": 1314,
+      "covered": 571,
+      "percent": 43.45509893455099
+    },
+    "lines": {
+      "count": 5515,
+      "covered": 3708,
+      "percent": 67.23481414324569
+    },
+    "mcdc": {
+      "count": 0,
+      "covered": 0,
+      "notcovered": 0,
+      "percent": 0
+    },
+    "regions": {
+      "count": 8764,
+      "covered": 5687,
+      "notcovered": 3077,
+      "percent": 64.89046097672295
+    }
+  },
+  "files": [
+    {
+      "path": "src/desktop.rs",
+      "source_sha256": "e245f9016b74d6e74b3e90a1293b2c2fcd433735b9a896e838902256828282a9",
+      "lines": {
+        "count": 749,
+        "covered": 209,
+        "percent": 27.903871829105476
+      },
+      "regions": {
+        "count": 1158,
+        "covered": 279,
+        "notcovered": 879,
+        "percent": 24.093264248704664
+      },
+      "functions": {
+        "count": 50,
+        "covered": 17,
+        "percent": 34.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "122, 128, 142-149, 152-154, 156-160, 167, 179, 213-216, 220-223, 226-227, 229, 231-234, 241-244, 256-258, 295-297, 299-301, 340-345, 347-357, 359-368, 370-378, 381-383, 385, 387-389, 391, 393, 395-398, 401-406, 408-417, 420-428, 430-434, 436-450, 452-500, 502-505, 507, 512, 514-517, 519, 521, 523-525, 527, 529, 533-537, 539-542, 548, 550, 552-555, 559, 561-603, 605-607, 610, 658-659, 661, 663-664, 669, 675, 677, 696, 701, 705-712, 714-715, 717-727, 732-765, 767-787, 791-828, 830-841, 843-858, 860-875, 877-888, 890-903, 907-926, 928-933, 935-957, 961-970, 973, 975-979"
+    },
+    {
+      "path": "src/bin/xtask.rs",
+      "source_sha256": "57be17b75442d02822bfb32ca2c195dce0755482d1c7b887fefbba40a4fd84f3",
+      "lines": {
+        "count": 492,
+        "covered": 92,
+        "percent": 18.69918699186992
+      },
+      "regions": {
+        "count": 881,
+        "covered": 173,
+        "notcovered": 708,
+        "percent": 19.636776390465375
+      },
+      "functions": {
+        "count": 31,
+        "covered": 7,
+        "percent": 22.58064516129032
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "76-82, 92-103, 105, 107-111, 118, 123-130, 132-136, 139-142, 161-163, 166-188, 190, 192-200, 202-206, 208, 212, 221-223, 225-228, 232-255, 258-263, 265, 268, 270-272, 275-285, 287-288, 290, 292-298, 300-301, 303, 305-307, 309, 311-314, 316-329, 332-333, 336-341, 343, 345-348, 350, 352-354, 358-363, 365-368, 370-379, 382-383, 386-396, 398-400, 402-414, 416-433, 435-437, 443-444, 447-464, 466-467, 469-471, 473-512, 514-518, 524, 526-528, 536-557, 559, 561, 563-564, 566-576, 579-582, 584, 586-589, 591, 593-594, 613"
+    },
+    {
+      "path": "src/platform.rs",
+      "source_sha256": "6e2b35b54a7a63c68fa202e09cefc254f7207b06cd1b9d4b6023480c9cb9b58c",
+      "lines": {
+        "count": 228,
+        "covered": 36,
+        "percent": 15.789473684210526
+      },
+      "regions": {
+        "count": 366,
+        "covered": 48,
+        "notcovered": 318,
+        "percent": 13.114754098360656
+      },
+      "functions": {
+        "count": 15,
+        "covered": 4,
+        "percent": 26.666666666666668
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "16, 28-29, 31, 50-55, 57, 59-61, 63, 65, 80-81, 84-86, 88-93, 95, 102, 150-155, 157, 159-160, 163-169, 171-176, 184-187, 190-192, 206, 209, 216, 346-350, 352-365, 368-370, 372, 375-397, 399, 401-403, 405, 407-458, 460-464, 466, 468-473, 475, 477, 479-481, 483, 485-486, 488, 490-492, 494"
+    },
+    {
+      "path": "src/auth.rs",
+      "source_sha256": "ee80a1e5b95a0b0f133d395460d7bc7ea97981e6dc615cb6f35eb5952e4ff884",
+      "lines": {
+        "count": 464,
+        "covered": 353,
+        "percent": 76.07758620689656
+      },
+      "regions": {
+        "count": 684,
+        "covered": 493,
+        "notcovered": 191,
+        "percent": 72.07602339181285
+      },
+      "functions": {
+        "count": 50,
+        "covered": 32,
+        "percent": 64.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "34-36, 44, 75-76, 79-81, 114-116, 137-140, 143-145, 151, 162-169, 171, 177, 184, 187, 224-227, 229, 231, 243-247, 268-283, 380-384, 403-404, 437, 449-450, 475, 495, 507, 510, 521-523, 525-535, 587-588, 591-592, 599-603"
+    },
+    {
+      "path": "src/runtime.rs",
+      "source_sha256": "a663b53859ff7e429e737647064e89e9d43668537129e1266fcd7596b7cc2c85",
+      "lines": {
+        "count": 253,
+        "covered": 152,
+        "percent": 60.0790513833992
+      },
+      "regions": {
+        "count": 431,
+        "covered": 263,
+        "notcovered": 168,
+        "percent": 61.02088167053365
+      },
+      "functions": {
+        "count": 29,
+        "covered": 15,
+        "percent": 51.72413793103448
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "23-40, 50-53, 92, 99-100, 102, 107, 109, 111, 113-114, 116, 120, 126-137, 139-143, 145-148, 159-167, 171-175, 182-184, 190-192, 216-219, 224-229, 240, 243, 250, 263-266"
+    },
+    {
+      "path": "src/dns.rs",
+      "source_sha256": "8973d69b55ce7287232610b09df09845ec76e47560787058b546637eac4b88a7",
+      "lines": {
+        "count": 315,
+        "covered": 237,
+        "percent": 75.23809523809526
+      },
+      "regions": {
+        "count": 517,
+        "covered": 363,
+        "notcovered": 154,
+        "percent": 70.2127659574468
+      },
+      "functions": {
+        "count": 29,
+        "covered": 23,
+        "percent": 79.3103448275862
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "64, 71-80, 83, 88-97, 117, 122-131, 146, 184, 192, 229-231, 234, 273, 306-320, 322-335, 337, 339, 341"
+    },
+    {
+      "path": "src/net.rs",
+      "source_sha256": "71d6afcc2285bcd2db4909d40c5b2c9c643a1d71470d20f90258d6c3c027f3ed",
+      "lines": {
+        "count": 478,
+        "covered": 404,
+        "percent": 84.51882845188284
+      },
+      "regions": {
+        "count": 814,
+        "covered": 682,
+        "notcovered": 132,
+        "percent": 83.78378378378379
+      },
+      "functions": {
+        "count": 64,
+        "covered": 55,
+        "percent": 85.9375
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "90-97, 111-118, 132-139, 187, 190, 194, 235-244, 314, 321, 345, 352, 361, 368, 399, 419, 430, 437, 474, 484, 519-521, 525, 528-530, 542-548, 567-569, 610-612"
+    },
+    {
+      "path": "src/proxy.rs",
+      "source_sha256": "e87e27bb6f9743d9c61a8c4d4daad61cef668c69efbb2ceb76a4ead72e3d9126",
+      "lines": {
+        "count": 1054,
+        "covered": 982,
+        "percent": 93.16888045540796
+      },
+      "regions": {
+        "count": 1616,
+        "covered": 1476,
+        "notcovered": 140,
+        "percent": 91.33663366336634
+      },
+      "functions": {
+        "count": 120,
+        "covered": 104,
+        "percent": 86.66666666666667
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "148-154, 216, 218, 237, 389-391, 405-408, 414-425, 453-457, 512, 519, 581-583, 715-718, 729, 743-745, 770-772, 852, 854, 857-858, 860, 862, 865, 936, 943, 946, 956, 1027, 1037"
+    },
+    {
+      "path": "src/pac.rs",
+      "source_sha256": "faa67f786aed7fd8aff65653a88f5e4717978522cdfeb7d1a423dd2e76526af3",
+      "lines": {
+        "count": 411,
+        "covered": 360,
+        "percent": 87.59124087591242
+      },
+      "regions": {
+        "count": 666,
+        "covered": 583,
+        "notcovered": 83,
+        "percent": 87.53753753753753
+      },
+      "functions": {
+        "count": 72,
+        "covered": 53,
+        "percent": 73.61111111111111
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "81, 107, 149-153, 183-187, 282, 306-311, 333-335, 352-354, 366-374"
+    },
+    {
+      "path": "src/config.rs",
+      "source_sha256": "38c43ca9f31c4c655bf684b26b547958965f49a3a6a50c1849c5362785313c48",
+      "lines": {
+        "count": 253,
+        "covered": 205,
+        "percent": 81.0276679841897
+      },
+      "regions": {
+        "count": 401,
+        "covered": 315,
+        "notcovered": 86,
+        "percent": 78.55361596009975
+      },
+      "functions": {
+        "count": 39,
+        "covered": 27,
+        "percent": 69.23076923076923
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "11-13, 30-37, 39-42, 44, 52-58, 60-63, 65, 72-76, 181-183, 207, 225-227, 233, 375"
+    },
+    {
+      "path": "src/bin/undns.rs",
+      "source_sha256": "109accbfba7a29330082e67c49560f916a997e392595c3ccaab936bf75217243",
+      "lines": {
+        "count": 85,
+        "covered": 40,
+        "percent": 47.05882352941176
+      },
+      "regions": {
+        "count": 135,
+        "covered": 68,
+        "notcovered": 67,
+        "percent": 50.37037037037037
+      },
+      "functions": {
+        "count": 11,
+        "covered": 4,
+        "percent": 36.36363636363637
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "30, 49, 51-57, 73, 83-86, 88, 90-105, 107, 109-113"
+    },
+    {
+      "path": "src/connection.rs",
+      "source_sha256": "639973cf774dd05fd04a4e764bbea103846a1487b8b6e6da298022b582c6d4e2",
+      "lines": {
+        "count": 130,
+        "covered": 92,
+        "percent": 70.76923076923077
+      },
+      "regions": {
+        "count": 137,
+        "covered": 93,
+        "notcovered": 44,
+        "percent": 67.88321167883211
+      },
+      "functions": {
+        "count": 20,
+        "covered": 13,
+        "percent": 65.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "36-40, 42-45, 47, 55, 61-68, 78, 94-96, 129, 155-166"
+    },
+    {
+      "path": "src/network_notifications.rs",
+      "source_sha256": "4a60896b7aa7a4df6e9d1d4fa975481b6472c4368db3c3d7cb05334ee3ff0abe",
+      "lines": {
+        "count": 165,
+        "covered": 144,
+        "percent": 87.27272727272727
+      },
+      "regions": {
+        "count": 199,
+        "covered": 178,
+        "notcovered": 21,
+        "percent": 89.44723618090453
+      },
+      "functions": {
+        "count": 20,
+        "covered": 16,
+        "percent": 80.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "37-39, 89-91, 190-191, 194, 197-199, 214-216, 221-223"
+    },
+    {
+      "path": "src/route.rs",
+      "source_sha256": "fef855b7175c1a55c954234c10823884895a0dda7bfc69a0fd960e637857f542",
+      "lines": {
+        "count": 152,
+        "covered": 143,
+        "percent": 94.07894736842105
+      },
+      "regions": {
+        "count": 277,
+        "covered": 258,
+        "notcovered": 19,
+        "percent": 93.14079422382672
+      },
+      "functions": {
+        "count": 22,
+        "covered": 18,
+        "percent": 81.81818181818183
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "59, 157, 161, 166, 226"
+    },
+    {
+      "path": "src/bin/paceval.rs",
+      "source_sha256": "3fe99286dbe6c88c564b651b1a75be1917d77fabcd8b888228550fd7fa184c89",
+      "lines": {
+        "count": 40,
+        "covered": 32,
+        "percent": 80.0
+      },
+      "regions": {
+        "count": 73,
+        "covered": 57,
+        "notcovered": 16,
+        "percent": 78.08219178082192
+      },
+      "functions": {
+        "count": 9,
+        "covered": 3,
+        "percent": 33.33333333333333
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "44-45"
+    },
+    {
+      "path": "src/bin/unproxy-system-proxy.rs",
+      "source_sha256": "de0202edf252a80a1e5eb75fdd6c85d97226e90540046cc863d35c3db77c4755",
+      "lines": {
+        "count": 28,
+        "covered": 21,
+        "percent": 75.0
+      },
+      "regions": {
+        "count": 44,
+        "covered": 34,
+        "notcovered": 10,
+        "percent": 77.27272727272727
+      },
+      "functions": {
+        "count": 5,
+        "covered": 4,
+        "percent": 80.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "15-16, 21, 23, 25"
+    },
+    {
+      "path": "src/access.rs",
+      "source_sha256": "f39b4bc1c940ced685069c02d23e8779ab3afde4bd357be34b71be1ceff7fbee",
+      "lines": {
+        "count": 64,
+        "covered": 62,
+        "percent": 96.875
+      },
+      "regions": {
+        "count": 77,
+        "covered": 74,
+        "notcovered": 3,
+        "percent": 96.10389610389612
+      },
+      "functions": {
+        "count": 9,
+        "covered": 9,
+        "percent": 100.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "77, 89"
+    },
+    {
+      "path": "src/bin/unproxy-app.rs",
+      "source_sha256": "63b92b593062d5fd5bc963981e5e72d53c6013857eceee45a2c88987d3519510",
+      "lines": {
+        "count": 7,
+        "covered": 5,
+        "percent": 71.42857142857143
+      },
+      "regions": {
+        "count": 8,
+        "covered": 6,
+        "notcovered": 2,
+        "percent": 75.0
+      },
+      "functions": {
+        "count": 1,
+        "covered": 1,
+        "percent": 100.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "15-16"
+    },
+    {
+      "path": "src/bin/unproxy-login-helper.rs",
+      "source_sha256": "fd7b5c375173e460411fc956dcb8b1cb8eefeb5c30a2b57523c28277f7d2e4c9",
+      "lines": {
+        "count": 7,
+        "covered": 5,
+        "percent": 71.42857142857143
+      },
+      "regions": {
+        "count": 8,
+        "covered": 6,
+        "notcovered": 2,
+        "percent": 75.0
+      },
+      "functions": {
+        "count": 1,
+        "covered": 1,
+        "percent": 100.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "15-16"
+    },
+    {
+      "path": "src/bin/unproxy-tray.rs",
+      "source_sha256": "976f6e79c71049bde9a20ed4ca13209b6de88ac656651df9bfc33b19f9fc7a13",
+      "lines": {
+        "count": 7,
+        "covered": 5,
+        "percent": 71.42857142857143
+      },
+      "regions": {
+        "count": 8,
+        "covered": 6,
+        "notcovered": 2,
+        "percent": 75.0
+      },
+      "functions": {
+        "count": 1,
+        "covered": 1,
+        "percent": 100.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "22-23"
+    },
+    {
+      "path": "src/tools.rs",
+      "source_sha256": "d05df2f95aab03a8a2d0b478c96b42da32fc7ffc6ab145daa7ca4a6bcce081a2",
+      "lines": {
+        "count": 86,
+        "covered": 84,
+        "percent": 97.67441860465115
+      },
+      "regions": {
+        "count": 172,
+        "covered": 148,
+        "notcovered": 24,
+        "percent": 86.04651162790698
+      },
+      "functions": {
+        "count": 9,
+        "covered": 9,
+        "percent": 100.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": "21, 34"
+    },
+    {
+      "path": "src/bin/unproxy-register.rs",
+      "source_sha256": "dbbadfcb9a04ccea4a77236c8c18195aad4f0c119ea892ecb10c2bd21570d1c8",
+      "lines": {
+        "count": 13,
+        "covered": 12,
+        "percent": 92.3076923076923
+      },
+      "regions": {
+        "count": 27,
+        "covered": 25,
+        "notcovered": 2,
+        "percent": 92.5925925925926
+      },
+      "functions": {
+        "count": 3,
+        "covered": 2,
+        "percent": 66.66666666666666
+      },
+      "uncovered_line_ranges_from_show_missing_lines": ""
+    },
+    {
+      "path": "src/bin/unproxyctl.rs",
+      "source_sha256": "c107a00a16db37b33df22da3a67247380a7d4bfc418e0d6600738dd0bbcff924",
+      "lines": {
+        "count": 13,
+        "covered": 12,
+        "percent": 92.3076923076923
+      },
+      "regions": {
+        "count": 27,
+        "covered": 25,
+        "notcovered": 2,
+        "percent": 92.5925925925926
+      },
+      "functions": {
+        "count": 3,
+        "covered": 2,
+        "percent": 66.66666666666666
+      },
+      "uncovered_line_ranges_from_show_missing_lines": ""
+    },
+    {
+      "path": "src/bin/toml-query.rs",
+      "source_sha256": "0047ba03d5a9f7fbc05049009c54294e7b502e895075c56b807f0d475dd8774e",
+      "lines": {
+        "count": 8,
+        "covered": 8,
+        "percent": 100.0
+      },
+      "regions": {
+        "count": 17,
+        "covered": 15,
+        "notcovered": 2,
+        "percent": 88.23529411764706
+      },
+      "functions": {
+        "count": 2,
+        "covered": 2,
+        "percent": 100.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": ""
+    },
+    {
+      "path": "src/bin/unproxy-version.rs",
+      "source_sha256": "059f004e11aced82d33e6fdb4b1d4f8fd953707a3aa066100f902659e349a749",
+      "lines": {
+        "count": 7,
+        "covered": 7,
+        "percent": 100.0
+      },
+      "regions": {
+        "count": 12,
+        "covered": 11,
+        "notcovered": 1,
+        "percent": 91.66666666666666
+      },
+      "functions": {
+        "count": 1,
+        "covered": 1,
+        "percent": 100.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": ""
+    },
+    {
+      "path": "src/bin/unproxy.rs",
+      "source_sha256": "87db663a988fe94fd5029d704fa8bb7431a29207fa81bd454d0ce57898b11ff8",
+      "lines": {
+        "count": 6,
+        "covered": 6,
+        "percent": 100.0
+      },
+      "regions": {
+        "count": 9,
+        "covered": 8,
+        "notcovered": 1,
+        "percent": 88.88888888888889
+      },
+      "functions": {
+        "count": 2,
+        "covered": 2,
+        "percent": 100.0
+      },
+      "uncovered_line_ranges_from_show_missing_lines": ""
+    }
+  ]
+}

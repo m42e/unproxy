@@ -376,6 +376,14 @@ mod native {
     // The menu is rebuilt whenever the native status item opens. Child process
     // and preference updates stay in Rust; Cocoa only owns presentation/events.
     static STATE: Mutex<Option<Arc<Mutex<State>>>> = Mutex::new(None);
+    #[derive(Clone, Default)]
+    struct TrayStatus {
+        pac_loaded: Option<bool>,
+        authentication_configured: bool,
+        upstream_state: String,
+        authentication_state: String,
+        upstream_checked_at: Option<i64>,
+    }
     struct State {
         prefs: Preferences,
         prefs_path: PathBuf,
@@ -386,6 +394,9 @@ mod native {
         _instance_lock: std::fs::File,
         status_button: usize,
         last_running: bool,
+        start_failed: bool,
+        tray_status: TrayStatus,
+        last_icon_key: String,
     }
     unsafe extern "C-unwind" fn action(_this: *mut AnyObject, _cmd: Sel, sender: *mut AnyObject) {
         let tag: i64 = unsafe { msg_send![sender, tag] };
@@ -401,6 +412,10 @@ mod native {
                 login_item: set_login_item,
             };
             terminate = handle_action(&mut s, tag, &mut services);
+            let running = s.child.is_running();
+            s.last_running = running;
+            refresh_runtime_status(&mut s, running);
+            update_status_button(&mut s, running);
         }
         if terminate {
             let app: *mut AnyObject =
@@ -430,8 +445,15 @@ mod native {
             1 => {
                 let exe = state.child_exe.clone();
                 let prefs = state.prefs.clone();
-                if let Err(error) = state.child.start(&exe, &prefs) {
-                    (services.alert)(&format!("Could not start Unproxy: {error:#}"));
+                match state.child.start(&exe, &prefs) {
+                    Ok(()) => {
+                        state.start_failed = false;
+                        reset_runtime_status(state);
+                    }
+                    Err(error) => {
+                        state.start_failed = true;
+                        (services.alert)(&format!("Could not start Unproxy: {error:#}"));
+                    }
                 }
                 state.last_running = state.child.is_running();
                 if !state.last_running
@@ -443,6 +465,7 @@ mod native {
             2 => {
                 let _ = state.child.stop();
                 state.last_running = false;
+                state.start_failed = false;
             }
             3..=5 => {
                 let running = state.child.is_running();
@@ -454,8 +477,17 @@ mod native {
                 let _ = (services.save)(&state.prefs, &state.prefs_path, state.defaults);
                 let exe = state.child_exe.clone();
                 let prefs = state.prefs.clone();
-                if running && let Err(error) = state.child.restart(&exe, &prefs) {
-                    (services.alert)(&format!("Could not restart Unproxy: {error:#}"));
+                if running {
+                    match state.child.restart(&exe, &prefs) {
+                        Ok(()) => {
+                            state.start_failed = false;
+                            reset_runtime_status(state);
+                        }
+                        Err(error) => {
+                            state.start_failed = true;
+                            (services.alert)(&format!("Could not restart Unproxy: {error:#}"));
+                        }
+                    }
                 }
                 state.last_running = state.child.is_running();
             }
@@ -493,8 +525,15 @@ mod native {
                     if running {
                         let exe = state.child_exe.clone();
                         let prefs = state.prefs.clone();
-                        if let Err(error) = state.child.restart(&exe, &prefs) {
-                            (services.alert)(&format!("Could not restart Unproxy: {error:#}"));
+                        match state.child.restart(&exe, &prefs) {
+                            Ok(()) => {
+                                state.start_failed = false;
+                                reset_runtime_status(state);
+                            }
+                            Err(error) => {
+                                state.start_failed = true;
+                                (services.alert)(&format!("Could not restart Unproxy: {error:#}"));
+                            }
                         }
                     }
                     state.last_running = state.child.is_running();
@@ -518,6 +557,218 @@ mod native {
         }
         terminate
     }
+    fn auth_is_configured(prefs: &Preferences) -> bool {
+        let netrc = super::super::config::netrc_default().is_some_and(|path| path.is_file());
+        #[cfg(feature = "negotiate")]
+        {
+            prefs.negotiate || netrc
+        }
+        #[cfg(not(feature = "negotiate"))]
+        {
+            let _ = prefs;
+            netrc
+        }
+    }
+    fn probe_runtime_status(port: u16) -> Option<TrayStatus> {
+        use std::{
+            io::{Read, Write},
+            net::{Ipv4Addr, SocketAddr, TcpStream},
+            time::Duration,
+        };
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(180)).ok()?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(180)))
+            .ok()?;
+        stream
+            .set_write_timeout(Some(Duration::from_millis(180)))
+            .ok()?;
+        write!(
+            stream,
+            "GET /status.json HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        )
+        .ok()?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).ok()?;
+        let body_start = response.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+        let status: serde_json::Value = serde_json::from_slice(&response[body_start..]).ok()?;
+        Some(TrayStatus {
+            pac_loaded: status
+                .get("pac_loaded")
+                .and_then(serde_json::Value::as_bool),
+            authentication_configured: status
+                .get("authentication_configured")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            upstream_state: status
+                .get("upstream_state")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned(),
+            authentication_state: status
+                .get("authentication_state")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned(),
+            upstream_checked_at: status
+                .get("upstream_checked_at")
+                .and_then(serde_json::Value::as_i64),
+        })
+    }
+    fn refresh_runtime_status(state: &mut State, running: bool) {
+        if running {
+            if let Some(status) = probe_runtime_status(state.prefs.effective_port()) {
+                state.tray_status = status;
+            } else {
+                state.tray_status.pac_loaded = None;
+                state.tray_status.authentication_configured = auth_is_configured(&state.prefs);
+            }
+        } else {
+            state.tray_status.pac_loaded = None;
+            state.tray_status.authentication_configured = auth_is_configured(&state.prefs);
+        }
+    }
+    fn reset_runtime_status(state: &mut State) {
+        let configured = auth_is_configured(&state.prefs);
+        state.tray_status = TrayStatus {
+            authentication_configured: configured,
+            authentication_state: if configured {
+                "configured".into()
+            } else {
+                "disabled".into()
+            },
+            ..TrayStatus::default()
+        };
+    }
+    fn upstream_is_recent(status: &TrayStatus) -> bool {
+        status.upstream_checked_at.is_some_and(|checked| {
+            let age = chrono::Utc::now().timestamp().saturating_sub(checked);
+            (0..=300).contains(&age)
+        })
+    }
+    fn icon_statuses(
+        state: &State,
+        running: bool,
+    ) -> (&'static str, &'static str, &'static str, &'static str) {
+        let service = if running {
+            "running"
+        } else if state.start_failed || state.child.last_exit.is_some() {
+            "failed"
+        } else {
+            "stopped"
+        };
+        let pac = if !running {
+            "unloaded"
+        } else {
+            match state.tray_status.pac_loaded {
+                Some(true) => "loaded",
+                Some(false) => "unloaded",
+                None => "unknown",
+            }
+        };
+        let upstream = if !upstream_is_recent(&state.tray_status) {
+            "unknown"
+        } else if state.tray_status.upstream_state == "ok" {
+            "ok"
+        } else {
+            "error"
+        };
+        let authentication = if !state.tray_status.authentication_configured {
+            "disabled"
+        } else if upstream_is_recent(&state.tray_status)
+            && state.tray_status.authentication_state == "authenticated"
+        {
+            "authenticated"
+        } else if upstream_is_recent(&state.tray_status)
+            && state.tray_status.authentication_state == "rejected"
+        {
+            "rejected"
+        } else {
+            "configured"
+        };
+        (service, pac, upstream, authentication)
+    }
+    fn status_labels(state: &State, running: bool) -> (String, String, String, String) {
+        let process = if running {
+            "Running"
+        } else if state.start_failed || state.child.last_exit.is_some() {
+            "Stopped unexpectedly"
+        } else {
+            "Stopped"
+        }
+        .to_owned();
+        let pac = match if running {
+            state.tray_status.pac_loaded
+        } else {
+            Some(false)
+        } {
+            Some(true) => "Loaded".to_owned(),
+            Some(false) => "Not loaded".to_owned(),
+            None => "Unknown".to_owned(),
+        };
+        let upstream = if !upstream_is_recent(&state.tray_status) {
+            "No recent proxy request".to_owned()
+        } else if state.tray_status.upstream_state == "ok" {
+            "Last proxy request succeeded".to_owned()
+        } else {
+            "Last proxy request failed".to_owned()
+        };
+        let authentication = match icon_statuses(state, running).3 {
+            "authenticated" => "Accepted on last request",
+            "rejected" => "Rejected by upstream (407)",
+            "configured" => "Configured; not verified yet",
+            _ => "Not configured",
+        }
+        .to_owned();
+        (process, pac, upstream, authentication)
+    }
+    fn update_status_button(state: &mut State, running: bool) {
+        let (service, pac, upstream, authentication) = icon_statuses(state, running);
+        let key = format!("{service}-{pac}-{upstream}-{authentication}");
+        let button = state.status_button as *mut AnyObject;
+        if button.is_null() {
+            return;
+        }
+        if key != state.last_icon_key {
+            let path = state
+                .child_exe
+                .parent()
+                .and_then(Path::parent)
+                .map(|contents| {
+                    contents
+                        .join("Resources/tray-icons")
+                        .join(format!("{key}.png"))
+                });
+            if let Some(path) = path.filter(|path| path.is_file()) {
+                let image: *mut AnyObject = unsafe {
+                    msg_send![objc2::class!(NSImage), imageWithContentsOfFile:cocoa_string(&path.to_string_lossy())]
+                };
+                if !image.is_null() {
+                    #[repr(C)]
+                    struct Size {
+                        width: f64,
+                        height: f64,
+                    }
+                    unsafe impl objc2::encode::Encode for Size {
+                        const ENCODING: objc2::encode::Encoding = objc2::encode::Encoding::Struct(
+                            "CGSize",
+                            &[f64::ENCODING, f64::ENCODING],
+                        );
+                    }
+                    let _: () =
+                        unsafe { msg_send![image, setSize:Size { width: 18.0, height: 18.0 }] };
+                    let _: () = unsafe { msg_send![button, setImage:image] };
+                    state.last_icon_key = key;
+                }
+            }
+        }
+        let (process, pac, upstream, authentication) = status_labels(state, running);
+        let tooltip = format!(
+            "Unproxy {process} · PAC {pac} · Upstream: {upstream} · Auth: {authentication}"
+        );
+        let _: () = unsafe { msg_send![button, setTitle:cocoa_string("")] };
+        let _: () = unsafe { msg_send![button, setToolTip:cocoa_string(&tooltip)] };
+    }
     unsafe extern "C-unwind" fn poll_child(
         _this: *mut AnyObject,
         _cmd: Sel,
@@ -533,11 +784,8 @@ mod native {
                 show_alert(detail);
             }
             s.last_running = running;
-            let title = if running { "Unproxy •" } else { "Unproxy" };
-            let button = s.status_button as *mut AnyObject;
-            if !button.is_null() {
-                let _: () = unsafe { msg_send![button, setTitle:cocoa_string(title)] };
-            }
+            refresh_runtime_status(&mut s, running);
+            update_status_button(&mut s, running);
         }
     }
     unsafe extern "C-unwind" fn rebuild_menu(
@@ -552,7 +800,18 @@ mod native {
         if let Some(s) = STATE.lock().unwrap().as_ref() {
             let mut s = s.lock().unwrap();
             let running = s.child.is_running();
+            refresh_runtime_status(&mut s, running);
+            update_status_button(&mut s, running);
             let target: *mut AnyObject = unsafe { msg_send![menu, delegate] };
+            let (process, pac, upstream, authentication) = status_labels(&s, running);
+            for line in [
+                format!("Proxy: {process}"),
+                format!("PAC: {pac}"),
+                format!("Upstream: {upstream}"),
+                format!("Authentication: {authentication}"),
+            ] {
+                menu_item(menu, &line, 0, false, false, target);
+            }
             if running {
                 menu_item(menu, "Stop", 2, false, true, target);
                 menu_item(
@@ -980,6 +1239,7 @@ mod native {
                 "function FindProxyForURL(url, host) { return \"DIRECT\"; }\n",
             )?;
         }
+        let auth_configured = auth_is_configured(&prefs);
         let state = Arc::new(Mutex::new(State {
             prefs,
             prefs_path: path,
@@ -990,6 +1250,17 @@ mod native {
             _instance_lock: instance_lock,
             status_button: 0,
             last_running: false,
+            start_failed: false,
+            tray_status: TrayStatus {
+                authentication_configured: auth_configured,
+                authentication_state: if auth_configured {
+                    "configured".into()
+                } else {
+                    "disabled".into()
+                },
+                ..TrayStatus::default()
+            },
+            last_icon_key: String::new(),
         }));
         *STATE.lock().unwrap() = Some(state.clone());
         let app: *mut AnyObject =
@@ -999,8 +1270,15 @@ mod native {
             let mut s = state.lock().unwrap();
             let exe = s.child_exe.clone();
             let prefs = s.prefs.clone();
-            if let Err(e) = s.child.start(&exe, &prefs) {
-                show_alert(&format!("Could not start Unproxy: {e:#}"));
+            match s.child.start(&exe, &prefs) {
+                Ok(()) => {
+                    s.start_failed = false;
+                    reset_runtime_status(&mut s);
+                }
+                Err(e) => {
+                    s.start_failed = true;
+                    show_alert(&format!("Could not start Unproxy: {e:#}"));
+                }
             }
             s.last_running = s.child.is_running();
             if !s.last_running
@@ -1008,12 +1286,18 @@ mod native {
             {
                 show_alert(exit);
             }
+            let running = s.last_running;
+            refresh_runtime_status(&mut s, running);
         }
         let bar: *mut AnyObject = unsafe { msg_send![objc2::class!(NSStatusBar), systemStatusBar] };
         let item: *mut AnyObject = unsafe { msg_send![bar, statusItemWithLength:-1.0f64] };
         let button: *mut AnyObject = unsafe { msg_send![item, button] };
-        let _: () = unsafe { msg_send![button, setTitle:cocoa_string("Unproxy")] };
-        state.lock().unwrap().status_button = button as usize;
+        {
+            let mut s = state.lock().unwrap();
+            s.status_button = button as usize;
+            let running = s.last_running;
+            update_status_button(&mut s, running);
+        }
         let cls = action_class();
         let target: *mut AnyObject = unsafe { msg_send![cls, new] };
         let _: () = unsafe { msg_send![app, setDelegate:target] };
@@ -1226,6 +1510,9 @@ mod native {
                 _instance_lock: lock,
                 status_button: 0,
                 last_running: false,
+                start_failed: false,
+                tray_status: TrayStatus::default(),
+                last_icon_key: String::new(),
             }));
             *STATE.lock().unwrap() = Some(state.clone());
             let actions = action_class();

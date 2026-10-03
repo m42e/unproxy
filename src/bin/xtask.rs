@@ -317,13 +317,24 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                     std::fs::copy("assets/install.ps1", staging.join("install.ps1"))?;
                     std::fs::copy("assets/uninstall.ps1", staging.join("uninstall.ps1"))?;
                     std::fs::copy("assets/unproxy-tray.ps1", staging.join("unproxy-tray.ps1"))?;
+                    let icons = Path::new("assets/tray-icons");
+                    if icons.is_dir() {
+                        let destination = staging.join("tray-icons");
+                        std::fs::create_dir_all(&destination)?;
+                        for icon in std::fs::read_dir(icons)? {
+                            let icon = icon?.path();
+                            if icon.extension().is_some_and(|ext| ext == "ico") {
+                                std::fs::copy(&icon, destination.join(icon.file_name().unwrap()))?;
+                            }
+                        }
+                    }
                 }
                 std::fs::copy("README.md", staging.join("README.md"))?;
                 std::fs::copy("assets/proxy.pac", staging.join("proxy.pac.sample"))?;
                 std::fs::write(
                     staging.join("metadata.json"),
                     serde_json::to_vec_pretty(
-                        &serde_json::json!({"version":unproxy::VERSION,"target":target_name,"negotiate":!no_negotiate,"components":if matches!(format, Format::Windows) { vec!["unproxy.exe", "UnproxyTray.exe", "unproxy-tray.ps1", "install.ps1", "uninstall.ps1", "metadata.json"] } else { vec!["unproxy", "paceval", "undns"] },"dns_version":unproxy::DNS_VERSION}),
+                        &serde_json::json!({"version":unproxy::VERSION,"target":target_name,"negotiate":!no_negotiate,"components":if matches!(format, Format::Windows) { vec!["unproxy.exe", "UnproxyTray.exe", "unproxy-tray.ps1", "tray-icons", "install.ps1", "uninstall.ps1", "metadata.json"] } else { vec!["unproxy", "paceval", "undns"] },"dns_version":unproxy::DNS_VERSION}),
                     )?,
                 )?;
                 zip(&staging, &output.join(format!("{package_name}.zip")))?;
@@ -473,6 +484,17 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                     app.join("child-entitlements.plist"),
                 )?;
                 std::fs::create_dir_all(app.join("Resources"))?;
+                let tray_icons = Path::new("assets/tray-icons");
+                if tray_icons.is_dir() {
+                    let resources_icons = app.join("Resources/tray-icons");
+                    std::fs::create_dir_all(&resources_icons)?;
+                    for icon in std::fs::read_dir(tray_icons)? {
+                        let icon = icon?.path();
+                        if icon.extension().is_some_and(|ext| ext == "png") {
+                            std::fs::copy(&icon, resources_icons.join(icon.file_name().unwrap()))?;
+                        }
+                    }
+                }
                 std::fs::write(
                     app.join("Resources/metadata.json"),
                     serde_json::to_vec_pretty(
@@ -667,7 +689,6 @@ mod tests {
             0o755
         );
     }
-}
 
     #[test]
     fn zip_helper_writes_an_archive_that_extracts_on_the_host() {
@@ -706,3 +727,4 @@ mod tests {
             b"fixture executable"
         );
     }
+}
