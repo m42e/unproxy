@@ -397,6 +397,7 @@ mod native {
         status_button: usize,
         last_running: bool,
         start_failed: bool,
+        notice: Option<String>,
         tray_status: TrayStatus,
         last_icon_key: String,
     }
@@ -405,15 +406,21 @@ mod native {
         let mut terminate = false;
         if let Some(shared) = STATE.lock().unwrap().as_ref() {
             let mut s = shared.lock().unwrap();
-            let mut services = ActionServices {
-                prompt,
-                alert: show_alert,
-                save: |prefs: &Preferences, path: &Path, defaults: usize| {
-                    save_native_preferences(prefs, path, defaults as *mut AnyObject)
-                },
-                login_item: set_login_item,
-            };
-            terminate = handle_action(&mut s, tag, &mut services);
+            let mut notice = None;
+            {
+                let mut services = ActionServices {
+                    prompt,
+                    alert: |message: &str| notice = Some(message.to_owned()),
+                    save: |prefs: &Preferences, path: &Path, defaults: usize| {
+                        save_native_preferences(prefs, path, defaults as *mut AnyObject)
+                    },
+                    login_item: set_login_item,
+                };
+                terminate = handle_action(&mut s, tag, &mut services);
+            }
+            if notice.is_some() {
+                s.notice = notice;
+            }
             let running = s.child.is_running();
             s.last_running = running;
             refresh_runtime_status(&mut s, running);
@@ -443,6 +450,7 @@ mod native {
         L: FnMut(bool) -> Result<()>,
     {
         let mut terminate = false;
+        state.notice = None;
         match tag {
             1 => {
                 let exe = state.child_exe.clone();
@@ -743,7 +751,13 @@ mod native {
                 });
             if let Some(path) = path.filter(|path| path.is_file()) {
                 let image: *mut AnyObject = unsafe {
-                    msg_send![objc2::class!(NSImage), imageWithContentsOfFile:cocoa_string(&path.to_string_lossy())]
+                    let allocated: *mut AnyObject = msg_send![objc2::class!(NSImage), alloc];
+                    let initialized: *mut AnyObject = msg_send![allocated, initWithContentsOfFile:cocoa_string(&path.to_string_lossy())];
+                    if initialized.is_null() {
+                        initialized
+                    } else {
+                        msg_send![initialized, autorelease]
+                    }
                 };
                 if !image.is_null() {
                     #[repr(C)]
@@ -782,8 +796,12 @@ mod native {
             };
             let running = s.child.is_running();
             if s.last_running && !running {
-                let detail = s.child.last_exit.as_deref().unwrap_or("Proxy stopped");
-                show_alert(detail);
+                s.notice = Some(
+                    s.child
+                        .last_exit
+                        .clone()
+                        .unwrap_or_else(|| "Proxy stopped".to_owned()),
+                );
             }
             s.last_running = running;
             refresh_runtime_status(&mut s, running);
@@ -813,6 +831,9 @@ mod native {
                 format!("Authentication: {authentication}"),
             ] {
                 menu_item(menu, &line, 0, false, false, target);
+            }
+            if let Some(notice) = &s.notice {
+                menu_item(menu, &format!("Notice: {notice}"), 0, false, false, target);
             }
             if running {
                 menu_item(menu, "Stop", 2, false, true, target);
@@ -1253,6 +1274,7 @@ mod native {
             status_button: 0,
             last_running: false,
             start_failed: false,
+            notice: None,
             tray_status: TrayStatus {
                 authentication_configured: auth_configured,
                 authentication_state: if auth_configured {
@@ -1279,14 +1301,14 @@ mod native {
                 }
                 Err(e) => {
                     s.start_failed = true;
-                    show_alert(&format!("Could not start Unproxy: {e:#}"));
+                    s.notice = Some(format!("Could not start Unproxy: {e:#}"));
                 }
             }
             s.last_running = s.child.is_running();
             if !s.last_running
                 && let Some(exit) = &s.child.last_exit
             {
-                show_alert(exit);
+                s.notice = Some(exit.clone());
             }
             let running = s.last_running;
             refresh_runtime_status(&mut s, running);
@@ -1323,7 +1345,8 @@ mod native {
         };
         let login_enabled = state.lock().unwrap().prefs.autostart;
         if let Err(e) = (options.login_item)(login_enabled) {
-            show_alert(&format!("Could not update Unproxy login startup: {e:#}"));
+            state.lock().unwrap().notice =
+                Some(format!("Could not update Unproxy login startup: {e:#}"));
         }
         let menu: *mut AnyObject = unsafe { msg_send![objc2::class!(NSMenu), new] };
         let _: () = unsafe { msg_send![menu, setDelegate:target] };
@@ -1334,13 +1357,6 @@ mod native {
         let _ = state.lock().unwrap().child.stop();
         *STATE.lock().unwrap() = None;
         Ok(())
-    }
-
-    fn show_alert(message: &str) {
-        let alert: *mut AnyObject = unsafe { msg_send![objc2::class!(NSAlert), new] };
-        let _: () = unsafe { msg_send![alert, setMessageText:cocoa_string("Unproxy")] };
-        let _: () = unsafe { msg_send![alert, setInformativeText:cocoa_string(message)] };
-        let _: isize = unsafe { msg_send![alert, runModal] };
     }
 
     pub fn run_helper() -> Result<()> {
@@ -1513,6 +1529,7 @@ mod native {
                 status_button: 0,
                 last_running: false,
                 start_failed: false,
+                notice: None,
                 tray_status: TrayStatus::default(),
                 last_icon_key: String::new(),
             }));

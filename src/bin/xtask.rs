@@ -2,8 +2,9 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{
+    io::{self, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 use unproxy::tools::{copy_tree, html_escape};
 
@@ -78,6 +79,36 @@ fn run(command: &mut Command) -> Result<()> {
         .status()
         .with_context(|| format!("running {command:?}"))?;
     anyhow::ensure!(status.success(), "command {command:?} exited with {status}");
+    Ok(())
+}
+fn run_pkgbuild(command: &mut Command) -> Result<()> {
+    let output = command
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running {command:?}"))?
+        .wait_with_output()?;
+
+    let stderr = io::stderr();
+    let mut stderr = stderr.lock();
+    for line in output.stderr.split_inclusive(|byte| *byte == b'\n') {
+        let line_without_newline = line.strip_suffix(b"\n").unwrap_or(line);
+        let line_without_newline = line_without_newline
+            .strip_suffix(b"\r")
+            .unwrap_or(line_without_newline);
+        // Recent macOS pkgbuild emits this while preserving extended attributes,
+        // even when the package is written successfully.
+        if line_without_newline != b"write: Permission denied" {
+            stderr.write_all(line)?;
+        }
+    }
+    drop(stderr);
+
+    anyhow::ensure!(
+        output.status.success(),
+        "command {command:?} exited with {}",
+        output.status
+    );
     Ok(())
 }
 fn main() -> Result<()> {
@@ -440,7 +471,7 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                         .arg(&hooks)
                         .arg(output.join(format!("{package_name}.pkg")));
                     pkgbuild_signing_args(&mut command);
-                    run(&mut command)?;
+                    run_pkgbuild(&mut command)?;
                     std::fs::remove_dir_all(hooks)?;
                 } else {
                     package_name.push_str("-staging");
@@ -531,7 +562,7 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                         ])
                         .arg(output.join(format!("{package_name}-app.pkg")));
                     pkgbuild_signing_args(&mut command);
-                    run(&mut command)?;
+                    run_pkgbuild(&mut command)?;
                 } else {
                     zip(
                         &pkg_root,
