@@ -8,12 +8,20 @@ macOS requires the Command Line Tools and frameworks supplied by the SDK.
 ```sh
 cargo build --locked --bins
 cargo build --release --locked --no-default-features
-cargo run --bin xtask -- check
-cargo run --bin xtask -- docs --repository OWNER/REPOSITORY
-cargo run --bin xtask -- package --format portable
-cargo run --bin xtask -- package --format macos
-cargo run --bin xtask -- package --format app
+cargo xtask check
+cargo xtask docs --repository OWNER/REPOSITORY
+cargo xtask package --format native
+cargo xtask package --format portable
+cargo xtask package --format macos
+cargo xtask package --format app
 ```
+
+`cargo xtask` is the repository's Rust-based task runner. Its `native` package
+set builds the release binaries once and assembles the formats for the current
+host: Windows produces an installer ZIP, macOS produces a portable ZIP, PKG,
+and app ZIP, and Linux produces a portable ZIP and Debian package. Run it on
+each operating system to create native packages; macOS PKG assembly and Debian
+packages require their platform packaging tools.
 
 Build metadata may be supplied as UNPROXY_VERSION, UNPROXY_REVISION,
 UNPROXY_PLATFORM and UNPROXY_ARCH. Running identity uses embedded metadata,

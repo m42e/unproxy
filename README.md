@@ -28,9 +28,9 @@ credential handling.
 ```sh
 cargo run --bin paceval -- assets/proxy.pac https://example.org/
 cargo run --bin undns -- --primary 192.0.2.53:53
-cargo run --bin xtask -- check
-cargo run --bin xtask -- docs --repository OWNER/REPOSITORY
-cargo run --bin xtask -- package --format portable
+cargo xtask check
+cargo xtask docs --repository OWNER/REPOSITORY
+cargo xtask package --format native
 ```
 
 Runtime APIs are public modules in `src/lib.rs`. See `docs/` for installation,
