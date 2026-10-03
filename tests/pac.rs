@@ -35,7 +35,10 @@ fn endpoint_and_pac_directives_are_strict_and_normalized() {
         "HTTP proxy.test:80; HTTPS [::1]:443; DIRECT"
     );
     assert!(Routes::from_str("DIRECT; SOCKS host:1").is_err());
+    assert!(Routes::from_str("").is_err());
     assert!(Routes::from_str(" ; ").is_err());
+    assert!("proxy host.test:80".parse::<Route>().is_err());
+    assert!("PROXY host.test:99999".parse::<Route>().is_err());
     assert_eq!(
         "PROXY proxy.test:8080"
             .parse::<Route>()
@@ -102,11 +105,94 @@ fn pac_state_helpers_and_ip_survive_script_replacement() {
 }
 
 #[test]
+fn my_ip_address_returns_valid_ipv4_or_ipv6_syntax() {
+    let script = "function FindProxyForURL(){ return /^(?:\\d{1,3}\\.){3}\\d{1,3}$/.test(myIpAddress()) || /^[0-9a-f:]+$/i.test(myIpAddress()) ? 'DIRECT' : 'PROXY fail.invalid:1'; }";
+    for ip in ["192.0.2.7", "2001:db8::7"] {
+        let mut pac = Pac::new_with_ip(Some(script), ip.parse().unwrap()).unwrap();
+        assert_eq!(
+            pac.evaluate("http://localhost/", "localhost")
+                .unwrap()
+                .to_string(),
+            "DIRECT"
+        );
+    }
+}
+
+#[test]
 fn domain_table_uses_union_label_suffixes() {
     let mut p=Pac::new(Some("const t=new DomainTable([' example.org. ', 'sub.example.org']); function FindProxyForURL(){return t.contains('x.sub.example.org') && !t.contains('notexample.org') ? 'DIRECT':'BAD';}" )).unwrap();
     assert_eq!(p.evaluate("x", "x").unwrap().to_string(), "DIRECT");
     let mut overlap=Pac::new(Some("const t=new DomainTable(['example.org','sub.example.org']); function FindProxyForURL(){return t.contains('a.example.org') && t.contains('x.sub.example.org') && !t.contains('badexample.org') ? 'DIRECT':'BAD';}" )).unwrap();
     assert_eq!(overlap.evaluate("x", "x").unwrap().to_string(), "DIRECT");
+}
+
+#[test]
+fn domain_table_matches_exact_domains_and_label_boundaries_only() {
+    let mut pac = Pac::new(Some(
+        "const t=new DomainTable(['example.org','example.net','test.org']); function FindProxyForURL(){ return t.contains('example.org') && t.contains('www.example.org') && t.contains('example.net') && t.contains('test.org') && !t.contains('example.info') && !t.contains('net') && !t.contains('org') && !t.contains('badexample.org') ? 'DIRECT' : 'PROXY fail.invalid:1'; }",
+    ))
+    .unwrap();
+    assert_eq!(pac.evaluate("x", "x").unwrap().to_string(), "DIRECT");
+}
+
+#[test]
+fn alert_and_default_policy_evaluate_as_direct() {
+    let mut default = Pac::new(None).unwrap();
+    assert_eq!(
+        default
+            .evaluate("http://localhost/", "localhost")
+            .unwrap()
+            .to_string(),
+        "DIRECT"
+    );
+
+    let mut alert = Pac::new(Some(
+        "function FindProxyForURL(url, host){ alert('PAC evaluated'); return 'DIRECT'; }",
+    ))
+    .unwrap();
+    assert_eq!(
+        alert
+            .evaluate("http://localhost/", "localhost")
+            .unwrap()
+            .to_string(),
+        "DIRECT"
+    );
+}
+
+#[test]
+fn resolvability_and_common_shell_patterns_choose_expected_routes() {
+    let mut resolvable = Pac::new(Some(
+        "function FindProxyForURL(url,host){ return isResolvable(host) ? 'DIRECT' : 'PROXY proxy.test:8080'; }",
+    ))
+    .unwrap();
+    assert_eq!(
+        resolvable
+            .evaluate("http://localhost/", "localhost")
+            .unwrap()
+            .to_string(),
+        "DIRECT"
+    );
+    assert_eq!(
+        resolvable
+            .evaluate("http://does-not-exist.invalid/", "does-not-exist.invalid")
+            .unwrap()
+            .to_string(),
+        "HTTP proxy.test:8080"
+    );
+
+    let mut globs = Pac::new(Some(
+        "function FindProxyForURL(url,host){ return shExpMatch(host,'*.example.net') || shExpMatch(host,'www?') ? 'DIRECT' : 'PROXY proxy.test:8080'; }",
+    ))
+    .unwrap();
+    for matching in ["www.example.net", "www1"] {
+        assert_eq!(globs.evaluate("x", matching).unwrap().to_string(), "DIRECT");
+    }
+    for nonmatching in ["example.net", "www", "www12"] {
+        assert_eq!(
+            globs.evaluate("x", nonmatching).unwrap().to_string(),
+            "HTTP proxy.test:8080"
+        );
+    }
 }
 
 #[test]

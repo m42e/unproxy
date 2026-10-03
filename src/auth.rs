@@ -1,7 +1,7 @@
 //! Upstream proxy authentication.
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use http::HeaderValue;
+use http::{HeaderMap, HeaderValue};
 use std::{
     collections::HashMap,
     fmt, fs,
@@ -190,6 +190,22 @@ fn netrc_tokens(input: &str) -> Result<Vec<String>> {
         tokens.push(current)
     }
     Ok(tokens)
+}
+
+/// Decode the first Negotiate challenge token in a proxy authentication response.
+pub fn negotiate_server_token(headers: &HeaderMap) -> Option<Vec<u8>> {
+    headers
+        .get_all(http::header::PROXY_AUTHENTICATE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .find_map(|challenge| {
+            let mut parts = challenge.split_ascii_whitespace();
+            if !parts.next()?.eq_ignore_ascii_case("Negotiate") {
+                return None;
+            }
+            STANDARD.decode(parts.next()?).ok()
+        })
 }
 
 #[derive(Clone, Default)]
@@ -539,6 +555,22 @@ impl NegotiateContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn server_negotiate_token_is_decoded_from_proxy_authenticate() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            http::header::PROXY_AUTHENTICATE,
+            HeaderValue::from_static("Basic realm=proxy"),
+        );
+        headers.append(
+            http::header::PROXY_AUTHENTICATE,
+            HeaderValue::from_static("Negotiate SGVsbG8gV29ybGQh"),
+        );
+        assert_eq!(
+            negotiate_server_token(&headers),
+            Some(b"Hello World!".to_vec())
+        );
+    }
     #[test]
     fn netrc_default_replace() {
         let c = CredentialStore::parse("machine a login joe\ndefault login d password p").unwrap();

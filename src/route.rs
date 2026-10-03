@@ -2,6 +2,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use http::Uri;
 use std::{fmt, net::Ipv6Addr, str::FromStr};
 
+/// A hostname and port pair used for a network endpoint.
+///
+/// ```
+/// use unproxy::route::Endpoint;
+/// let endpoint: Endpoint = "example.org:8080".parse().unwrap();
+/// assert_eq!(endpoint.host, "example.org");
+/// assert_eq!(endpoint.port, 8080);
+/// ```
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Endpoint {
     pub host: String,

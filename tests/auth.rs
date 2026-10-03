@@ -10,6 +10,33 @@ fn credentials_replace_atomically_and_hide_secrets() {
     assert!(store.replace_netrc("machine broken").is_err());
     assert_eq!(store.hosts(), vec!["corp.test"]);
 }
+
+#[tokio::test]
+async fn credential_store_replacement_removes_old_hosts_and_adds_new_hosts() {
+    let store =
+        CredentialStore::parse("machine old.example login alice password old-pass").unwrap();
+    let old_header = AuthFactory::basic(store.clone())
+        .authorization("old.example")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(old_header, "Basic YWxpY2U6b2xkLXBhc3M=");
+
+    store
+        .replace_netrc("machine new.example login bob password new-pass")
+        .unwrap();
+    assert_eq!(store.hosts(), vec!["new.example"]);
+    let old = AuthFactory::basic(store.clone())
+        .authorization("old.example")
+        .await;
+    assert!(old.is_err());
+    let new = AuthFactory::basic(store)
+        .authorization("new.example")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(new, "Basic Ym9iOm5ldy1wYXNz");
+}
 #[tokio::test]
 async fn basic_and_no_auth_headers() {
     let store = CredentialStore::parse("machine proxy.test login u password p").unwrap();

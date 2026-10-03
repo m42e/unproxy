@@ -67,6 +67,11 @@ async fn generated_pac_uses_local_host_header() {
     let mut response = String::new();
     client.read_to_string(&mut response).await.unwrap();
     assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("content-type: application/x-ns-proxy-autoconfig")
+    );
     assert!(response.contains(&format!(
         "function FindProxyForURL(url, host) {{ return \"PROXY {addr}\"; }}\n"
     )));
@@ -670,7 +675,7 @@ async fn forwards_stream_and_removes_hop_headers() {
     let mut events = proxy.subscribe();
     let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
     let req = format!(
-        "POST http://{origin_addr}/upload?q=1 HTTP/1.1\r\nHost: preserved.test\r\nUser-Agent: test-agent\r\nConnection: X-Remove, close\r\nX-Remove: secret\r\nProxy-Authorization: Basic client\r\nAuthorization: Basic origin\r\nContent-Length: 5\r\n\r\nhello"
+        "POST http://{origin_addr}/upload?q=1 HTTP/1.1\r\nHost: preserved.test\r\nUser-Agent: test-agent\r\nConnection: X-Remove, close\r\nProxy-Connection: keep-alive\r\nKeep-Alive: timeout=5\r\nX-Remove: secret\r\nProxy-Authorization: Basic client\r\nAuthorization: Basic origin\r\nContent-Length: 5\r\n\r\nhello"
     );
     client.write_all(req.as_bytes()).await.unwrap();
     let mut response = String::new();
@@ -694,6 +699,8 @@ async fn forwards_stream_and_removes_hop_headers() {
     );
     assert!(!sent.to_ascii_lowercase().contains("proxy-authorization"));
     assert!(!sent.to_ascii_lowercase().contains("x-remove"));
+    assert!(!sent.to_ascii_lowercase().contains("proxy-connection"));
+    assert!(!sent.to_ascii_lowercase().contains("keep-alive"));
     proxy.shutdown();
     proxy.wait().await;
 }
@@ -991,7 +998,9 @@ async fn upstream_connect_performs_proxy_handshake_before_replying() {
                 break;
             }
         }
-        assert!(String::from_utf8_lossy(&head).starts_with(&format!("CONNECT {target} HTTP/1.1")));
+        let head = String::from_utf8_lossy(&head);
+        assert!(head.starts_with(&format!("CONNECT {target} HTTP/1.1")));
+        assert!(!head.to_ascii_lowercase().contains("proxy-authorization"));
         io.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await
             .unwrap();

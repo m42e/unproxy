@@ -1,5 +1,6 @@
-use unproxy::route::{Endpoint, Route, Routes};
 use std::str::FromStr;
+use unproxy::route::{Destination, PathOrUri};
+use unproxy::route::{Endpoint, Route, Routes};
 
 #[test]
 fn proxy_directives_require_separators_and_trim_outer_whitespace() {
@@ -56,4 +57,50 @@ fn rejects_mismatched_hostname_brackets_and_unicode_whitespace() {
     ] {
         assert!(endpoint.parse::<Endpoint>().is_err(), "{endpoint}");
     }
+}
+
+#[test]
+fn uri_destinations_keep_explicit_ports_and_apply_http_scheme_defaults() {
+    for (raw, expected_port) in [
+        ("http://example.org/", 80),
+        ("http://example.org:8080/path", 8080),
+        ("https://example.org/", 443),
+        ("https://example.org:8443/path", 8443),
+    ] {
+        let uri = raw.parse().unwrap();
+        assert_eq!(
+            Destination::from_uri(&uri).unwrap().endpoint.port,
+            expected_port
+        );
+    }
+    let without_scheme = "example.org:443".parse().unwrap();
+    let destination = Destination::from_uri(&without_scheme).unwrap();
+    assert_eq!(destination.scheme, "https");
+    assert_eq!(destination.pac_url, "https://example.org:443/");
+}
+
+#[test]
+fn path_or_uri_distinguishes_local_paths_from_http_sources() {
+    assert!(matches!(
+        "proxy.pac".parse::<PathOrUri>().unwrap(),
+        PathOrUri::Path(_)
+    ));
+    assert!(matches!(
+        "./config/proxy.pac".parse::<PathOrUri>().unwrap(),
+        PathOrUri::Path(_)
+    ));
+    assert!(matches!(
+        "/etc/unproxy/proxy.pac".parse::<PathOrUri>().unwrap(),
+        PathOrUri::Path(_)
+    ));
+    assert!(matches!(
+        "http://example.org/proxy.pac".parse::<PathOrUri>().unwrap(),
+        PathOrUri::Uri(_)
+    ));
+    assert!(matches!(
+        "https://example.org/proxy.pac"
+            .parse::<PathOrUri>()
+            .unwrap(),
+        PathOrUri::Uri(_)
+    ));
 }

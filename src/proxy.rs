@@ -632,6 +632,7 @@ fn sanitize(headers: &mut HeaderMap) {
         .collect();
     for n in [
         "connection",
+        "keep-alive",
         "proxy-authenticate",
         "proxy-authorization",
         "proxy-connection",

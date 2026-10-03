@@ -66,38 +66,16 @@ pub fn activated_listeners(name: &str) -> Result<Vec<TcpListener>> {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let count: usize = std::env::var("LISTEN_FDS")
-                .context("missing LISTEN_FDS")?
-                .parse()
-                .context("invalid LISTEN_FDS")?;
-            anyhow::ensure!(count <= (i32::MAX - 3) as usize, "LISTEN_FDS is too large");
+            let count = std::env::var("LISTEN_FDS").context("missing LISTEN_FDS")?;
             let names = std::env::var("LISTEN_FDNAMES").context("missing LISTEN_FDNAMES")?;
-            let names: Vec<_> = if names.is_empty() {
-                Vec::new()
-            } else {
-                names.split(':').collect()
-            };
-            anyhow::ensure!(
-                names.len() == count,
-                "LISTEN_FDNAMES count does not match LISTEN_FDS"
-            );
-            if let Some(pid) = std::env::var_os("LISTEN_PID") {
-                let pid = pid
-                    .to_str()
-                    .context("invalid LISTEN_PID encoding")?
-                    .parse::<u32>()
-                    .context("invalid LISTEN_PID")?;
-                anyhow::ensure!(
-                    pid == std::process::id(),
-                    "LISTEN_PID belongs to another process"
-                );
-            }
-            descriptors = names
-                .iter()
-                .enumerate()
-                .filter(|(_, n)| **n == name)
-                .map(|(i, _)| 3 + i as i32)
-                .collect();
+            let pid = std::env::var_os("LISTEN_PID")
+                .map(|value| {
+                    value
+                        .into_string()
+                        .map_err(|_| anyhow::anyhow!("invalid LISTEN_PID encoding"))
+                })
+                .transpose()?;
+            descriptors = activation_descriptors(name, &count, &names, pid.as_deref())?;
         }
         anyhow::ensure!(
             !descriptors.is_empty(),
@@ -121,6 +99,39 @@ pub fn activated_listeners(name: &str) -> Result<Vec<TcpListener>> {
         let _ = name;
         bail!("socket activation is unsupported on this platform");
     }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn activation_descriptors(
+    name: &str,
+    count: &str,
+    names: &str,
+    pid: Option<&str>,
+) -> Result<Vec<i32>> {
+    let count: usize = count.parse().context("invalid LISTEN_FDS")?;
+    anyhow::ensure!(count <= (i32::MAX - 3) as usize, "LISTEN_FDS is too large");
+    let names: Vec<_> = if names.is_empty() {
+        Vec::new()
+    } else {
+        names.split(':').collect()
+    };
+    anyhow::ensure!(
+        names.len() == count,
+        "LISTEN_FDNAMES count does not match LISTEN_FDS"
+    );
+    if let Some(pid) = pid {
+        let pid = pid.parse::<u32>().context("invalid LISTEN_PID")?;
+        anyhow::ensure!(
+            pid == std::process::id(),
+            "LISTEN_PID belongs to another process"
+        );
+    }
+    Ok(names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n == name)
+        .map(|(i, _)| 3 + i as i32)
+        .collect())
 }
 
 /// Run the launchd service command in the current user's GUI domain.
@@ -207,6 +218,29 @@ pub fn set_system_proxy(port: u16) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn socket_activation_selects_matching_names_and_validates_metadata() {
+        assert_eq!(
+            activation_descriptors(
+                "web",
+                "3",
+                "metrics:web:web",
+                Some(&std::process::id().to_string())
+            )
+            .unwrap(),
+            [4, 5]
+        );
+        let other_pid = std::process::id().wrapping_add(1).to_string();
+        assert!(activation_descriptors("web", "3", "metrics:web:web", Some(&other_pid)).is_err());
+        assert!(activation_descriptors("web", "3", "web:metrics", None).is_err());
+        assert!(activation_descriptors("web", "2", "web:metrics", None).is_err());
+        assert_eq!(
+            activation_descriptors("missing", "2", "web:metrics", None).unwrap(),
+            []
+        );
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

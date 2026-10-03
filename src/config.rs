@@ -249,6 +249,82 @@ mod tests {
         )
     }
     #[test]
+    fn routing_options_default_off_and_can_be_enabled_together() {
+        let defaults = MainArgs::try_parse_from(["x"]).unwrap();
+        assert!(!defaults.direct_fallback);
+        assert!(!defaults.proxytunnel);
+
+        let enabled =
+            MainArgs::try_parse_from(["x", "--direct-fallback", "--proxytunnel"]).unwrap();
+        assert!(enabled.direct_fallback);
+        assert!(enabled.proxytunnel);
+    }
+    #[test]
+    fn repeated_listeners_keep_input_order() {
+        let args =
+            MainArgs::try_parse_from(["x", "--listen", "127.0.0.1:3128", "--listen", "[::1]:8080"])
+                .unwrap();
+        assert_eq!(
+            args.listen_addrs().unwrap(),
+            [
+                "127.0.0.1:3128".parse().unwrap(),
+                "[::1]:8080".parse().unwrap()
+            ]
+        );
+    }
+    #[cfg(feature = "negotiate")]
+    #[test]
+    fn negotiate_accepts_global_and_ordered_host_restrictions() {
+        let global = MainArgs::try_parse_from(["x", "--negotiate"]).unwrap();
+        assert_eq!(global.negotiate, [""]);
+        let hosts = MainArgs::try_parse_from([
+            "x",
+            "--negotiate",
+            "proxy-one.example",
+            "--negotiate",
+            "proxy-two.example",
+        ])
+        .unwrap();
+        assert_eq!(hosts.negotiate, ["proxy-one.example", "proxy-two.example"]);
+    }
+    #[test]
+    fn client_and_server_keepalive_values_parse_from_cli() {
+        let args = MainArgs::try_parse_from([
+            "x",
+            "--client-tcp-keepalive-time",
+            "10",
+            "--client-tcp-keepalive-interval",
+            "20",
+            "--client-tcp-keepalive-retries",
+            "5",
+            "--server-tcp-keepalive-time",
+            "100",
+            "--server-tcp-keepalive-interval",
+            "200",
+            "--server-tcp-keepalive-retries",
+            "50",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.client_tcp_keepalive_time,
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            args.client_tcp_keepalive_interval,
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(args.client_tcp_keepalive_retries, Some(5));
+        assert_eq!(
+            args.server_tcp_keepalive_time,
+            Some(Duration::from_secs(100))
+        );
+        assert_eq!(
+            args.server_tcp_keepalive_interval,
+            Some(Duration::from_secs(200))
+        );
+        assert_eq!(args.server_tcp_keepalive_retries, Some(50));
+    }
+    #[test]
     fn scalar_command_line_values_override_rc_values_and_verbosity_can_disable_logs() {
         let a =
             MainArgs::try_parse_from(["x", "--connect-timeout", "4", "--connect-timeout", "0.25"])
