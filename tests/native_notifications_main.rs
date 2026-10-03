@@ -3,8 +3,8 @@
 
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use unproxy::network_notifications::{NetworkEvent, NotificationAdapter};
     use std::{ffi::c_void, process::Command, thread, time::Instant};
+    use unproxy::network_notifications::{NetworkEvent, NotificationAdapter};
 
     type Ref = *const c_void;
     type MutableRef = *mut c_void;
@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let unavailable = create(unavailable);
             let object = create("org.unproxy.native-notification-test");
             CFNotificationCenterPostNotification(center, available, object, std::ptr::null(), true);
+            thread::sleep(std::time::Duration::from_millis(100));
             CFNotificationCenterPostNotification(
                 center,
                 unavailable,

@@ -96,6 +96,46 @@ fn preferences_roundtrip_and_child_lifecycle_is_idempotent() {
     child.stop().unwrap();
 }
 
+#[test]
+fn preferences_create_defaults_and_sanitize_invalid_saved_ports() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("settings.json");
+    let defaults = Preferences::load(&path).unwrap();
+    assert_eq!(defaults, Preferences::default());
+    assert!(path.is_file());
+
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    saved["port"] = serde_json::Value::from(-1);
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let repaired = Preferences::load(&path).unwrap();
+    assert_eq!(repaired.port, u32::MAX);
+    assert_eq!(repaired.effective_port(), 3128);
+
+    saved["port"] = serde_json::Value::from(65534);
+    std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    assert_eq!(Preferences::load(&path).unwrap().effective_port(), 65534);
+
+    std::fs::write(&path, "not json").unwrap();
+    assert!(Preferences::load(&path).is_err());
+}
+
+#[test]
+fn child_start_rejects_relative_and_missing_pac_paths_before_launching() {
+    let mut child = ChildLifecycle::default();
+    let mut prefs = Preferences::default();
+    prefs.pac_file = "relative.pac".into();
+    assert!(child.start(std::path::Path::new("unused"), &prefs).is_err());
+
+    let temp = tempfile::tempdir().unwrap();
+    prefs.pac_file = temp.path().join("missing.pac");
+    let error = child
+        .start(std::path::Path::new("unused"), &prefs)
+        .unwrap_err();
+    assert!(error.to_string().contains("PAC file is missing"));
+    assert!(!child.is_running());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn native_objc_bindings_validate_without_launching_or_mutating_settings() {

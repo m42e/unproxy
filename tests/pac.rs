@@ -1,8 +1,8 @@
+use std::str::FromStr;
 use unproxy::{
     pac::{Pac, Policy},
     route::{Endpoint, Route, Routes},
 };
-use std::str::FromStr;
 
 #[test]
 fn synchronous_pac_api_bounds_initialization_and_evaluation() {
@@ -49,7 +49,7 @@ fn endpoint_and_pac_directives_are_strict_and_normalized() {
 }
 
 #[tokio::test]
-async fn policy_bounds_script_execution_and_failed_replacement_clears_readiness() {
+async fn policy_bounds_script_execution_and_failed_replacement_keeps_previous_policy() {
     let policy = Policy::new(None).unwrap();
     policy
         .set_script(Some(
@@ -72,7 +72,13 @@ async fn policy_bounds_script_execution_and_failed_replacement_clears_readiness(
     assert!(start.elapsed() < std::time::Duration::from_secs(3));
     let failed = policy.set_script(Some("while(true){}".into())).await;
     assert!(failed.is_err());
-    assert!(!policy.is_loaded());
+    assert!(policy.is_loaded());
+    assert!(
+        policy
+            .evaluate("http://example.test/".into(), "example.test".into())
+            .await
+            .is_err()
+    );
 }
 
 #[test]

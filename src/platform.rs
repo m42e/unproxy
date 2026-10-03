@@ -204,6 +204,37 @@ pub fn set_system_proxy(port: u16) -> Result<usize> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn service_control_rejects_unknown_commands_before_invoking_launchctl() {
+        let error = service_control("invalid-test-command", false).unwrap_err();
+        assert!(error.to_string().contains("unknown command"));
+        assert!(
+            error
+                .to_string()
+                .contains("status, start, restart, stop, enable, disable")
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn service_control_reports_launchd_is_unavailable() {
+        let error = service_control("status", false).unwrap_err();
+        assert!(error.to_string().contains("require macOS"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn system_proxy_reports_preferences_are_unavailable() {
+        let error = set_system_proxy(3128).unwrap_err();
+        assert!(error.to_string().contains("require macOS"));
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos_preferences {
     use super::*;

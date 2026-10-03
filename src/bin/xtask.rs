@@ -597,3 +597,51 @@ fn markdown(text: &str) -> String {
     }
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_renders_headings_paragraphs_and_unclosed_code_blocks() {
+        let html = markdown("# Title\n\n## Sub & heading\ntext <tag>\n```\n<code>");
+        assert!(html.contains("<h1>Title</h1>"));
+        assert!(html.contains("<h2>Sub &amp; heading</h2>"));
+        assert!(html.contains("<p>text &lt;tag&gt;</p>"));
+        assert!(html.ends_with("<pre><code>&lt;code&gt;\n</code></pre>"));
+    }
+
+    #[test]
+    fn app_plist_escapes_version_and_includes_bundle_metadata() {
+        let plist = info_plist("example.bundle", "example", "11.1");
+        assert!(plist.contains("<string>example.bundle</string>"));
+        assert!(plist.contains("<string>example</string>"));
+        assert!(plist.contains("<string>11.1</string>"));
+        assert!(plist.contains(&html_escape(unproxy::VERSION)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_literals_escape_single_quotes() {
+        assert_eq!(ps_literal(Path::new("a'b")), "'a''b'");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_copies_file_and_sets_executable_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("nested/target");
+        std::fs::write(&source, "binary").unwrap();
+
+        executable(&source, &target).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"binary");
+        assert_eq!(
+            std::fs::metadata(target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+    }
+}

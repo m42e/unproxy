@@ -277,6 +277,7 @@ fn select_pac_ip(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     #[test]
     fn effective_ip_prefers_override_and_detects_only_when_needed() {
         for ip in ["192.0.2.42", "2001:db8::42"] {
@@ -290,5 +291,50 @@ mod tests {
             let ip = ip.parse().unwrap();
             assert_eq!(select_pac_ip(None, || ip), ip);
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_netrc_credentials_build_a_basic_authorization_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("netrc");
+        fs::write(
+            &path,
+            "machine proxy.example login test-user password test-pass",
+        )
+        .unwrap();
+        let args =
+            MainArgs::try_parse_from(["unproxy", "--netrc-file", path.to_str().unwrap()]).unwrap();
+
+        let auth = load_auth(&args).unwrap();
+        let header = auth.authorization("proxy.example").await.unwrap().unwrap();
+        assert_eq!(header, "Basic dGVzdC11c2VyOnRlc3QtcGFzcw==");
+    }
+
+    #[test]
+    fn explicit_netrc_path_errors_for_missing_and_malformed_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing.netrc");
+        let args = MainArgs::try_parse_from(["unproxy", "--netrc-file", missing.to_str().unwrap()])
+            .unwrap();
+        assert!(
+            load_auth(&args)
+                .unwrap_err()
+                .to_string()
+                .contains("does not exist")
+        );
+
+        let malformed = temp.path().join("malformed.netrc");
+        fs::write(&malformed, "machine proxy.example unsupported value").unwrap();
+        let args =
+            MainArgs::try_parse_from(["unproxy", "--netrc-file", malformed.to_str().unwrap()])
+                .unwrap();
+        assert!(load_auth(&args).is_err());
+    }
+
+    #[test]
+    fn embedded_entry_handles_help_version_and_invalid_arguments_without_running() {
+        assert!(embedded_entry(vec!["unproxy".into(), "--help".into()]).is_ok());
+        assert!(embedded_entry(vec!["unproxy".into(), "--version".into()]).is_ok());
+        assert!(embedded_entry(vec!["unproxy".into(), "--unknown-option".into()]).is_err());
     }
 }

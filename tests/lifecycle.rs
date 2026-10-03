@@ -89,6 +89,15 @@ fn runtime_products_have_usable_help_and_versions() {
         env!("CARGO_BIN_EXE_unproxy"),
         env!("CARGO_BIN_EXE_undns"),
         env!("CARGO_BIN_EXE_paceval"),
+        env!("CARGO_BIN_EXE_toml-query"),
+        env!("CARGO_BIN_EXE_unproxy-app"),
+        env!("CARGO_BIN_EXE_unproxy-login-helper"),
+        env!("CARGO_BIN_EXE_unproxy-register"),
+        env!("CARGO_BIN_EXE_unproxy-system-proxy"),
+        env!("CARGO_BIN_EXE_unproxy-tray"),
+        env!("CARGO_BIN_EXE_unproxy-version"),
+        env!("CARGO_BIN_EXE_unproxyctl"),
+        env!("CARGO_BIN_EXE_xtask"),
     ] {
         let output = std::process::Command::new(binary)
             .arg("--help")
@@ -101,7 +110,11 @@ fn runtime_products_have_usable_help_and_versions() {
             binary,
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(!output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("Usage:"),
+            "{} did not print a usage synopsis",
+            binary
+        );
     }
     for (binary, version) in [
         (env!("CARGO_BIN_EXE_unproxy"), unproxy::VERSION),
