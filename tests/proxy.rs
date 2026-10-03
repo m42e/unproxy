@@ -1,9 +1,14 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use unproxy::{net::ConnectionOptions, pac::Policy, proxy::ContextBuilder};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+};
+use unproxy::{
+    auth::{AuthFactory, CredentialStore},
+    net::ConnectionOptions,
+    pac::Policy,
+    proxy::ContextBuilder,
 };
 
 async fn start(policy: Policy) -> unproxy::proxy::Context {
@@ -80,6 +85,12 @@ async fn local_errors_and_self_loop_are_rejected() {
         io.read_to_string(&mut out).await.unwrap();
         out
     }
+    let root = get(
+        addr,
+        format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert!(root.starts_with("HTTP/1.1 200"));
     let miss = get(
         addr,
         format!("GET /missing?q=1 HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
@@ -92,6 +103,12 @@ async fn local_errors_and_self_loop_are_rejected() {
     )
     .await;
     assert!(method.starts_with("HTTP/1.1 405"));
+    let options = get(
+        addr,
+        format!("OPTIONS http://{addr}/ HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert!(!options.starts_with("HTTP/1.1 200"));
     let malformed = get(
         addr,
         format!("CONNECT / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
@@ -682,6 +699,130 @@ async fn forwards_stream_and_removes_hop_headers() {
 }
 
 #[tokio::test]
+async fn direct_get_forwards_origin_form_and_returns_body() {
+    let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let origin_task = tokio::spawn(async move {
+        let (mut io, _) = origin.accept().await.unwrap();
+        let mut head = Vec::new();
+        loop {
+            let mut byte = [0];
+            io.read_exact(&mut byte).await.unwrap();
+            head.push(byte[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        io.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nHello World!",
+        )
+        .await
+        .unwrap();
+        String::from_utf8(head).unwrap()
+    });
+
+    let proxy = start(Policy::new(None).unwrap()).await;
+    let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
+    client
+        .write_all(format!("GET http://{origin_addr}/text1.html HTTP/1.1\r\nHost: {origin_addr}\r\nProxy-Authorization: Basic client\r\nConnection: close\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("Hello World!"), "{response}");
+    let request = origin_task.await.unwrap();
+    assert!(request.starts_with("GET /text1.html HTTP/1.1"), "{request}");
+    assert!(!request.to_ascii_lowercase().contains("proxy-authorization"));
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+async fn http_proxy_get(netrc: Option<&'static str>, expected_auth: Option<&'static str>) {
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut io, _) = upstream.accept().await.unwrap();
+        let mut head = Vec::new();
+        loop {
+            let mut byte = [0];
+            io.read_exact(&mut byte).await.unwrap();
+            head.push(byte[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        io.write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nHello World!",
+        )
+        .await
+        .unwrap();
+        String::from_utf8(head).unwrap()
+    });
+    let policy = Policy::new(Some(format!(
+        "function FindProxyForURL(url, host) {{ return 'PROXY {upstream_addr}'; }}"
+    )))
+    .unwrap();
+    let mut options = ConnectionOptions::default();
+    if let Some(netrc) = netrc {
+        options.auth = AuthFactory::basic(CredentialStore::parse(netrc).unwrap());
+    }
+    let proxy = ContextBuilder::new(Arc::new(policy), options)
+        .listen("127.0.0.1:0".parse().unwrap())
+        .bind()
+        .await
+        .unwrap();
+    let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
+    client
+        .write_all(b"GET http://origin.test/resource HTTP/1.1\r\nHost: origin.test\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("Hello World!"), "{response}");
+    let request = upstream_task.await.unwrap();
+    assert!(
+        request.starts_with("GET http://origin.test/resource HTTP/1.1"),
+        "{request}"
+    );
+    let authorization = request
+        .lines()
+        .find(|line| {
+            line.to_ascii_lowercase()
+                .starts_with("proxy-authorization:")
+        })
+        .and_then(|line| line.split_once(':'))
+        .map(|(_, value)| value.trim());
+    assert_eq!(authorization, expected_auth, "{request}");
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
+async fn http_proxy_get_uses_host_credentials() {
+    http_proxy_get(
+        Some("machine 127.0.0.1 login alice password secret"),
+        Some("Basic YWxpY2U6c2VjcmV0"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn http_proxy_get_falls_back_to_default_credentials() {
+    http_proxy_get(
+        Some("machine proxy.invalid login wrong password wrong\ndefault login guest password fallback"),
+        Some("Basic Z3Vlc3Q6ZmFsbGJhY2s="),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn http_proxy_get_without_auth_sends_absolute_form() {
+    http_proxy_get(None, None).await;
+}
+
+#[tokio::test]
 async fn chunked_request_body_streams_to_origin() {
     let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let target = origin.local_addr().unwrap();
@@ -886,6 +1027,47 @@ async fn upstream_connect_performs_proxy_handshake_before_replying() {
 }
 
 #[tokio::test]
+async fn rejected_upstream_connect_returns_bad_gateway_without_tunnel() {
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let policy = Policy::new(Some(format!(
+        "function FindProxyForURL(url, host) {{ return 'PROXY {upstream_addr}'; }}"
+    )))
+    .unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut io, _) = upstream.accept().await.unwrap();
+        let mut head = Vec::new();
+        loop {
+            let mut byte = [0];
+            io.read_exact(&mut byte).await.unwrap();
+            head.push(byte[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        assert!(String::from_utf8_lossy(&head).starts_with("CONNECT example.test:443 HTTP/1.1"));
+        io.write_all(
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    });
+    let proxy = start(policy).await;
+    let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
+    client
+        .write_all(b"CONNECT example.test:443 HTTP/1.1\r\nHost: example.test:443\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 502"), "{response}");
+    assert!(!response.starts_with("HTTP/1.1 200"));
+    upstream_task.await.unwrap();
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
 async fn forced_tunnel_auth_stays_out_of_origin_request() {
     let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = upstream.local_addr().unwrap();
@@ -946,17 +1128,42 @@ async fn ordinary_407_is_a_local_bad_gateway() {
     .unwrap();
     let fake = tokio::spawn(async move {
         let (mut io, _) = upstream.accept().await.unwrap();
-        let mut buf = [0; 2048];
-        let _ = io.read(&mut buf).await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut byte = [0];
+            io.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+            if request.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
         io.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        String::from_utf8(request).unwrap()
     });
-    let proxy = start(policy).await;
+    let mut options = ConnectionOptions::default();
+    options.auth = AuthFactory::basic(
+        CredentialStore::parse("machine 127.0.0.1 login alice password secret").unwrap(),
+    );
+    let proxy = ContextBuilder::new(Arc::new(policy), options)
+        .listen("127.0.0.1:0".parse().unwrap())
+        .bind()
+        .await
+        .unwrap();
     let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
     client.write_all(b"GET http://example.test/data HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n").await.unwrap();
     let mut response = String::new();
     client.read_to_string(&mut response).await.unwrap();
     assert!(response.starts_with("HTTP/1.1 502"));
-    fake.await.unwrap();
+    let sent = fake.await.unwrap();
+    let authorization = sent
+        .lines()
+        .find(|line| {
+            line.to_ascii_lowercase()
+                .starts_with("proxy-authorization:")
+        })
+        .and_then(|line| line.split_once(':'))
+        .map(|(_, value)| value.trim());
+    assert_eq!(authorization, Some("Basic YWxpY2U6c2VjcmV0"), "{sent}");
     proxy.shutdown();
     proxy.wait().await;
 }
