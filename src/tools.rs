@@ -29,7 +29,7 @@ pub fn query_toml(input: &str, path: &[String]) -> Result<String> {
 
 pub fn product_version(package: &str) -> Result<&'static str> {
     match package {
-        "unproxy" | "unproxy" => Ok(crate::VERSION),
+        "unproxy" => Ok(crate::VERSION),
         "dnsdetox" => Ok(crate::DNS_VERSION),
         _ => bail!("unknown package {package:?}"),
     }
