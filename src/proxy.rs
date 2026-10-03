@@ -741,7 +741,9 @@ async fn handle(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let connect = method == Method::CONNECT;
-    if !connect && req.uri().authority().is_none() {
+    let origin_form = req.uri().authority().is_none();
+    let trusted_management = trusted_management_request(&req, peer, local, &cfg);
+    if !connect && (origin_form || trusted_management) {
         let path = req.uri().path();
         if method != Method::GET {
             return Ok(error_response(
@@ -749,7 +751,7 @@ async fn handle(
                 "Only GET is supported for local resources",
             ));
         }
-        if !trusted_management_request(&req, peer, local, &cfg) {
+        if !trusted_management {
             return Ok(error_response(
                 StatusCode::FORBIDDEN,
                 "Untrusted management authority",
@@ -759,10 +761,7 @@ async fn handle(
             "/" => full(
                 StatusCode::OK,
                 "text/html; charset=utf-8",
-                format!(
-                    "<!doctype html><title>unproxy</title><h1>unproxy</h1><p>{}</p>",
-                    crate::VERSION
-                ),
+                status_html(),
             ),
             "/proxy.pac" => {
                 let host = req
@@ -1042,6 +1041,15 @@ fn trusted_management_request(
     let Ok(authority) = host.parse::<http::uri::Authority>() else {
         return false;
     };
+    if let Some(target) = req.uri().authority()
+        && (!req
+            .uri()
+            .scheme_str()
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http"))
+            || !target.as_str().eq_ignore_ascii_case(host))
+    {
+        return false;
+    }
     cfg.trusted_management_hosts
         .iter()
         .any(|h| h.eq_ignore_ascii_case(host))
@@ -1270,6 +1278,70 @@ fn event_response(events: broadcast::Sender<String>) -> Response<OutBody> {
 }
 fn access_html() -> &'static str {
     "<!doctype html><meta charset=utf-8><title>unproxy access log</title><h1>Access log</h1><button id=stop>Stop</button><pre id=log></pre><script>const s=new EventSource('access.log');s.onmessage=e=>{const p=document.createElement('div');p.textContent=e.data;document.querySelector('#log').append(p)};s.addEventListener('lagged',e=>console.warn('access events dropped',e.data));s.onerror=e=>console.warn('access stream error',e);document.querySelector('#stop').onclick=()=>s.close();</script>"
+}
+fn status_html() -> String {
+    const PAGE: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Unproxy status</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+    body { max-width: 54rem; margin: 3rem auto; padding: 0 1.25rem; }
+    h1 { margin-bottom: .25rem; }
+    .muted, small { color: GrayText; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1rem; margin: 2rem 0; }
+    article { border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: .75rem; padding: 1rem; }
+    h2 { font-size: .9rem; margin: 0 0 .5rem; }
+    article p { font-size: 1.15rem; margin: 0 0 .25rem; }
+    nav { display: flex; flex-wrap: wrap; gap: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Unproxy</h1>
+  <p class="muted">Local proxy status · version __VERSION__</p>
+  <section class="grid" aria-live="polite">
+    <article><h2>Proxy</h2><p>Running</p><small>This page is served by the active proxy.</small></article>
+    <article><h2>PAC policy</h2><p id="pac">Loading…</p><small>Whether a PAC policy is currently loaded.</small></article>
+    <article><h2>Upstream</h2><p id="upstream">Loading…</p><small id="checked">Checking latest request…</small></article>
+    <article><h2>Authentication</h2><p id="auth">Loading…</p><small>State from the latest upstream request.</small></article>
+  </section>
+  <nav aria-label="Proxy resources">
+    <a href="/access.html">Live access log</a>
+    <a href="/status.json">Status JSON</a>
+    <a href="/proxy.pac">Generated PAC file</a>
+  </nav>
+  <script>
+    async function refreshStatus() {
+      try {
+        const response = await fetch('/status.json', {cache: 'no-store'});
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const status = await response.json();
+        document.querySelector('#pac').textContent = status.pac_loaded ? 'Loaded' : 'Not loaded';
+        const upstream = status.upstream_state;
+        document.querySelector('#upstream').textContent = upstream === 'ok' ? 'Last request succeeded'
+          : upstream === 'error' ? 'Last request failed' : 'No upstream result yet';
+        document.querySelector('#checked').textContent = status.upstream_checked_at
+          ? 'Last checked ' + new Date(status.upstream_checked_at * 1000).toLocaleString()
+          : 'No upstream request has been checked yet';
+        const auth = status.authentication_state;
+        document.querySelector('#auth').textContent = auth === 'authenticated' ? 'Authenticated'
+          : auth === 'rejected' ? 'Rejected by upstream'
+          : status.authentication_configured ? 'Configured, not verified' : 'Not configured';
+      } catch (_) {
+        document.querySelector('#pac').textContent = 'Unavailable';
+        document.querySelector('#upstream').textContent = 'Status unavailable';
+        document.querySelector('#checked').textContent = 'Could not read status.json';
+        document.querySelector('#auth').textContent = 'Unavailable';
+      }
+    }
+    refreshStatus();
+    setInterval(refreshStatus, 5000);
+  </script>
+</body>
+</html>"#;
+    PAGE.replace("__VERSION__", crate::VERSION)
 }
 
 #[cfg(test)]
