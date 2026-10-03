@@ -14,6 +14,7 @@ $metadata = if (Test-Path $metadataFile) {
     Get-Content $metadataFile -Raw | ConvertFrom-Json
 } else { $null }
 $script:negotiateAvailable = -not $metadata -or [bool]$metadata.negotiate
+$hasPreferences = Test-Path $settingsFile
 
 $mutex = [Threading.Mutex]::new($false, 'Local\UnproxyTray')
 $activationSignal = [Threading.EventWaitHandle]::new(
@@ -27,8 +28,10 @@ if (-not $mutex.WaitOne(0)) {
     exit
 }
 
-$script:p = if (Test-Path $settingsFile) {
+$script:p = if ($hasPreferences) {
     Get-Content $settingsFile -Raw | ConvertFrom-Json
+} elseif ($metadata -and $metadata.defaults) {
+    $metadata.defaults
 } else {
     [pscustomobject]@{
         port = 3128
@@ -39,10 +42,11 @@ $script:p = if (Test-Path $settingsFile) {
         autostart = $true
     }
 }
+if (-not $script:p.pacFile) { $script:p.pacFile = Join-Path $root 'proxy.pac' }
 if (-not [IO.Path]::IsPathRooted([string]$script:p.pacFile)) {
     $script:p.pacFile = [IO.Path]::GetFullPath((Join-Path $root ([string]$script:p.pacFile)))
 }
-if (-not (Test-Path $settingsFile)) {
+if (-not $hasPreferences -and $script:p.pacFile -eq (Join-Path $root 'proxy.pac')) {
     'function FindProxyForURL(url, host) { return "DIRECT"; }' |
         Set-Content -Encoding UTF8 $script:p.pacFile
 }

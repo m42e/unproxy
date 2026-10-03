@@ -4,8 +4,12 @@ fn main() {
         "UNPROXY_REVISION",
         "UNPROXY_PLATFORM",
         "UNPROXY_ARCH",
+        "UNPROXY_DESKTOP_DEFAULTS_JSON",
     ] {
         println!("cargo:rerun-if-env-changed={key}");
+    }
+    if let Ok(defaults) = std::env::var("UNPROXY_DESKTOP_DEFAULTS_JSON") {
+        println!("cargo:rustc-env=UNPROXY_DESKTOP_DEFAULTS_JSON={defaults}");
     }
     let version = std::env::var("UNPROXY_VERSION")
         .unwrap_or_else(|_| std::env::var("CARGO_PKG_VERSION").unwrap());

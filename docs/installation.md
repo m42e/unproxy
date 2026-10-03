@@ -68,6 +68,37 @@ Start the built proxy with `./target/release/unproxy` on macOS/Linux or
 `target\release\unproxy.exe` on Windows. See [Use Unproxy](user-guide.md) to
 connect an application and configure a PAC file.
 
+### Build a company distributable with first-run defaults
+
+Create a TOML profile with the preferences you want new desktop installs to
+start with:
+
+```toml
+port = 3128
+pac_file = "proxy.pac"
+negotiate = true
+proxytunnel = false
+direct_fallback = false
+autostart = true
+```
+
+Then pass it when packaging a Windows tray ZIP or macOS menu bar app:
+
+```sh
+cargo xtask package --format windows --defaults company-defaults.toml
+cargo xtask package --format app --defaults company-defaults.toml
+```
+
+Run the Windows command on Windows (or specify a Windows `--target` when
+cross-compiling) and the app command on macOS.
+
+The same option is available on `cargo xtask build` to embed defaults in a
+custom build. Omitted profile fields keep their normal defaults. Relative PAC
+paths are resolved under the user's Unproxy data folder (`%LOCALAPPDATA%\Unproxy`
+on Windows and `~/Library/Application Support/Unproxy` on macOS); deploy the
+company PAC file at that path separately. The profile seeds new preferences
+only, so an existing user's choices are preserved when the app is updated.
+
 ## Remove Unproxy
 
 - **Windows:** Run `uninstall.ps1` from the extracted Windows ZIP. Add

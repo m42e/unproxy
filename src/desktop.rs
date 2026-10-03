@@ -24,16 +24,65 @@ pub struct Preferences {
     pub direct_fallback: bool,
     pub autostart: bool,
 }
+
+/// Optional first-run preferences embedded in a company-specific build.
+///
+/// The build tool serializes this structure into the binaries and package
+/// metadata. Relative PAC paths are resolved under the user's support folder.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DesktopDefaults {
+    pub port: Option<u32>,
+    pub pac_file: Option<PathBuf>,
+    pub negotiate: Option<bool>,
+    pub proxytunnel: Option<bool>,
+    pub direct_fallback: Option<bool>,
+    pub autostart: Option<bool>,
+}
+
+impl DesktopDefaults {
+    fn apply(&self, preferences: &mut Preferences) {
+        if let Some(port) = self.port {
+            preferences.port = port;
+        }
+        if let Some(pac_file) = &self.pac_file {
+            preferences.pac_file = if pac_file.is_absolute() {
+                pac_file.clone()
+            } else {
+                support_dir().join(pac_file)
+            };
+        }
+        if let Some(negotiate) = self.negotiate {
+            preferences.negotiate = negotiate;
+        }
+        if let Some(proxytunnel) = self.proxytunnel {
+            preferences.proxytunnel = proxytunnel;
+        }
+        if let Some(direct_fallback) = self.direct_fallback {
+            preferences.direct_fallback = direct_fallback;
+        }
+        if let Some(autostart) = self.autostart {
+            preferences.autostart = autostart;
+        }
+    }
+}
+
 impl Default for Preferences {
     fn default() -> Self {
-        Self {
+        let mut preferences = Self {
             port: 3128,
             pac_file: default_pac_path(),
             negotiate: false,
             proxytunnel: false,
             direct_fallback: false,
             autostart: true,
+        };
+        if let Some(defaults) = option_env!("UNPROXY_DESKTOP_DEFAULTS_JSON")
+            .and_then(|json| serde_json::from_str::<DesktopDefaults>(json).ok())
+        {
+            defaults.apply(&mut preferences);
         }
+        preferences
     }
 }
 pub fn support_dir() -> PathBuf {
@@ -1123,7 +1172,8 @@ mod native {
         let mut p = Preferences::default();
         let port = get("port");
         if port.is_null() {
-            let _: () = unsafe { msg_send![defaults,setInteger:3128isize,forKey:key("port")] };
+            let _: () =
+                unsafe { msg_send![defaults,setInteger:p.port as isize,forKey:key("port")] };
         } else {
             let n: isize = unsafe { msg_send![port, integerValue] };
             p.port = n.clamp(0, u32::MAX as isize) as u32;
@@ -1154,8 +1204,14 @@ mod native {
         ] {
             let obj = get(name);
             if obj.is_null() {
+                let default = match field {
+                    0 => p.negotiate,
+                    1 => p.proxytunnel,
+                    2 => p.direct_fallback,
+                    _ => p.autostart,
+                };
                 let _: () = unsafe {
-                    msg_send![defaults,setBool:objc2::runtime::Bool::new(field == 3),forKey:key(name)]
+                    msg_send![defaults,setBool:objc2::runtime::Bool::new(default),forKey:key(name)]
                 };
             } else {
                 let b: objc2::runtime::Bool = unsafe { msg_send![obj, boolValue] };
@@ -1674,8 +1730,7 @@ mod native {
             };
             unsafe { send_action(999) };
             *STATE.lock().unwrap() = None;
-            let suite_name =
-                cocoa_string(&format!("de.m42e.unproxy.test.{}", std::process::id()));
+            let suite_name = cocoa_string(&format!("de.m42e.unproxy.test.{}", std::process::id()));
             let _: () = unsafe { msg_send![defaults, removePersistentDomainForName:suite_name] };
 
             let startup_dir = support_dir.join("startup-probe");

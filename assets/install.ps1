@@ -12,8 +12,14 @@ Copy-Item (Join-Path (Join-Path $PSScriptRoot 'tray-icons') '*') $trayIconDirect
 Copy-Item (Join-Path $PSScriptRoot 'metadata.json') (Join-Path $destination 'metadata.json') -Force
 
 $prefsFile = Join-Path $root 'preferences.json'
+$metadataFile = Join-Path $destination 'metadata.json'
+$metadata = if (Test-Path $metadataFile) {
+    Get-Content $metadataFile -Raw | ConvertFrom-Json
+} else { $null }
 if (Test-Path $prefsFile) {
     $preferences = Get-Content $prefsFile -Raw | ConvertFrom-Json
+} elseif ($metadata -and $metadata.defaults) {
+    $preferences = $metadata.defaults
 } else {
     $preferences = [pscustomobject]@{
         port = 3128
@@ -23,6 +29,10 @@ if (Test-Path $prefsFile) {
         negotiate = $false
         autostart = $true
     }
+}
+if (-not $preferences.pacFile) { $preferences.pacFile = Join-Path $root 'proxy.pac' }
+if (-not [IO.Path]::IsPathRooted([string]$preferences.pacFile)) {
+    $preferences.pacFile = [IO.Path]::GetFullPath((Join-Path $root ([string]$preferences.pacFile)))
 }
 if ($DisableLoginStartup) { $preferences.autostart = $false }
 $preferences | ConvertTo-Json | Set-Content -Encoding UTF8 $prefsFile

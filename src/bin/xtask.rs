@@ -6,7 +6,10 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-use unproxy::tools::{copy_tree, html_escape};
+use unproxy::{
+    desktop::DesktopDefaults,
+    tools::{copy_tree, html_escape},
+};
 
 #[derive(Parser)]
 #[command(
@@ -26,6 +29,9 @@ enum Task {
         target: Option<String>,
         #[arg(long)]
         no_negotiate: bool,
+        /// TOML file with first-run desktop preferences to embed in the build.
+        #[arg(long)]
+        defaults: Option<PathBuf>,
     },
     Check,
     Docs {
@@ -43,6 +49,9 @@ enum Task {
         output: PathBuf,
         #[arg(long)]
         no_negotiate: bool,
+        /// TOML file with first-run desktop preferences for the distributable.
+        #[arg(long)]
+        defaults: Option<PathBuf>,
     },
     Copy {
         source: PathBuf,
@@ -118,7 +127,12 @@ fn main() -> Result<()> {
             release,
             target,
             no_negotiate,
-        } => build(release, target.as_deref(), no_negotiate),
+            defaults,
+        } => {
+            let defaults = read_desktop_defaults(defaults.as_deref())?;
+            validate_defaults(defaults.as_ref(), no_negotiate)?;
+            build(release, target.as_deref(), no_negotiate, defaults.as_ref())
+        }
         Task::Check => {
             run(Command::new("cargo").args(["fmt", "--all", "--", "--check"]))?;
             run(Command::new("cargo").args([
@@ -139,7 +153,14 @@ fn main() -> Result<()> {
             target,
             output,
             no_negotiate,
-        } => package(format, target.as_deref(), &output, no_negotiate),
+            defaults,
+        } => package(
+            format,
+            target.as_deref(),
+            &output,
+            no_negotiate,
+            defaults.as_deref(),
+        ),
         Task::Copy { source, output } => {
             if source.is_dir() {
                 copy_tree(&source, &output)
@@ -194,7 +215,43 @@ fn main() -> Result<()> {
             .arg(output)),
     }
 }
-fn build(release: bool, target: Option<&str>, no_negotiate: bool) -> Result<()> {
+fn read_desktop_defaults(path: Option<&Path>) -> Result<Option<DesktopDefaults>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let source = std::fs::read_to_string(path)
+        .with_context(|| format!("reading desktop defaults from {}", path.display()))?;
+    let defaults: DesktopDefaults = toml::from_str(&source)
+        .with_context(|| format!("parsing desktop defaults from {}", path.display()))?;
+    if let Some(port) = defaults.port {
+        anyhow::ensure!(
+            (1024..=65534).contains(&port),
+            "desktop default port must be between 1024 and 65534"
+        );
+    }
+    if let Some(path) = &defaults.pac_file {
+        anyhow::ensure!(
+            !path.as_os_str().is_empty(),
+            "desktop default PAC path is empty"
+        );
+    }
+    Ok(Some(defaults))
+}
+
+fn validate_defaults(defaults: Option<&DesktopDefaults>, no_negotiate: bool) -> Result<()> {
+    anyhow::ensure!(
+        !no_negotiate || defaults.is_none_or(|d| d.negotiate != Some(true)),
+        "desktop defaults enable Negotiate, but --no-negotiate disables that build feature"
+    );
+    Ok(())
+}
+
+fn build(
+    release: bool,
+    target: Option<&str>,
+    no_negotiate: bool,
+    defaults: Option<&DesktopDefaults>,
+) -> Result<()> {
     let mut command = Command::new("cargo");
     command.args(["build", "--locked", "--bins"]);
     if release {
@@ -205,6 +262,14 @@ fn build(release: bool, target: Option<&str>, no_negotiate: bool) -> Result<()> 
     }
     if no_negotiate {
         command.arg("--no-default-features");
+    }
+    if let Some(defaults) = defaults {
+        command.env(
+            "UNPROXY_DESKTOP_DEFAULTS_JSON",
+            serde_json::to_string(defaults)?,
+        );
+    } else {
+        command.env_remove("UNPROXY_DESKTOP_DEFAULTS_JSON");
     }
     run(&mut command)
 }
@@ -280,7 +345,24 @@ fn pkgbuild_signing_args(command: &mut Command) {
         command.arg("--sign").arg(identity);
     }
 }
-fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bool) -> Result<()> {
+fn windows_desktop_defaults(defaults: Option<&DesktopDefaults>) -> serde_json::Value {
+    let defaults = defaults.cloned().unwrap_or_default();
+    serde_json::json!({
+        "port": defaults.port.unwrap_or(3128),
+        "pacFile": defaults.pac_file.map(|path| path.to_string_lossy().into_owned()).unwrap_or_else(|| "proxy.pac".into()),
+        "negotiate": defaults.negotiate.unwrap_or(false),
+        "proxytunnel": defaults.proxytunnel.unwrap_or(false),
+        "directFallback": defaults.direct_fallback.unwrap_or(false),
+        "autostart": defaults.autostart.unwrap_or(true),
+    })
+}
+fn package(
+    format: Format,
+    target: Option<&str>,
+    output: &Path,
+    no_negotiate: bool,
+    defaults_path: Option<&Path>,
+) -> Result<()> {
     let formats: Vec<Format> = if matches!(format, Format::Native) {
         anyhow::ensure!(
             target.is_none(),
@@ -298,12 +380,21 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
     } else {
         vec![format]
     };
+    let defaults = read_desktop_defaults(defaults_path)?;
+    validate_defaults(defaults.as_ref(), no_negotiate)?;
+    anyhow::ensure!(
+        defaults.is_none()
+            || formats
+                .iter()
+                .any(|f| matches!(f, Format::Windows | Format::App)),
+        "--defaults applies to Windows tray and macOS app packages"
+    );
     anyhow::ensure!(
         !matches!(format, Format::Windows)
             || target.map_or(cfg!(windows), |t| t.contains("windows")),
         "Windows ZIPs require a Windows target when packaging from another operating system"
     );
-    build(true, target, no_negotiate)?;
+    build(true, target, no_negotiate, defaults.as_ref())?;
     std::fs::create_dir_all(output)?;
     let target_name = target
         .map(str::to_owned)
@@ -362,11 +453,23 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                 }
                 std::fs::copy("README.md", staging.join("README.md"))?;
                 std::fs::copy("assets/proxy.pac", staging.join("proxy.pac.sample"))?;
+                let mut metadata = serde_json::json!({
+                    "version": unproxy::VERSION,
+                    "target": target_name,
+                    "negotiate": !no_negotiate,
+                    "components": if matches!(format, Format::Windows) {
+                        vec!["unproxy.exe", "UnproxyTray.exe", "unproxy-tray.ps1", "tray-icons", "install.ps1", "uninstall.ps1", "metadata.json"]
+                    } else {
+                        vec!["unproxy", "paceval", "undns"]
+                    },
+                    "dns_version": unproxy::DNS_VERSION,
+                });
+                if matches!(format, Format::Windows) {
+                    metadata["defaults"] = windows_desktop_defaults(defaults.as_ref());
+                }
                 std::fs::write(
                     staging.join("metadata.json"),
-                    serde_json::to_vec_pretty(
-                        &serde_json::json!({"version":unproxy::VERSION,"target":target_name,"negotiate":!no_negotiate,"components":if matches!(format, Format::Windows) { vec!["unproxy.exe", "UnproxyTray.exe", "unproxy-tray.ps1", "tray-icons", "install.ps1", "uninstall.ps1", "metadata.json"] } else { vec!["unproxy", "paceval", "undns"] },"dns_version":unproxy::DNS_VERSION}),
-                    )?,
+                    serde_json::to_vec_pretty(&metadata)?,
                 )?;
                 zip(&staging, &output.join(format!("{package_name}.zip")))?;
             }
