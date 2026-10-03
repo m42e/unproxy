@@ -1,11 +1,11 @@
 //! Platform-aware development and artifact assembly entry point.
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use unproxy::tools::{copy_tree, html_escape};
 use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+use unproxy::tools::{copy_tree, html_escape};
 
 #[derive(Parser)]
 #[command(about = "Build, validate, document and package Unproxy")]
@@ -63,6 +63,7 @@ enum Task {
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum Format {
+    Native,
     Portable,
     Windows,
     Deb,
@@ -215,6 +216,23 @@ fn executable(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bool) -> Result<()> {
+    let formats: Vec<Format> = if matches!(format, Format::Native) {
+        anyhow::ensure!(
+            target.is_none(),
+            "the native package set cannot be combined with --target"
+        );
+        if cfg!(target_os = "windows") {
+            vec![Format::Windows]
+        } else if cfg!(target_os = "macos") {
+            vec![Format::Portable, Format::Macos, Format::App]
+        } else if cfg!(target_os = "linux") {
+            vec![Format::Portable, Format::Deb]
+        } else {
+            bail!("native packages are not configured for this operating system")
+        }
+    } else {
+        vec![format]
+    };
     build(true, target, no_negotiate)?;
     std::fs::create_dir_all(output)?;
     let target_name = target
@@ -234,180 +252,178 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
     );
     std::fs::create_dir_all(&staging)?;
     let source_bin = |name: &str| binary_dir.join(format!("{name}{suffix}"));
-    let mut package_name = format!("unproxy-{}-{target_name}", unproxy::VERSION);
-    match format {
-        Format::Portable | Format::Windows => {
-            let bins = if matches!(format, Format::Windows) {
-                vec!["unproxy"]
-            } else {
-                vec!["unproxy", "paceval", "dnsdetox"]
-            };
-            for name in bins {
-                executable(&source_bin(name), &staging.join(format!("{name}{suffix}")))?;
-            }
-            if windows {
-                std::fs::copy("assets/install.ps1", staging.join("install.ps1"))?;
-            }
-            std::fs::copy("README.md", staging.join("README.md"))?;
-            std::fs::copy("assets/proxy.pac", staging.join("proxy.pac.sample"))?;
-            std::fs::write(
-                staging.join("metadata.json"),
-                serde_json::to_vec_pretty(
-                    &serde_json::json!({"version":unproxy::VERSION,"target":target_name,"negotiate":!no_negotiate,"dns_version":unproxy::DNS_VERSION}),
-                )?,
-            )?;
-            zip(&staging, &output.join(format!("{package_name}.zip")))?;
-        }
-        Format::Deb => {
-            anyhow::ensure!(
-                target_name.contains("linux"),
-                "Debian packages require a Linux target"
-            );
-            let arch = if target_name.starts_with("x86_64") {
-                "amd64"
-            } else if target_name.starts_with("aarch64") {
-                "arm64"
-            } else if target_name.starts_with("i686") {
-                "i386"
-            } else {
-                bail!("unsupported Debian architecture")
-            };
-            let control = staging.join("DEBIAN");
-            std::fs::create_dir_all(&control)?;
-            let depends = if no_negotiate {
-                "libc6, libssl3 | libssl3t64"
-            } else {
-                "libc6, libssl3 | libssl3t64, libgssapi-krb5-2"
-            };
-            std::fs::write(
-                control.join("control"),
-                format!(
-                    "Package: unproxy\nVersion: {}\nArchitecture: {arch}\nMaintainer: Unproxy contributors\nDepends: {depends}\nSection: net\nPriority: optional\nDescription: Local HTTP proxy with PAC routing and upstream authentication\n",
-                    unproxy::VERSION
-                ),
-            )?;
-            for hook in ["postinst", "prerm", "postrm"] {
-                executable(
-                    &PathBuf::from(format!("assets/debian-{hook}")),
-                    &control.join(hook),
+    let package_base = format!("unproxy-{}-{target_name}", unproxy::VERSION);
+    for format in formats {
+        let mut package_name = package_base.clone();
+        match format {
+            Format::Native => unreachable!("native is expanded before packaging"),
+            Format::Portable | Format::Windows => {
+                let bins = if matches!(format, Format::Windows) {
+                    vec!["unproxy"]
+                } else {
+                    vec!["unproxy", "paceval", "dnsdetox"]
+                };
+                for name in bins {
+                    executable(&source_bin(name), &staging.join(format!("{name}{suffix}")))?;
+                }
+                if windows {
+                    std::fs::copy("assets/install.ps1", staging.join("install.ps1"))?;
+                }
+                std::fs::copy("README.md", staging.join("README.md"))?;
+                std::fs::copy("assets/proxy.pac", staging.join("proxy.pac.sample"))?;
+                std::fs::write(
+                    staging.join("metadata.json"),
+                    serde_json::to_vec_pretty(
+                        &serde_json::json!({"version":unproxy::VERSION,"target":target_name,"negotiate":!no_negotiate,"dns_version":unproxy::DNS_VERSION}),
+                    )?,
                 )?;
+                zip(&staging, &output.join(format!("{package_name}.zip")))?;
             }
-            executable(
-                &source_bin("unproxy"),
-                &staging.join("usr/bin/unproxy"),
-            )?;
-            let service_dir = staging.join("usr/lib/systemd/user");
-            std::fs::create_dir_all(&service_dir)?;
-            std::fs::copy(
-                "assets/unproxy.service",
-                service_dir.join("unproxy.service"),
-            )?;
-            let doc_dir = staging.join("usr/share/doc/unproxy");
-            std::fs::create_dir_all(&doc_dir)?;
-            std::fs::copy("README.md", doc_dir.join("README.md"))?;
-            run(Command::new("dpkg-deb")
-                .arg("--root-owner-group")
-                .arg("--build")
-                .arg(&staging)
-                .arg(output.join(format!("{package_name}.deb"))))?;
-        }
-        Format::Macos => {
-            anyhow::ensure!(
-                target_name.contains("darwin") || target_name.contains("macos"),
-                "macOS packages require a macOS target"
-            );
-            for name in [
-                "unproxy",
-                "unproxyctl",
-                "unproxy-register",
-                "unproxy-system-proxy",
-            ] {
-                executable(
-                    &source_bin(name),
-                    &staging.join("opt/unproxy/bin").join(name),
+            Format::Deb => {
+                anyhow::ensure!(
+                    target_name.contains("linux"),
+                    "Debian packages require a Linux target"
+                );
+                let arch = if target_name.starts_with("x86_64") {
+                    "amd64"
+                } else if target_name.starts_with("aarch64") {
+                    "arm64"
+                } else if target_name.starts_with("i686") {
+                    "i386"
+                } else {
+                    bail!("unsupported Debian architecture")
+                };
+                let control = staging.join("DEBIAN");
+                std::fs::create_dir_all(&control)?;
+                let depends = if no_negotiate {
+                    "libc6, libssl3 | libssl3t64"
+                } else {
+                    "libc6, libssl3 | libssl3t64, libgssapi-krb5-2"
+                };
+                std::fs::write(
+                    control.join("control"),
+                    format!(
+                        "Package: unproxy\nVersion: {}\nArchitecture: {arch}\nMaintainer: Unproxy contributors\nDepends: {depends}\nSection: net\nPriority: optional\nDescription: Local HTTP proxy with PAC routing and upstream authentication\n",
+                        unproxy::VERSION
+                    ),
                 )?;
-            }
-            let agents = staging.join("Library/LaunchAgents");
-            std::fs::create_dir_all(&agents)?;
-            std::fs::copy(
-                "assets/de.m42e.unproxy.plist",
-                agents.join("de.m42e.unproxy.plist"),
-            )?;
-            let paths = staging.join("etc/paths.d");
-            std::fs::create_dir_all(&paths)?;
-            std::fs::write(paths.join("unproxy"), "/opt/unproxy/bin\n")?;
-            if cfg!(target_os = "macos") {
-                let hooks = output.join(format!(".hooks-{}", std::process::id()));
-                std::fs::create_dir_all(&hooks)?;
-                for hook in ["preinstall", "postinstall"] {
+                for hook in ["postinst", "prerm", "postrm"] {
                     executable(
-                        &PathBuf::from(format!("assets/macos-{hook}")),
-                        &hooks.join(hook),
+                        &PathBuf::from(format!("assets/debian-{hook}")),
+                        &control.join(hook),
                     )?;
                 }
-                run(Command::new("pkgbuild")
-                    .arg("--root")
+                executable(&source_bin("unproxy"), &staging.join("usr/bin/unproxy"))?;
+                let service_dir = staging.join("usr/lib/systemd/user");
+                std::fs::create_dir_all(&service_dir)?;
+                std::fs::copy(
+                    "assets/unproxy.service",
+                    service_dir.join("unproxy.service"),
+                )?;
+                let doc_dir = staging.join("usr/share/doc/unproxy");
+                std::fs::create_dir_all(&doc_dir)?;
+                std::fs::copy("README.md", doc_dir.join("README.md"))?;
+                run(Command::new("dpkg-deb")
+                    .arg("--root-owner-group")
+                    .arg("--build")
                     .arg(&staging)
-                    .args([
-                        "--identifier",
-                        "de.m42e.unproxy",
-                        "--version",
-                        unproxy::VERSION.split('+').next().unwrap(),
-                        "--install-location",
-                        "/",
-                        "--scripts",
-                    ])
-                    .arg(&hooks)
-                    .arg(output.join(format!("{package_name}.pkg"))))?;
-                std::fs::remove_dir_all(hooks)?;
-            } else {
-                package_name.push_str("-staging");
-                zip(&staging, &output.join(format!("{package_name}.zip")))?;
-                println!(
-                    "Created an installer staging archive; pkgbuild on macOS is required for a native .pkg."
+                    .arg(output.join(format!("{package_name}.deb"))))?;
+            }
+            Format::Macos => {
+                anyhow::ensure!(
+                    target_name.contains("darwin") || target_name.contains("macos"),
+                    "macOS packages require a macOS target"
                 );
+                for name in [
+                    "unproxy",
+                    "unproxyctl",
+                    "unproxy-register",
+                    "unproxy-system-proxy",
+                ] {
+                    executable(
+                        &source_bin(name),
+                        &staging.join("opt/unproxy/bin").join(name),
+                    )?;
+                }
+                let agents = staging.join("Library/LaunchAgents");
+                std::fs::create_dir_all(&agents)?;
+                std::fs::copy(
+                    "assets/de.m42e.unproxy.plist",
+                    agents.join("de.m42e.unproxy.plist"),
+                )?;
+                let paths = staging.join("etc/paths.d");
+                std::fs::create_dir_all(&paths)?;
+                std::fs::write(paths.join("unproxy"), "/opt/unproxy/bin\n")?;
+                if cfg!(target_os = "macos") {
+                    let hooks = output.join(format!(".hooks-{}", std::process::id()));
+                    std::fs::create_dir_all(&hooks)?;
+                    for hook in ["preinstall", "postinstall"] {
+                        executable(
+                            &PathBuf::from(format!("assets/macos-{hook}")),
+                            &hooks.join(hook),
+                        )?;
+                    }
+                    run(Command::new("pkgbuild")
+                        .arg("--root")
+                        .arg(&staging)
+                        .args([
+                            "--identifier",
+                            "de.m42e.unproxy",
+                            "--version",
+                            unproxy::VERSION.split('+').next().unwrap(),
+                            "--install-location",
+                            "/",
+                            "--scripts",
+                        ])
+                        .arg(&hooks)
+                        .arg(output.join(format!("{package_name}.pkg"))))?;
+                    std::fs::remove_dir_all(hooks)?;
+                } else {
+                    package_name.push_str("-staging");
+                    zip(&staging, &output.join(format!("{package_name}.zip")))?;
+                    println!(
+                        "Created an installer staging archive; pkgbuild on macOS is required for a native .pkg."
+                    );
+                }
+            }
+            Format::App => {
+                anyhow::ensure!(
+                    target_name.contains("darwin") || target_name.contains("macos"),
+                    "the menu bar app requires a macOS target"
+                );
+                let app = staging.join("Unproxy.app/Contents");
+                executable(&source_bin("unproxy-app"), &app.join("MacOS/unproxy-app"))?;
+                executable(&source_bin("unproxy"), &app.join("Resources/unproxy"))?;
+                let helper = app.join("Library/LoginItems/UnproxyLoginHelper.app/Contents");
+                executable(
+                    &source_bin("unproxy-login-helper"),
+                    &helper.join("MacOS/unproxy-login-helper"),
+                )?;
+                std::fs::write(
+                    app.join("Info.plist"),
+                    info_plist("de.m42e.unproxy.app", "unproxy-app", "11.1"),
+                )?;
+                std::fs::write(
+                    helper.join("Info.plist"),
+                    info_plist(
+                        "de.m42e.unproxy.login-helper",
+                        "unproxy-login-helper",
+                        "10.14",
+                    ),
+                )?;
+                std::fs::copy(
+                    "assets/app-entitlements.plist",
+                    app.join("entitlements.plist"),
+                )?;
+                std::fs::copy(
+                    "assets/child-entitlements.plist",
+                    app.join("child-entitlements.plist"),
+                )?;
+                zip(&staging, &output.join(format!("{package_name}-app.zip")))?;
             }
         }
-        Format::App => {
-            anyhow::ensure!(
-                target_name.contains("darwin") || target_name.contains("macos"),
-                "the menu bar app requires a macOS target"
-            );
-            let app = staging.join("Unproxy.app/Contents");
-            executable(
-                &source_bin("unproxy-app"),
-                &app.join("MacOS/unproxy-app"),
-            )?;
-            executable(&source_bin("unproxy"), &app.join("Resources/unproxy"))?;
-            let helper = app.join("Library/LoginItems/UnproxyLoginHelper.app/Contents");
-            executable(
-                &source_bin("unproxy-login-helper"),
-                &helper.join("MacOS/unproxy-login-helper"),
-            )?;
-            std::fs::write(
-                app.join("Info.plist"),
-                info_plist("de.m42e.unproxy.app", "unproxy-app", "11.1"),
-            )?;
-            std::fs::write(
-                helper.join("Info.plist"),
-                info_plist(
-                    "de.m42e.unproxy.login-helper",
-                    "unproxy-login-helper",
-                    "10.14",
-                ),
-            )?;
-            std::fs::copy(
-                "assets/app-entitlements.plist",
-                app.join("entitlements.plist"),
-            )?;
-            std::fs::copy(
-                "assets/child-entitlements.plist",
-                app.join("child-entitlements.plist"),
-            )?;
-            zip(&staging, &output.join(format!("{package_name}-app.zip")))?;
-        }
+        std::fs::remove_dir_all(&staging)?;
     }
-    std::fs::remove_dir_all(staging)?;
     println!("Artifacts written to {}", output.display());
     Ok(())
 }

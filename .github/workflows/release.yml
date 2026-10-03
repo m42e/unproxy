@@ -20,17 +20,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo run --locked --bin xtask -- check
-      - run: cargo build --locked --release --bins
-      - run: cargo run --locked --bin xtask -- package --format portable
-      - if: runner.os == 'Linux'
-        run: cargo run --locked --bin xtask -- package --format deb
-      - if: runner.os == 'macOS'
-        run: |
-          cargo run --locked --bin xtask -- package --format macos
-          cargo run --locked --bin xtask -- package --format app
-      - if: runner.os == 'Windows'
-        run: cargo run --locked --bin xtask -- package --format windows
+      - run: cargo xtask check
+      - run: cargo xtask package --format native
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ runner.os }}
