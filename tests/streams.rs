@@ -49,6 +49,39 @@ impl AsyncRead for FailedIo {
         )))
     }
 }
+
+struct OneWriteThenPending {
+    wrote: bool,
+}
+impl AsyncRead for OneWriteThenPending {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Pending
+    }
+}
+impl AsyncWrite for OneWriteThenPending {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.wrote {
+            Poll::Pending
+        } else {
+            self.wrote = true;
+            Poll::Ready(Ok(buffer.len().min(1)))
+        }
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
 impl AsyncWrite for FailedIo {
     fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, _: &[u8]) -> Poll<io::Result<usize>> {
         Poll::Ready(Err(io::Error::new(
@@ -316,4 +349,51 @@ async fn idle_io_and_metered_streams_preserve_underlying_errors_and_counts() {
         Some("2001:db8::1".parse().unwrap())
     );
     assert_eq!(unproxy::net::parse_ip("proxy.example"), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_io_read_progress_restarts_the_read_deadline() {
+    let timeout = Duration::from_secs(5);
+    let (mut writer, reader) = tokio::io::duplex(8);
+    let (progress, progressed) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let disabled = Arc::new(AtomicBool::new(false));
+        let mut io = IdleIo::new(reader, timeout, disabled);
+        let mut byte = [0];
+        io.read_exact(&mut byte).await.unwrap();
+        progress.send(byte[0]).unwrap();
+        io.read(&mut byte).await.unwrap_err()
+    });
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    writer.write_all(b"x").await.unwrap();
+    assert_eq!(progressed.await.unwrap(), b'x');
+
+    tokio::time::advance(Duration::from_secs(4)).await;
+    tokio::task::yield_now().await;
+    assert!(!task.is_finished(), "the original deadline must have moved");
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let error = task.await.unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("read idle timeout"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_io_write_progress_restarts_the_write_deadline() {
+    let timeout = Duration::from_secs(5);
+    let disabled = Arc::new(AtomicBool::new(false));
+    let mut io = IdleIo::new(OneWriteThenPending { wrote: false }, timeout, disabled);
+    tokio::time::advance(Duration::from_secs(4)).await;
+    io.write_all(b"x").await.unwrap();
+
+    let before_reset_deadline =
+        tokio::time::timeout(Duration::from_secs(2), io.write_all(b"y")).await;
+    assert!(
+        before_reset_deadline.is_err(),
+        "successful write progress must move the deadline past the original expiry"
+    );
+    let error = io.write_all(b"y").await.unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("write idle timeout"));
 }

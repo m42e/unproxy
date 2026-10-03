@@ -201,6 +201,61 @@ fn portable_and_windows_packages_stage_expected_files() {
 }
 
 #[test]
+fn portable_package_is_a_readable_archive_with_the_expected_payload() {
+    let f = Fixture::new();
+    seed_common(&f);
+    // Use the host archiver here: the staging tests above use a stub so they
+    // can also assert the pre-archive directory layout.
+    std::fs::remove_file(f.tools.join("zip")).unwrap();
+    for name in ["unproxy", "paceval", "undns"] {
+        f.binary(None, name);
+    }
+
+    assert_ok(f.command(&[
+        "package",
+        "--format",
+        "portable",
+        "--output",
+        "dist/portable",
+    ]));
+    let output_dir = f.root.path().join("dist/portable");
+    let archives = std::fs::read_dir(output_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "zip"))
+        .collect::<Vec<_>>();
+    assert_eq!(archives.len(), 1);
+
+    let inspection = std::process::Command::new("python3")
+        .args([
+            "-c",
+            r#"
+import json, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as package:
+    names = {name.removeprefix('./') for name in package.namelist() if not name.endswith('/')}
+    assert names == {'README.md', 'metadata.json', 'paceval', 'proxy.pac.sample', 'undns', 'unproxy'}, names
+    assert package.read('unproxy') == b'fixture unproxy'
+    assert package.read('paceval') == b'fixture paceval'
+    assert package.read('undns') == b'fixture undns'
+    metadata = json.loads(package.read('metadata.json'))
+    assert metadata['version'] == sys.argv[2], metadata
+    assert metadata['negotiate'] is True, metadata
+    assert metadata['components'] == ['unproxy', 'paceval', 'undns'], metadata
+"#,
+        ])
+        .arg(&archives[0])
+        .arg(unproxy::VERSION)
+        .output()
+        .unwrap();
+    assert!(
+        inspection.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&inspection.stdout),
+        String::from_utf8_lossy(&inspection.stderr)
+    );
+}
+
+#[test]
 fn debian_package_maps_architecture_and_stages_service_and_hooks() {
     let f = Fixture::new();
     seed_common(&f);

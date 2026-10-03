@@ -4,6 +4,14 @@ use std::{ffi::c_void, io, ptr};
 type Ref = *const c_void;
 type MutableRef = *mut c_void;
 type ObserverCallBack = unsafe extern "C" fn(Ref, *mut c_void, Ref, Ref, Ref);
+type RemoveObserver = unsafe extern "C" fn(MutableRef, Ref, Ref, Ref);
+type Release = unsafe extern "C" fn(Ref);
+
+#[derive(Clone, Copy)]
+struct CleanupFns {
+    remove_observer: RemoveObserver,
+    release: Release,
+}
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -42,6 +50,7 @@ pub(super) struct Registration {
     unavailable_name: MutableRef,
     available_context: Box<CallbackContext>,
     unavailable_context: Box<CallbackContext>,
+    cleanup: CleanupFns,
 }
 
 unsafe extern "C" fn callback(_: Ref, observer: *mut c_void, _: Ref, _: Ref, _: Ref) {
@@ -100,6 +109,10 @@ impl Registration {
                     sender,
                     event: NetworkEvent::Unavailable,
                 }),
+                cleanup: CleanupFns {
+                    remove_observer: CFNotificationCenterRemoveObserver,
+                    release: CFRelease,
+                },
             };
             CFNotificationCenterAddObserver(
                 center,
@@ -133,20 +146,88 @@ impl Registration {
 impl Drop for Registration {
     fn drop(&mut self) {
         unsafe {
-            CFNotificationCenterRemoveObserver(
+            (self.cleanup.remove_observer)(
                 self.center,
                 (&mut *self.available_context as *mut CallbackContext).cast::<c_void>() as Ref,
                 self.available_name,
                 ptr::null(),
             );
-            CFNotificationCenterRemoveObserver(
+            (self.cleanup.remove_observer)(
                 self.center,
                 (&mut *self.unavailable_context as *mut CallbackContext).cast::<c_void>() as Ref,
                 self.unavailable_name,
                 ptr::null(),
             );
-            CFRelease(self.available_name);
-            CFRelease(self.unavailable_name);
+            (self.cleanup.release)(self.available_name);
+            (self.cleanup.release)(self.unavailable_name);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static CLEANUP_CALLS: Mutex<Vec<(String, usize, usize, usize)>> = Mutex::new(Vec::new());
+
+    unsafe extern "C" fn record_remove(center: MutableRef, observer: Ref, name: Ref, object: Ref) {
+        CLEANUP_CALLS.lock().unwrap().push((
+            "remove".to_owned(),
+            center as usize,
+            observer as usize,
+            name as usize,
+        ));
+        if !object.is_null() {
+            CLEANUP_CALLS.lock().unwrap().push((
+                "unexpected object".to_owned(),
+                object as usize,
+                0,
+                0,
+            ));
+        }
+    }
+
+    unsafe extern "C" fn record_release(value: Ref) {
+        CLEANUP_CALLS
+            .lock()
+            .unwrap()
+            .push(("release".to_owned(), value as usize, 0, 0));
+    }
+
+    #[test]
+    fn dropping_registration_removes_both_observers_before_releasing_names() {
+        CLEANUP_CALLS.lock().unwrap().clear();
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registration = Registration {
+            center: 1usize as MutableRef,
+            available_name: 2usize as MutableRef,
+            unavailable_name: 3usize as MutableRef,
+            available_context: Box::new(CallbackContext {
+                sender: sender.clone(),
+                event: NetworkEvent::Available,
+            }),
+            unavailable_context: Box::new(CallbackContext {
+                sender,
+                event: NetworkEvent::Unavailable,
+            }),
+            cleanup: CleanupFns {
+                remove_observer: record_remove,
+                release: record_release,
+            },
+        };
+        let available_observer =
+            (&*registration.available_context as *const CallbackContext) as usize;
+        let unavailable_observer =
+            (&*registration.unavailable_context as *const CallbackContext) as usize;
+
+        drop(registration);
+
+        let calls = CLEANUP_CALLS.lock().unwrap();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0], ("remove".to_owned(), 1, available_observer, 2));
+        assert_eq!(calls[1], ("remove".to_owned(), 1, unavailable_observer, 3));
+        assert_eq!(calls[2], ("release".to_owned(), 2, 0, 0));
+        assert_eq!(calls[3], ("release".to_owned(), 3, 0, 0));
     }
 }

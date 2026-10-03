@@ -431,6 +431,61 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn service_control_stops_after_install_and_status_command_errors() {
+        use std::{cell::Cell, cell::RefCell, string::ToString};
+
+        let calls = RefCell::new(Vec::<(String, Vec<String>)>::new());
+        let fail_command = Cell::new("bootstrap");
+        let mut invoke = |program: &str, args: &[&str]| {
+            let args = args.iter().map(ToString::to_string).collect::<Vec<_>>();
+            calls.borrow_mut().push((program.to_owned(), args.clone()));
+            if args.first().is_some_and(|arg| arg == fail_command.get()) {
+                bail!("fixture {program} failure");
+            }
+            Ok(())
+        };
+        let mut capture = |program: &str, args: &[&str]| {
+            calls.borrow_mut().push((
+                format!("{program} output"),
+                args.iter().map(ToString::to_string).collect(),
+            ));
+            Ok("pid = 10\n".to_owned())
+        };
+        let target = format!("gui/{}/de.m42e.unproxy", unsafe { libc::getuid() });
+        let domain = format!("gui/{}", unsafe { libc::getuid() });
+
+        let error = service_control_with("install", true, &mut invoke, &mut capture).unwrap_err();
+        assert!(error.to_string().contains("fixture launchctl failure"));
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                (
+                    "launchctl".to_owned(),
+                    vec!["enable".to_owned(), target.clone()]
+                ),
+                (
+                    "launchctl".to_owned(),
+                    vec![
+                        "bootstrap".to_owned(),
+                        domain,
+                        "/Library/LaunchAgents/de.m42e.unproxy.plist".to_owned(),
+                    ],
+                ),
+            ]
+        );
+
+        calls.borrow_mut().clear();
+        fail_command.set("print");
+        let error = service_control_with("status", false, &mut invoke, &mut capture).unwrap_err();
+        assert!(error.to_string().contains("fixture launchctl failure"));
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [("launchctl".to_owned(), vec!["print".to_owned(), target])]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn native_platform_entry_points_fail_or_succeed_without_mutating_preferences() {
         assert!(attach_console().is_ok());
         assert!(!default_interface_ipv4().is_unspecified());
@@ -639,6 +694,21 @@ mod macos_preferences {
             config
         }
     }
+    fn finish_changes(
+        changed: usize,
+        mut commit: impl FnMut() -> Result<()>,
+        mut apply: impl FnMut() -> Result<()>,
+        mut synchronize: impl FnMut(),
+    ) -> Result<usize> {
+        if changed == 0 {
+            return Ok(0);
+        }
+        commit()?;
+        apply()?;
+        synchronize();
+        Ok(changed)
+    }
+
     pub fn set_proxy(port: u16) -> Result<usize> {
         // Every CF object returned by a Create/Copy function is owned locally.
         unsafe {
@@ -707,20 +777,26 @@ mod macos_preferences {
                 );
                 changed += 1;
             }
-            if changed != 0 {
-                anyhow::ensure!(
-                    SCPreferencesCommitChanges(prefs.0) != 0,
-                    "committing network preferences failed: {}",
-                    SCError()
-                );
-                anyhow::ensure!(
-                    SCPreferencesApplyChanges(prefs.0) != 0,
-                    "applying network preferences failed: {}",
-                    SCError()
-                );
-                SCPreferencesSynchronize(prefs.0);
-            }
-            Ok(changed)
+            finish_changes(
+                changed,
+                || {
+                    anyhow::ensure!(
+                        SCPreferencesCommitChanges(prefs.0) != 0,
+                        "committing network preferences failed: {}",
+                        SCError()
+                    );
+                    Ok(())
+                },
+                || {
+                    anyhow::ensure!(
+                        SCPreferencesApplyChanges(prefs.0) != 0,
+                        "applying network preferences failed: {}",
+                        SCError()
+                    );
+                    Ok(())
+                },
+                || SCPreferencesSynchronize(prefs.0),
+            )
         }
     }
 
@@ -788,6 +864,82 @@ mod macos_preferences {
                 let key = string("ExceptionsList");
                 assert_eq!(CFArrayGetCount(CFDictionaryGetValue(disabled.0, key.0)), 4);
             }
+        }
+
+        #[test]
+        fn preference_transaction_stops_after_commit_or_apply_failure() {
+            use std::cell::RefCell;
+
+            let calls = RefCell::new(Vec::new());
+            let changed = finish_changes(
+                0,
+                || {
+                    calls.borrow_mut().push("commit");
+                    Ok(())
+                },
+                || {
+                    calls.borrow_mut().push("apply");
+                    Ok(())
+                },
+                || calls.borrow_mut().push("synchronize"),
+            )
+            .unwrap();
+            assert_eq!(changed, 0);
+            assert!(calls.borrow().is_empty());
+
+            let calls = RefCell::new(Vec::new());
+            let error = finish_changes(
+                2,
+                || {
+                    calls.borrow_mut().push("commit");
+                    bail!("commit fixture failure")
+                },
+                || {
+                    calls.borrow_mut().push("apply");
+                    Ok(())
+                },
+                || calls.borrow_mut().push("synchronize"),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("commit fixture failure"));
+            assert_eq!(calls.borrow().as_slice(), ["commit"]);
+
+            let calls = RefCell::new(Vec::new());
+            let error = finish_changes(
+                2,
+                || {
+                    calls.borrow_mut().push("commit");
+                    Ok(())
+                },
+                || {
+                    calls.borrow_mut().push("apply");
+                    bail!("apply fixture failure")
+                },
+                || calls.borrow_mut().push("synchronize"),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("apply fixture failure"));
+            assert_eq!(calls.borrow().as_slice(), ["commit", "apply"]);
+
+            let calls = RefCell::new(Vec::new());
+            let changed = finish_changes(
+                3,
+                || {
+                    calls.borrow_mut().push("commit");
+                    Ok(())
+                },
+                || {
+                    calls.borrow_mut().push("apply");
+                    Ok(())
+                },
+                || calls.borrow_mut().push("synchronize"),
+            )
+            .unwrap();
+            assert_eq!(changed, 3);
+            assert_eq!(
+                calls.borrow().as_slice(),
+                ["commit", "apply", "synchronize"]
+            );
         }
     }
 }

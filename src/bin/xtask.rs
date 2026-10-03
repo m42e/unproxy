@@ -668,3 +668,41 @@ mod tests {
         );
     }
 }
+
+    #[test]
+    fn zip_helper_writes_an_archive_that_extracts_on_the_host() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload = temp.path().join("payload directory");
+        let nested = payload.join("nested folder");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(payload.join("README.md"), b"package readme").unwrap();
+        std::fs::write(nested.join("binary file"), b"fixture executable").unwrap();
+        let archive = temp.path().join("package output.zip");
+
+        zip(&payload, &archive).unwrap();
+
+        let extracted = temp.path().join("expanded package");
+        #[cfg(unix)]
+        run(Command::new("unzip")
+            .arg("-q")
+            .arg(&archive)
+            .arg("-d")
+            .arg(&extracted))
+        .unwrap();
+        #[cfg(windows)]
+        powershell(&format!(
+            "Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
+            ps_literal(&archive),
+            ps_literal(&extracted)
+        ))
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(extracted.join("README.md")).unwrap(),
+            b"package readme"
+        );
+        assert_eq!(
+            std::fs::read(extracted.join("nested folder/binary file")).unwrap(),
+            b"fixture executable"
+        );
+    }

@@ -23,6 +23,13 @@ struct GssOid {
 #[cfg(all(feature = "negotiate", unix))]
 type GssStatus = i32;
 #[cfg(all(feature = "negotiate", unix))]
+type GssImportName = unsafe extern "C" fn(
+    *mut u32,
+    *mut GssBuf,
+    *mut GssOid,
+    *mut *mut std::ffi::c_void,
+) -> GssStatus;
+#[cfg(all(feature = "negotiate", unix))]
 type GssInitSecContext = unsafe extern "C" fn(
     *mut u32,
     *mut std::ffi::c_void,
@@ -45,6 +52,77 @@ type GssDeleteContext =
     unsafe extern "C" fn(*mut u32, *mut *mut std::ffi::c_void, *mut GssBuf) -> GssStatus;
 #[cfg(all(feature = "negotiate", unix))]
 type GssReleaseName = unsafe extern "C" fn(*mut u32, *mut *mut std::ffi::c_void) -> GssStatus;
+
+#[cfg(all(feature = "negotiate", unix))]
+unsafe fn import_gss_target(
+    host: &str,
+    import: GssImportName,
+    release_name: Option<GssReleaseName>,
+    mut display_status: impl FnMut(u32, i32) -> String,
+) -> Result<*mut std::ffi::c_void> {
+    let target = format!("HTTP@{host}");
+    let mut name = GssBuf {
+        len: target.len(),
+        value: target.as_ptr() as *mut _,
+    };
+    // Host-based service name OID 1.2.840.113554.1.2.1.4.
+    let mut name_oid_bytes: [u8; 10] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x01, 0x04];
+    let mut name_oid = GssOid {
+        len: 10,
+        elements: name_oid_bytes.as_mut_ptr().cast(),
+    };
+    let mut minor = 0;
+    let mut imported = std::ptr::null_mut();
+    let status = unsafe { import(&mut minor, &mut name, &mut name_oid, &mut imported) };
+    if status != 0 {
+        let major_text = display_status(status as u32, 1);
+        let minor_text = display_status(minor, 2);
+        // Some implementations can return a handle alongside an error. Release it
+        // before returning so a failed initialization does not leak the native name.
+        if !imported.is_null()
+            && let Some(release) = release_name
+        {
+            let mut release_minor = 0;
+            unsafe { release(&mut release_minor, &mut imported) };
+        }
+        return Err(anyhow!(
+            "GSSAPI name import failed for HTTP@{host}: major={status} ({major_text}), minor={minor} ({minor_text})"
+        ));
+    }
+    Ok(imported)
+}
+
+#[cfg(all(feature = "negotiate", unix))]
+unsafe fn release_gss_handles(
+    ctx: &mut *mut std::ffi::c_void,
+    target: &mut *mut std::ffi::c_void,
+    delete_context: Option<GssDeleteContext>,
+    release_buffer: Option<GssReleaseBuffer>,
+    release_name: Option<GssReleaseName>,
+) {
+    if !ctx.is_null()
+        && let Some(delete) = delete_context
+    {
+        let mut minor = 0;
+        let mut output = GssBuf {
+            len: 0,
+            value: std::ptr::null_mut(),
+        };
+        unsafe { delete(&mut minor, ctx, &mut output) };
+        if !output.value.is_null()
+            && let Some(release) = release_buffer
+        {
+            unsafe { release(&mut minor, &mut output) };
+        }
+    }
+    if !target.is_null()
+        && let Some(release) = release_name
+    {
+        let mut minor = 0;
+        unsafe { release(&mut minor, target) };
+    }
+}
+
 #[cfg(all(feature = "negotiate", unix))]
 impl NegotiateContext {
     pub fn new(host: &str) -> Result<Self> {
@@ -60,42 +138,18 @@ impl NegotiateContext {
                 .iter()
                 .find_map(|n| libloading::Library::new(n).ok())
                 .ok_or_else(|| anyhow!("GSSAPI library is unavailable"))?;
-            let import: libloading::Symbol<
-                unsafe extern "C" fn(
-                    *mut u32,
-                    *mut GssBuf,
-                    *mut GssOid,
-                    *mut *mut std::ffi::c_void,
-                ) -> GssStatus,
-            > = lib.get(b"gss_import_name\0")?;
-            let mut ty = std::ptr::null_mut();
-            let mut output = 0;
-            let mut name = GssBuf {
-                len: 0,
-                value: std::ptr::null_mut(),
-            };
-            let target = format!("HTTP@{host}");
-            name.len = target.len();
-            name.value = target.as_ptr() as *mut _;
-            // host-based service name OID 1.2.840.113554.1.2.1.4
-            let mut name_oid_bytes: [u8; 10] =
-                [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x01, 0x04];
-            let mut name_oid = GssOid {
-                len: 10,
-                elements: name_oid_bytes.as_mut_ptr().cast(),
-            };
-            let status = import(&mut output, &mut name, &mut name_oid, &mut ty);
-            if status != 0 {
-                return Err(anyhow!(
-                    "GSSAPI name import failed for HTTP@{host}: major={status} ({}), minor={output} ({})",
-                    gss_status_text(&lib, status as u32, 1),
-                    gss_status_text(&lib, output, 2)
-                ));
-            }
+            let import: libloading::Symbol<GssImportName> = lib.get(b"gss_import_name\0")?;
+            let release_name = lib
+                .get::<GssReleaseName>(b"gss_release_name\0")
+                .ok()
+                .map(|symbol| *symbol);
+            let target = import_gss_target(host, *import, release_name, |status, kind| {
+                gss_status_text(&lib, status, kind)
+            })?;
             Ok(Self {
                 lib,
                 ctx: std::ptr::null_mut(),
-                target: ty,
+                target,
                 host: host.to_owned(),
             })
         }
@@ -226,29 +280,28 @@ fn gss_status_text(lib: &libloading::Library, value: u32, kind: i32) -> String {
 impl Drop for NegotiateContext {
     fn drop(&mut self) {
         unsafe {
-            if !self.ctx.is_null()
-                && let Ok(delete) = self
-                    .lib
-                    .get::<GssDeleteContext>(b"gss_delete_sec_context\0")
-            {
-                let mut minor = 0;
-                let mut out = GssBuf {
-                    len: 0,
-                    value: std::ptr::null_mut(),
-                };
-                delete(&mut minor, &mut self.ctx, &mut out);
-                if !out.value.is_null()
-                    && let Ok(release) = self.lib.get::<GssReleaseBuffer>(b"gss_release_buffer\0")
-                {
-                    release(&mut minor, &mut out);
-                }
-            }
-            if !self.target.is_null()
-                && let Ok(release) = self.lib.get::<GssReleaseName>(b"gss_release_name\0")
-            {
-                let mut minor = 0;
-                release(&mut minor, &mut self.target);
-            }
+            let delete_context = self
+                .lib
+                .get::<GssDeleteContext>(b"gss_delete_sec_context\0")
+                .ok()
+                .map(|symbol| *symbol);
+            let release_buffer = self
+                .lib
+                .get::<GssReleaseBuffer>(b"gss_release_buffer\0")
+                .ok()
+                .map(|symbol| *symbol);
+            let release_name = self
+                .lib
+                .get::<GssReleaseName>(b"gss_release_name\0")
+                .ok()
+                .map(|symbol| *symbol);
+            release_gss_handles(
+                &mut self.ctx,
+                &mut self.target,
+                delete_context,
+                release_buffer,
+                release_name,
+            );
         }
     }
 }
@@ -439,6 +492,126 @@ pub(super) fn initial_token(host: &str) -> Result<Option<Vec<u8>>> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    static RELEASED_NAMES: AtomicUsize = AtomicUsize::new(0);
+    static DELETED_CONTEXTS: AtomicUsize = AtomicUsize::new(0);
+    static RELEASED_BUFFERS: AtomicUsize = AtomicUsize::new(0);
+    static IMPORT_NAME_MATCHES: AtomicUsize = AtomicUsize::new(0);
+    static IMPORT_OID_MATCHES: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn fixture_import_failure(
+        minor: *mut u32,
+        name: *mut GssBuf,
+        oid: *mut GssOid,
+        output: *mut *mut std::ffi::c_void,
+    ) -> GssStatus {
+        let bytes = unsafe { std::slice::from_raw_parts((*name).value.cast::<u8>(), (*name).len) };
+        if bytes == b"HTTP@fixture.test" {
+            IMPORT_NAME_MATCHES.fetch_add(1, Ordering::SeqCst);
+        }
+        let oid_bytes = unsafe {
+            std::slice::from_raw_parts((*oid).elements.cast::<u8>(), (*oid).len as usize)
+        };
+        if oid_bytes == [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x01, 0x04] {
+            IMPORT_OID_MATCHES.fetch_add(1, Ordering::SeqCst);
+        }
+        unsafe {
+            *minor = 17;
+            *output = std::ptr::NonNull::<u8>::dangling().as_ptr().cast();
+        }
+        0x0001_0000
+    }
+
+    unsafe extern "C" fn fixture_release_name(
+        _: *mut u32,
+        name: *mut *mut std::ffi::c_void,
+    ) -> GssStatus {
+        RELEASED_NAMES.fetch_add(1, Ordering::SeqCst);
+        unsafe { *name = std::ptr::null_mut() };
+        0
+    }
+
+    unsafe extern "C" fn fixture_delete_context(
+        _: *mut u32,
+        context: *mut *mut std::ffi::c_void,
+        output: *mut GssBuf,
+    ) -> GssStatus {
+        DELETED_CONTEXTS.fetch_add(1, Ordering::SeqCst);
+        unsafe {
+            *context = std::ptr::null_mut();
+            (*output).len = 0;
+            (*output).value = std::ptr::NonNull::<u8>::dangling().as_ptr().cast();
+        }
+        0x0001_0000
+    }
+
+    unsafe extern "C" fn fixture_release_buffer(_: *mut u32, buffer: *mut GssBuf) -> GssStatus {
+        RELEASED_BUFFERS.fetch_add(1, Ordering::SeqCst);
+        unsafe { (*buffer).value = std::ptr::null_mut() };
+        0
+    }
+
+    #[test]
+    fn failed_gss_name_import_releases_a_returned_handle() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        RELEASED_NAMES.store(0, Ordering::SeqCst);
+        IMPORT_NAME_MATCHES.store(0, Ordering::SeqCst);
+        IMPORT_OID_MATCHES.store(0, Ordering::SeqCst);
+        let error = unsafe {
+            import_gss_target(
+                "fixture.test",
+                fixture_import_failure,
+                Some(fixture_release_name),
+                |status, kind| format!("status {status} kind {kind}"),
+            )
+        }
+        .unwrap_err();
+
+        assert!(error.to_string().contains("HTTP@fixture.test"));
+        assert!(error.to_string().contains("status 65536 kind 1"));
+        assert!(error.to_string().contains("status 17 kind 2"));
+        assert_eq!(IMPORT_NAME_MATCHES.load(Ordering::SeqCst), 1);
+        assert_eq!(IMPORT_OID_MATCHES.load(Ordering::SeqCst), 1);
+        assert_eq!(RELEASED_NAMES.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn gss_drop_releases_context_output_and_name_once() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        RELEASED_NAMES.store(0, Ordering::SeqCst);
+        DELETED_CONTEXTS.store(0, Ordering::SeqCst);
+        RELEASED_BUFFERS.store(0, Ordering::SeqCst);
+        let mut context = std::ptr::NonNull::<u8>::dangling().as_ptr().cast();
+        let mut target = std::ptr::NonNull::<u16>::dangling().as_ptr().cast();
+
+        unsafe {
+            release_gss_handles(
+                &mut context,
+                &mut target,
+                Some(fixture_delete_context),
+                Some(fixture_release_buffer),
+                Some(fixture_release_name),
+            );
+            release_gss_handles(
+                &mut context,
+                &mut target,
+                Some(fixture_delete_context),
+                Some(fixture_release_buffer),
+                Some(fixture_release_name),
+            );
+        }
+
+        assert!(context.is_null());
+        assert!(target.is_null());
+        assert_eq!(DELETED_CONTEXTS.load(Ordering::SeqCst), 1);
+        assert_eq!(RELEASED_BUFFERS.load(Ordering::SeqCst), 1);
+        assert_eq!(RELEASED_NAMES.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn native_gss_context_step_is_a_best_effort_smoke_test() {
