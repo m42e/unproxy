@@ -79,7 +79,7 @@ pub fn netrc_default() -> Option<PathBuf> {
     name = "unproxy",
     version = crate::VERSION,
     about = "Local HTTP proxy with PAC based routing and corporate authentication",
-    long_about = "Run a local HTTP proxy that routes requests through upstream proxies according to PAC scripts. By default it listens on 127.0.0.1:3128. Options from the unproxy settings file are loaded first; command-line options take precedence. Set UNPROXY_NORC=1 to ignore the settings file. Use paceval to inspect PAC routing and unproxyctl to control the system service.",
+    long_about = "Run a local HTTP proxy that routes requests through upstream proxies according to PAC scripts. By default it listens on 127.0.0.1:3128 and [::1]:3128. Options from the unproxy settings file are loaded first; command-line options take precedence. Set UNPROXY_NORC=1 to ignore the settings file. Use paceval to inspect PAC routing and unproxyctl to control the system service.",
     args_override_self = true
 )]
 pub struct MainArgs {
@@ -92,7 +92,8 @@ pub struct MainArgs {
     /// Write diagnostic logs to this file, truncating it at startup.
     #[arg(long)]
     pub logfile: Option<PathBuf>,
-    /// Listen on this numeric IP address and port; may be repeated (default: 127.0.0.1:3128).
+    /// Listen on this numeric IP address and port; may be repeated.
+    /// Defaults to 127.0.0.1:3128 and [::1]:3128.
     #[arg(short='L',long="listen",value_delimiter=None)]
     pub listen: Vec<String>,
     /// Accept connections from a named socket-activation listener.
@@ -183,7 +184,7 @@ impl MainArgs {
     }
     pub fn listen_addrs(&self) -> Result<Vec<SocketAddr>> {
         let xs = if self.listen.is_empty() {
-            vec!["127.0.0.1:3128".to_owned()]
+            vec!["127.0.0.1:3128".to_owned(), "[::1]:3128".to_owned()]
         } else {
             self.listen.clone()
         };

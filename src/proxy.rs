@@ -286,7 +286,10 @@ impl ContextBuilder {
         let addrs = if !listeners.is_empty() {
             vec![]
         } else if self.listens.is_empty() {
-            vec!["127.0.0.1:3128".parse().unwrap()]
+            vec![
+                "127.0.0.1:3128".parse().unwrap(),
+                "[::1]:3128".parse().unwrap(),
+            ]
         } else {
             self.listens.clone()
         };

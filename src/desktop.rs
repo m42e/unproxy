@@ -90,6 +90,8 @@ impl Preferences {
         let mut a = vec![
             "--listen".into(),
             format!("127.0.0.1:{}", self.effective_port()),
+            "--listen".into(),
+            format!("[::1]:{}", self.effective_port()),
             "--graceful-shutdown-timeout".into(),
             "0".into(),
             "--pac-file".into(),

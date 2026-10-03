@@ -13,7 +13,7 @@ page, then follow [the installation steps](docs/installation.md).
 1. Start Unproxy. Windows and macOS desktop apps have a tray or menu bar
    control. On Debian or Ubuntu, run `systemctl --user enable --now unproxy`.
 2. In the application you want to use, set both its HTTP and HTTPS proxy to
-   `127.0.0.1`, port `3128`.
+   `127.0.0.1`, port `3128` (or `[::1]` if it uses IPv6 loopback).
 3. If your organization gave you a PAC file, select it in the desktop app or
    start Unproxy with `--pac-file /path/to/company.pac`.
 

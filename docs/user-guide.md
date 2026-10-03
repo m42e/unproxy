@@ -21,8 +21,8 @@ To run the command directly instead, open a terminal and run:
 unproxy
 ```
 
-The default address is `127.0.0.1`, port `3128`. Keep this terminal open while
-you use the proxy. Press Ctrl+C to stop it.
+By default, Unproxy listens on `127.0.0.1:3128` and `[::1]:3128`. Keep this
+terminal open while you use the proxy. Press Ctrl+C to stop it.
 
 ## Connect an application
 
@@ -35,6 +35,7 @@ In the application's proxy settings, choose manual proxy and enter:
 | Port | `3128` |
 
 If the application has one proxy address and one port, use `127.0.0.1:3128`.
+Applications that support IPv6 loopback can use `[::1]:3128` instead.
 Leave local addresses out of the proxy with the application's bypass list. For
 terminal programs, set these variables in the same terminal before launching the
 program:

@@ -223,6 +223,7 @@ function Start-Proxy {
     $exe = Join-Path $bin 'unproxy.exe'
     $arguments = @(
         '--listen', "127.0.0.1:$listenerPort",
+        '--listen', "[::1]:$listenerPort",
         '--pac-file', $script:p.pacFile,
         '--graceful-shutdown-timeout', '0'
     )
