@@ -454,8 +454,13 @@ fn resolve_hostname(host: &str) -> Option<IpAddr> {
 
 #[cfg(test)]
 mod tests {
-    use super::preferred_ip;
-    use std::net::IpAddr;
+    use super::{CacheEntry, Pac, Policy, preferred_ip};
+    use std::{
+        collections::HashMap,
+        net::IpAddr,
+        sync::{Arc, atomic::AtomicBool},
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn dns_prefers_first_ipv4_then_falls_back_to_first_ipv6() {
@@ -464,5 +469,184 @@ mod tests {
         let ips = ["::1", "2001:db8::1"].map(|ip| ip.parse::<IpAddr>().unwrap());
         assert_eq!(preferred_ip(ips), Some("::1".parse().unwrap()));
         assert_eq!(preferred_ip([]), None);
+    }
+
+    #[test]
+    fn pac_cache_snapshot_includes_positive_and_negative_entries() {
+        let pac = Pac::new(None).unwrap();
+        let ip: IpAddr = "192.0.2.99".parse().unwrap();
+        let mut entries = HashMap::new();
+        entries.insert(
+            "positive.test".to_owned(),
+            CacheEntry {
+                value: Some(ip),
+                at: Instant::now(),
+            },
+        );
+        entries.insert(
+            "negative.test".to_owned(),
+            CacheEntry {
+                value: None,
+                at: Instant::now(),
+            },
+        );
+        *pac.cache.lock().unwrap() = entries;
+        let snapshot = pac.cache_snapshot();
+        assert_eq!(snapshot.get("positive.test"), Some(&Some(ip)));
+        assert_eq!(snapshot.get("negative.test"), Some(&None));
+        assert_eq!(snapshot.len(), 2);
+    }
+
+    #[test]
+    fn pac_alert_ip_override_and_oversized_scripts_are_handled() {
+        let mut pac = Pac::new(Some(
+            "function FindProxyForURL(){ alert(); alert(42); alert('ready'); return myIpAddress() === '192.0.2.8' ? 'DIRECT' : 'PROXY wrong.test:80'; }",
+        ))
+        .unwrap();
+        pac.set_ip("192.0.2.8".parse().unwrap());
+        assert_eq!(
+            pac.evaluate("http://example.test", "example.test")
+                .unwrap()
+                .to_string(),
+            "DIRECT"
+        );
+
+        let oversized = "x".repeat(super::MAX_PAC_SCRIPT_BYTES + 1);
+        assert!(
+            Pac::new(Some(&oversized))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("8 MiB")
+        );
+    }
+
+    #[test]
+    fn pac_dns_resolution_budget_is_bounded_per_evaluation() {
+        let source = "function FindProxyForURL(){ let a=dnsResolve('192.0.2.1'); let b=dnsResolve('192.0.2.2'); let c=dnsResolve('192.0.2.3'); let d=dnsResolve('192.0.2.4'); let e=dnsResolve('192.0.2.5'); return a && b && c && d && e === null ? 'DIRECT' : 'PROXY unexpected.test:80'; }";
+        let mut pac = Pac::new(Some(source)).unwrap();
+        assert_eq!(
+            pac.evaluate("http://example.test", "example.test")
+                .unwrap()
+                .to_string(),
+            "DIRECT"
+        );
+        assert_eq!(pac.cache_snapshot().len(), super::DNS_RESOLVE_BUDGET);
+    }
+
+    #[test]
+    fn pac_evaluation_prunes_only_expired_cache_entries() {
+        let mut pac = Pac::new(None).unwrap();
+        let now = Instant::now();
+        let mut entries = HashMap::new();
+        entries.insert(
+            "expired.test".to_owned(),
+            CacheEntry {
+                value: None,
+                at: now - Duration::from_secs(301),
+            },
+        );
+        entries.insert(
+            "fresh.test".to_owned(),
+            CacheEntry {
+                value: None,
+                at: now,
+            },
+        );
+        *pac.cache.lock().unwrap() = entries;
+        pac.last_prune = now - Duration::from_secs(301);
+
+        pac.evaluate("http://example.test", "example.test").unwrap();
+
+        let cache = pac.cache.lock().unwrap();
+        assert!(!cache.contains_key("expired.test"));
+        assert!(cache.contains_key("fresh.test"));
+    }
+
+    #[tokio::test]
+    async fn policy_strict_unloaded_replacement_and_worker_shutdown_are_reported() {
+        let policy = Policy::new(Some(
+            "function FindProxyForURL(){return 'PROXY active.test:8080';}".into(),
+        ))
+        .unwrap();
+        policy.mark_unloaded();
+        let strict = policy
+            .evaluate_strict("http://example.test/".into(), "example.test".into())
+            .await
+            .unwrap_err();
+        assert!(strict.to_string().contains("routing policy is unavailable"));
+        assert_eq!(
+            policy
+                .evaluate("http://example.test/".into(), "example.test".into())
+                .await
+                .unwrap()
+                .to_string(),
+            "HTTP active.test:8080"
+        );
+
+        assert!(policy.set_script(Some("function {".into())).await.is_err());
+        assert!(policy.is_loaded());
+        policy
+            .set_script(Some("function FindProxyForURL(){return 'DIRECT';}".into()))
+            .await
+            .unwrap();
+        assert!(policy.is_loaded());
+        assert_eq!(
+            policy
+                .evaluate("http://example.test/".into(), "example.test".into())
+                .await
+                .unwrap()
+                .to_string(),
+            "DIRECT"
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        let closed = Policy {
+            tx,
+            loaded: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(
+            closed
+                .evaluate("http://example.test/".into(), "example.test".into())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("PAC worker stopped")
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_dns_snapshot_records_numeric_cache_and_script_sets_merge() {
+        let policy = Policy::new_scripts(vec![
+            "function FindProxyForURL(){dnsResolve('192.0.2.42');return myIpAddress()==='192.0.2.44'?'PROXY active.test:80':'DIRECT';}".into(),
+            "function FindProxyForURL(){dnsResolve('192.0.2.43');return 'DIRECT';}".into(),
+        ])
+        .unwrap();
+        policy
+            .evaluate("http://example.test/".into(), "example.test".into())
+            .await
+            .unwrap();
+        let snapshot = policy.cache_snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.get("192.0.2.42"),
+            Some(&Some("192.0.2.42".parse().unwrap()))
+        );
+        assert_eq!(
+            snapshot.get("192.0.2.43"),
+            Some(&Some("192.0.2.43".parse().unwrap()))
+        );
+        policy.set_ip("192.0.2.44".parse().unwrap()).await.unwrap();
+        assert_eq!(
+            policy
+                .evaluate("http://example.test/".into(), "example.test".into())
+                .await
+                .unwrap()
+                .to_string(),
+            "HTTP active.test:80"
+        );
+        policy.set_scripts(Vec::new()).await.unwrap();
+        assert!(!policy.is_loaded());
+        assert!(policy.cache_snapshot().await.unwrap().is_empty());
     }
 }

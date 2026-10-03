@@ -1,6 +1,6 @@
 use clap::Parser;
-use unproxy::config::{MainArgs, token_file};
 use std::fs;
+use unproxy::config::{MainArgs, token_file};
 #[test]
 fn defaults_and_listener_validation() {
     let a = MainArgs::try_parse_from(["unproxy"]).unwrap();

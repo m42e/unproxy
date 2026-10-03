@@ -198,18 +198,23 @@ fn resolvability_and_common_shell_patterns_choose_expected_routes() {
 #[test]
 fn pac_helper_surface_covers_globs_masks_ranges_and_dns_cache_hook() {
     let src = r#"
+      const RealDate=Date;
+      Date=class extends RealDate {
+        constructor(...args) { super(...(args.length ? args : ['2026-10-02T12:34:56Z'])); }
+        static now() { return new RealDate('2026-10-02T12:34:56Z').getTime(); }
+      };
       function FindProxyForURL(){
-        const d=new Date(), wd=['SUN','MON','TUE','WED','THU','FRI','SAT'][d.getDay()];
-        const day=d.getDate(), month=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][d.getMonth()];
+        const d=new Date(), wd=['SUN','MON','TUE','WED','THU','FRI','SAT'][d.getUTCDay()];
+        const day=d.getUTCDate(), month=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][d.getUTCMonth()];
         return shExpMatch('proxy7.corp','proxy[0-9].*') && dnsDomainLevels('a.b.c')===2 &&
           isPlainHostName('node') && localHostOrDomainIs('foo','foo.example') &&
           isValidIpAddress('001.2.3.255') && !isValidIpAddress('256.2.3.4') &&
           convert_addr('192.168.1.2')===-1062731518 &&
           isInNet('192.168.1.9','192.168.1.0','255.255.255.0') &&
-          weekdayRange(wd) && dateRange(day) && dateRange(month) &&
-          timeRange(d.getHours()) && timeRange(d.getHours(),d.getHours()) &&
-          timeRange(d.getHours(),d.getMinutes(),d.getHours(),d.getMinutes()) &&
-          timeRange(d.getHours(),d.getMinutes(),d.getSeconds(),d.getHours(),d.getMinutes(),d.getSeconds()) &&
+          weekdayRange(wd,'GMT') && dateRange(day,'GMT') && dateRange(month,'GMT') &&
+          timeRange(d.getUTCHours(),'GMT') && timeRange(d.getUTCHours(),d.getUTCHours(),'GMT') &&
+          timeRange(d.getUTCHours(),d.getUTCMinutes(),d.getUTCHours(),d.getUTCMinutes(),'GMT') &&
+          timeRange(d.getUTCHours(),d.getUTCMinutes(),d.getUTCSeconds(),d.getUTCHours(),d.getUTCMinutes(),d.getUTCSeconds(),'GMT') &&
           timeRange()===false &&
           typeof _dnsCache==='object' && new DomainTable(['example.org','sub.example.org']).contains('x.sub.example.org')
           ? 'DIRECT' : 'PROXY fail.invalid:1';

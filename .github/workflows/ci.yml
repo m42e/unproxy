@@ -46,29 +46,68 @@ jobs:
       - run: cargo build --locked --release --target x86_64-apple-darwin --bins
 
   coverage:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
       - run: cargo install cargo-llvm-cov --version 0.8.5 --locked
-      - run: cargo llvm-cov clean --workspace
-      - run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path coverage-all-features.lcov
-      - run: cargo llvm-cov clean --workspace
-      - run: cargo llvm-cov --locked --no-default-features --workspace --lcov --output-path coverage-no-default-features.lcov
+      - name: Collect and report default features
+        shell: bash
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --locked --workspace --no-report
+          cargo llvm-cov report --json --output-path coverage-default.json
+          cargo llvm-cov report --lcov --output-path coverage-default.lcov
+          cargo llvm-cov report --html --output-dir coverage-default-html
+          cargo llvm-cov report --show-missing-lines > coverage-default-missing.txt
+          python3 scripts/check_coverage.py coverage-default.json
+      - name: Collect and report all features
+        shell: bash
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --locked --all-features --workspace --no-report
+          cargo llvm-cov report --json --output-path coverage-all-features.json
+          cargo llvm-cov report --lcov --output-path coverage-all-features.lcov
+          cargo llvm-cov report --html --output-dir coverage-all-features-html
+          cargo llvm-cov report --show-missing-lines > coverage-all-features-missing.txt
+          python3 scripts/check_coverage.py coverage-all-features.json
+      - name: Collect and report no default features
+        shell: bash
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --locked --no-default-features --workspace --no-report
+          cargo llvm-cov report --json --output-path coverage-no-default-features.json
+          cargo llvm-cov report --lcov --output-path coverage-no-default-features.lcov
+          cargo llvm-cov report --html --output-dir coverage-no-default-features-html
+          cargo llvm-cov report --show-missing-lines > coverage-no-default-features-missing.txt
+          python3 scripts/check_coverage.py coverage-no-default-features.json
       - name: Record coverage environment
+        if: always()
+        shell: bash
         run: |
           {
             echo "commit=${GITHUB_SHA}"
             echo "os=$(uname -a)"
+            echo "architecture=$(uname -m)"
             echo "rustc=$(rustc --version)"
             echo "cargo_llvm_cov=$(cargo llvm-cov --version)"
-            echo "features=all-features and no-default-features"
+            echo "features=default, all-features and no-default-features"
             echo "branch_metrics=unavailable in the generated Rust coverage report"
           } > coverage-metadata.txt
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: coverage-${{ runner.os }}-${{ runner.arch }}
           path: |
             coverage-*.lcov
+            coverage-*.json
+            coverage-*-missing.txt
+            coverage-*-html/
             coverage-metadata.txt

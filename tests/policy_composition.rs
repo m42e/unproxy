@@ -1,5 +1,5 @@
-use unproxy::pac::{Pac, Policy};
 use std::net::IpAddr;
+use unproxy::pac::{Pac, Policy};
 
 #[tokio::test]
 async fn policy_runtimes_are_isolated_and_direct_policies_fall_through() {

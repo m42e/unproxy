@@ -1,11 +1,11 @@
-use unproxy::dns::{exchange, exchange_primary, needs_fallback, parse_counts};
-use unproxy::{net::ConnectionOptions, route::Route};
 use std::net::Ipv4Addr;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
     time::timeout,
 };
+use unproxy::dns::{exchange, exchange_primary, needs_fallback, parse_counts};
+use unproxy::{net::ConnectionOptions, route::Route};
 
 #[test]
 fn dns_wire_parser_checks_all_declared_sections() {

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use unproxy::pac::Pac;
 use std::{env, fs};
+use unproxy::pac::Pac;
 
 fn run() -> Result<()> {
     let raw_args: Vec<String> = env::args().skip(1).collect();

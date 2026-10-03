@@ -1,10 +1,23 @@
 use std::process::Command;
 
 fn xtask(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .args(args)
-        .output()
-        .unwrap()
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+    command.args(args);
+    inherit_coverage_profile(&mut command);
+    command.output().unwrap()
+}
+
+fn inherit_coverage_profile(command: &mut Command) {
+    let Some(pattern) = std::env::var_os("LLVM_PROFILE_FILE") else {
+        return;
+    };
+    let pattern = pattern.to_string_lossy();
+    let unique = if pattern.contains("%p") && pattern.contains("%m") {
+        pattern.into_owned()
+    } else {
+        format!("{pattern}.child-%p-%m.profraw")
+    };
+    command.env("LLVM_PROFILE_FILE", unique);
 }
 
 #[test]

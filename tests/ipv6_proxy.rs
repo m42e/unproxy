@@ -1,9 +1,9 @@
-use unproxy::{net::ConnectionOptions, pac::Policy, proxy::ContextBuilder};
 use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
+use unproxy::{net::ConnectionOptions, pac::Policy, proxy::ContextBuilder};
 
 async fn read_head<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Vec<u8> {
     let mut head = Vec::new();

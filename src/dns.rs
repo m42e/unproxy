@@ -310,16 +310,57 @@ pub async fn serve(
     proxy: crate::route::Route,
     options: crate::net::ConnectionOptions,
 ) -> Result<()> {
+    serve_until(
+        port,
+        primary_addr,
+        secondary_uri,
+        proxy,
+        options,
+        std::future::pending::<()>(),
+    )
+    .await
+}
+
+async fn serve_until(
+    port: u16,
+    primary_addr: SocketAddr,
+    secondary_uri: http::Uri,
+    proxy: crate::route::Route,
+    options: crate::net::ConnectionOptions,
+    shutdown: impl std::future::Future + Unpin,
+) -> Result<()> {
     let socket = UdpSocket::bind(SocketAddr::new(
         IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         port,
     ))
     .await?;
+    serve_socket(
+        socket,
+        primary_addr,
+        secondary_uri,
+        proxy,
+        options,
+        shutdown,
+    )
+    .await
+}
+
+async fn serve_socket(
+    socket: UdpSocket,
+    primary_addr: SocketAddr,
+    secondary_uri: http::Uri,
+    proxy: crate::route::Route,
+    options: crate::net::ConnectionOptions,
+    mut shutdown: impl std::future::Future + Unpin,
+) -> Result<()> {
     tracing::info!(address=%socket.local_addr()?, "undns listening");
     let s = std::sync::Arc::new(socket);
     let mut buf = vec![0; 65507];
     loop {
-        let (n, peer) = s.recv_from(&mut buf).await?;
+        let (n, peer) = tokio::select! {
+            received = s.recv_from(&mut buf) => received?,
+            _ = &mut shutdown => return Ok(()),
+        };
         let q = buf[..n].to_vec();
         let socket = s.clone();
         let secondary_uri = secondary_uri.clone();
@@ -357,5 +398,257 @@ mod tests {
         append_doh_chunk(&mut body, &[0]).unwrap();
         assert_eq!(body.len(), 65_507);
         assert!(append_doh_chunk(&mut body, &[0]).is_err());
+    }
+
+    #[test]
+    fn dns_questions_accept_backward_compression_and_reject_malformed_names() {
+        let mut compressed = vec![0u8; 12];
+        compressed[5] = 2;
+        compressed.extend_from_slice(&[1, b'a', 0, 0, 1, 0, 1]);
+        let name_offset = compressed.len();
+        compressed.extend_from_slice(&[0xc0 | ((12 >> 8) as u8), 12]);
+        compressed.extend_from_slice(&[0, 1, 0, 1]);
+        assert_eq!(parse_counts(&compressed).unwrap().questions, 2);
+        assert_eq!(name_offset, 19);
+
+        for name in [
+            vec![0x40],
+            vec![0x80],
+            vec![0xc0],
+            vec![0xc0, 0xff],
+            vec![0x03, b'a'],
+        ] {
+            let mut packet = vec![0u8; 12];
+            packet[5] = 1;
+            packet.extend_from_slice(&name);
+            assert!(parse_counts(&packet).is_err(), "accepted name {name:?}");
+        }
+
+        let mut too_many_labels = vec![0u8; 12];
+        too_many_labels[5] = 1;
+        for _ in 0..128 {
+            too_many_labels.extend_from_slice(&[1, b'x']);
+        }
+        too_many_labels.push(0);
+        too_many_labels.extend_from_slice(&[0, 1, 0, 1]);
+        assert!(
+            parse_counts(&too_many_labels)
+                .unwrap_err()
+                .to_string()
+                .contains("too many DNS labels")
+        );
+    }
+
+    #[test]
+    fn dns_compression_chain_depth_and_resource_record_bounds_are_checked() {
+        fn question_chain(pointer_count: usize) -> Vec<u8> {
+            let mut packet = vec![0u8; 12];
+            let count = u16::try_from(pointer_count + 1).unwrap();
+            packet[4..6].copy_from_slice(&count.to_be_bytes());
+            packet.extend_from_slice(&[0, 0, 1, 0, 1]);
+            let mut previous = 12usize;
+            for _ in 0..pointer_count {
+                let current = packet.len();
+                packet.extend_from_slice(&[0xc0 | ((previous >> 8) as u8), previous as u8]);
+                packet.extend_from_slice(&[0, 1, 0, 1]);
+                previous = current;
+            }
+            packet
+        }
+        assert!(parse_counts(&question_chain(32)).is_ok());
+        assert!(
+            parse_counts(&question_chain(35))
+                .unwrap_err()
+                .to_string()
+                .contains("too deep")
+        );
+
+        for section in [6, 8, 10] {
+            let mut packet = vec![0u8; 12];
+            packet[section + 1] = 1;
+            packet.push(0); // root owner name
+            assert!(parse_counts(&packet).is_err()); // truncated fixed RR
+
+            packet.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 1, 0, 1]);
+            assert!(parse_counts(&packet).is_err()); // declared RDATA byte is absent
+
+            packet.push(42);
+            assert!(parse_counts(&packet).is_ok());
+        }
+
+        let mut short_question = vec![0u8; 12];
+        short_question[5] = 1;
+        short_question.push(0);
+        short_question.extend_from_slice(&[0, 1]);
+        assert!(parse_counts(&short_question).is_err());
+        assert!(counts(&[0; 11]).is_err());
+        assert_eq!(
+            counts(&[0; 12]).unwrap(),
+            DnsCounts {
+                questions: 0,
+                answers: 0
+            }
+        );
+    }
+
+    #[test]
+    fn compressed_dns_name_cannot_expand_past_wire_limit() {
+        let mut packet = vec![0u8; 12];
+        packet[5] = 2;
+        for _ in 0..4 {
+            packet.push(63);
+            packet.extend(std::iter::repeat_n(b'x', 63));
+        }
+        packet.push(0);
+        packet.extend_from_slice(&[0, 1, 0, 1]);
+        packet.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1]);
+
+        let error = parse_counts(&packet).unwrap_err().to_string();
+        assert!(error.contains("255 bytes"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn primary_dns_timeout_has_receive_context() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let mut query = vec![0u8; 17];
+        query[5] = 1;
+        query[12..].copy_from_slice(&[0, 0, 1, 0, 1]);
+        let server_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 64];
+            server.recv_from(&mut buffer).await.unwrap();
+        });
+
+        let error = exchange_primary(&query, address).await.unwrap_err();
+        assert!(error.to_string().contains("primary DNS receive timeout"));
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_dns_service_binds_ephemerally_and_stops_cleanly() {
+        let reserved = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let occupied_port = reserved.local_addr().unwrap().port();
+        assert!(
+            serve(
+                occupied_port,
+                "127.0.0.1:53".parse().unwrap(),
+                "https://dns.example.test/dns-query".parse().unwrap(),
+                crate::route::Route::Direct,
+                crate::net::ConnectionOptions::default(),
+            )
+            .await
+            .is_err()
+        );
+
+        let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(serve_until(
+            0,
+            "127.0.0.1:53".parse().unwrap(),
+            "https://dns.example.test/dns-query".parse().unwrap(),
+            crate::route::Route::Direct,
+            crate::net::ConnectionOptions::default(),
+            shutdown,
+        ));
+        stop.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn secondary_authority_and_fallback_inputs_cover_uri_edges() {
+        assert!(!authority_has_explicit_port("resolver.example"));
+        assert!(authority_has_explicit_port(
+            "user:secret@resolver.example:bad"
+        ));
+        assert!(authority_has_explicit_port("[2001:db8::1]:bad"));
+        assert!(!authority_has_explicit_port("[2001:db8::1]"));
+
+        for text in [
+            "http://resolver.example/dns-query",
+            "https:///dns-query",
+            "https://user@resolver.example/dns-query",
+            "https://resolver.example:bad/dns-query",
+            "https://resolver.example:0/dns-query",
+            "https://resolver.example:443/dns-query",
+        ] {
+            if let Ok(uri) = text.parse::<http::Uri>() {
+                let valid = text.ends_with(":443/dns-query");
+                assert_eq!(validate_secondary_uri(&uri).is_ok(), valid, "{text}");
+            }
+        }
+
+        assert!(!needs_fallback(&[0; 12]).unwrap());
+        let mut unanswered = vec![0u8; 17];
+        unanswered[5] = 1;
+        assert!(needs_fallback(&unanswered).unwrap());
+        unanswered[7] = 1;
+        assert!(needs_fallback(&unanswered).is_err());
+    }
+
+    #[tokio::test]
+    async fn udp_service_drops_bad_upstream_reply_then_serves_the_next_query() {
+        let primary = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let primary_address = primary.local_addr().unwrap();
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_address = server.local_addr().unwrap();
+        let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(serve_socket(
+            server,
+            primary_address,
+            "https://dns.example.test/dns-query".parse().unwrap(),
+            crate::route::Route::Http(crate::route::Endpoint {
+                host: "proxy.example.test".into(),
+                port: 8080,
+            }),
+            crate::net::ConnectionOptions::default(),
+            shutdown,
+        ));
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.send_to(&[1, 2], server_address).await.unwrap();
+        let mut upstream = [0u8; 128];
+        let (size, peer) =
+            tokio::time::timeout(Duration::from_secs(2), primary.recv_from(&mut upstream))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&upstream[..size], &[1, 2]);
+        primary.send_to(&[0], peer).await.unwrap();
+
+        let mut response = [0u8; 128];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), client.recv_from(&mut response))
+                .await
+                .is_err()
+        );
+
+        let query = test_query(0x1234);
+        client.send_to(&query, server_address).await.unwrap();
+        let (size, peer) =
+            tokio::time::timeout(Duration::from_secs(2), primary.recv_from(&mut upstream))
+                .await
+                .unwrap()
+                .unwrap();
+        let mut answer = upstream[..size].to_vec();
+        answer[6..8].copy_from_slice(&1u16.to_be_bytes());
+        answer.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 7]);
+        primary.send_to(&answer, peer).await.unwrap();
+        let (size, _) =
+            tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&response[..size], answer);
+        assert_eq!(parse_counts(&response[..size]).unwrap().answers, 1);
+
+        stop.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    fn test_query(id: u16) -> Vec<u8> {
+        let mut query = vec![0; 12];
+        query[..2].copy_from_slice(&id.to_be_bytes());
+        query[5] = 1;
+        query.extend_from_slice(&[1, b'a', 0, 0, 1, 0, 1]);
+        query
     }
 }

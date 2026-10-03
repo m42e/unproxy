@@ -15,6 +15,26 @@ fn nested_toml_and_errors() {
     }
     assert!(query_toml("broken =", &["broken".into()]).is_err());
     assert!(query_toml(input, &["missing".into()]).is_err());
+    assert!(
+        query_toml(
+            input,
+            &["a".into(), "b".into(), "0".into(), "c".into(), "0".into()]
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn product_version_rejects_unknown_packages() {
+    assert_eq!(
+        unproxy::tools::product_version("unproxy").unwrap(),
+        unproxy::VERSION
+    );
+    assert_eq!(
+        unproxy::tools::product_version("undns").unwrap(),
+        unproxy::DNS_VERSION
+    );
+    assert!(unproxy::tools::product_version("unknown").is_err());
 }
 #[test]
 fn bump_preserves_comments() {

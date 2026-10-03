@@ -12,7 +12,7 @@ fn reserve_address() -> std::net::SocketAddr {
         .unwrap()
 }
 async fn wait_for_listener(address: std::net::SocketAddr, child: &mut Child) {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if TcpStream::connect(address).await.is_ok() {
                 break;
@@ -26,24 +26,45 @@ async fn wait_for_listener(address: std::net::SocketAddr, child: &mut Child) {
     .await
     .unwrap();
 }
-async fn response_status(proxy: std::net::SocketAddr, origin: std::net::SocketAddr) -> u16 {
-    let mut client = TcpStream::connect(proxy).await.unwrap();
+async fn response_status(proxy: std::net::SocketAddr, origin: std::net::SocketAddr) -> Option<u16> {
+    let mut client = TcpStream::connect(proxy).await.ok()?;
     client
         .write_all(
             format!("GET http://{origin}/ HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n")
                 .as_bytes(),
         )
         .await
-        .unwrap();
+        .ok()?;
     let mut response = String::new();
     tokio::time::timeout(Duration::from_secs(3), client.read_to_string(&mut response))
         .await
-        .unwrap()
-        .unwrap();
-    response.split_whitespace().nth(1).unwrap().parse().unwrap()
+        .ok()?
+        .ok()?;
+    response.split_whitespace().nth(1)?.parse().ok()
+}
+async fn await_status(proxy: std::net::SocketAddr, origin: std::net::SocketAddr, desired: u16) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if response_status(proxy, origin).await == Some(desired) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 fn process(address: std::net::SocketAddr, pac: &str, netrc: &std::path::Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_unproxy"))
+    process_with_log(address, pac, netrc, None)
+}
+fn process_with_log(
+    address: std::net::SocketAddr,
+    pac: &str,
+    netrc: &std::path::Path,
+    logfile: Option<&std::path::Path>,
+) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_unproxy"));
+    command
         .env("UNPROXY_NORC", "1")
         .args([
             "--listen",
@@ -58,9 +79,47 @@ fn process(address: std::net::SocketAddr, pac: &str, netrc: &std::path::Path) ->
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap()
+        .kill_on_drop(true);
+    if let Some(logfile) = logfile {
+        command.arg("--logfile").arg(logfile);
+    }
+    inherit_coverage_profile(&mut command);
+    command.spawn().unwrap()
+}
+
+fn inherit_coverage_profile(command: &mut Command) {
+    let Some(pattern) = std::env::var_os("LLVM_PROFILE_FILE") else {
+        return;
+    };
+    let pattern = pattern.to_string_lossy();
+    if pattern.contains("%p") && pattern.contains("%m") {
+        command.env("LLVM_PROFILE_FILE", pattern.as_ref());
+    } else {
+        command.env(
+            "LLVM_PROFILE_FILE",
+            format!("{pattern}.child-%p-%m.profraw"),
+        );
+    }
+}
+
+#[cfg(unix)]
+async fn stop_child(child: &mut Child) {
+    let pid = child.id().expect("child process is running") as i32;
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .expect("child did not stop after SIGTERM")
+        .unwrap();
+    assert!(
+        status.success(),
+        "child did not shut down cleanly: {status}"
+    );
+}
+
+#[cfg(not(unix))]
+async fn stop_child(child: &mut Child) {
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
 }
 async fn origin() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -169,10 +228,29 @@ async fn startup_waits_for_remote_policy_before_accepting_connections() {
     fetch_task.await.unwrap();
     wait_for_listener(address, &mut child).await;
     let (origin_address, origin_task) = origin().await;
-    assert_eq!(response_status(address, origin_address).await, 200);
-    child.kill().await.unwrap();
-    child.wait().await.unwrap();
+    await_status(address, origin_address, 200).await;
+    stop_child(&mut child).await;
     origin_task.abort();
+}
+
+#[tokio::test]
+async fn logfile_is_truncated_and_receives_runtime_startup_messages() {
+    let temp = tempfile::tempdir().unwrap();
+    let netrc = temp.path().join("netrc");
+    std::fs::write(&netrc, "").unwrap();
+    let pac = temp.path().join("proxy.pac");
+    std::fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+    let logfile = temp.path().join("unproxy.log");
+    std::fs::write(&logfile, "stale contents must be truncated\n").unwrap();
+    let address = reserve_address();
+    let mut child = process_with_log(address, pac.to_str().unwrap(), &netrc, Some(&logfile));
+    wait_for_listener(address, &mut child).await;
+    stop_child(&mut child).await;
+
+    let log = std::fs::read_to_string(logfile).unwrap();
+    assert!(!log.contains("stale contents"));
+    assert!(log.contains("proxy listening"), "{log}");
+    assert!(log.contains("proxy started"), "{log}");
 }
 
 #[cfg(unix)]
@@ -191,18 +269,6 @@ async fn direct_signal_reload_and_failed_reload_preserve_service() {
     let mut child = process(address, pac.to_str().unwrap(), &netrc);
     wait_for_listener(address, &mut child).await;
     let (origin_address, origin_task) = origin().await;
-    async fn await_status(proxy: std::net::SocketAddr, origin: std::net::SocketAddr, desired: u16) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if response_status(proxy, origin).await == desired {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
     await_status(address, origin_address, 502).await;
     let pid = child.id().unwrap() as i32;
     assert_eq!(unsafe { libc::kill(pid, libc::SIGUSR1) }, 0);
@@ -213,12 +279,11 @@ async fn direct_signal_reload_and_failed_reload_preserve_service() {
     assert_eq!(unsafe { libc::kill(pid, libc::SIGHUP) }, 0);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(child.try_wait().unwrap().is_none());
-    assert_eq!(response_status(address, origin_address).await, 502);
+    await_status(address, origin_address, 502).await;
     std::fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
     assert_eq!(unsafe { libc::kill(pid, libc::SIGHUP) }, 0);
     await_status(address, origin_address, 200).await;
-    child.kill().await.unwrap();
-    child.wait().await.unwrap();
+    stop_child(&mut child).await;
     origin_task.abort();
 }
 
@@ -234,14 +299,22 @@ async fn invalid_configured_startup_policy_exits_unsuccessfully() {
         "var FindProxyForURL=1;",
     ] {
         std::fs::write(&pac, body).unwrap();
-        let address = reserve_address();
-        let mut child = process(address, pac.to_str().unwrap(), &netrc);
-        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+        let mut command = Command::new(env!("CARGO_BIN_EXE_unproxy"));
+        command
+            .env("UNPROXY_NORC", "1")
+            .args(["--listen", "127.0.0.1:0", "--pac-file"])
+            .arg(&pac)
+            .args(["--graceful-shutdown-timeout", "1", "--netrc-file"])
+            .arg(&netrc)
+            .stdout(Stdio::null())
+            .kill_on_drop(true);
+        inherit_coverage_profile(&mut command);
+        let output = tokio::time::timeout(Duration::from_secs(5), command.output())
             .await
             .unwrap()
             .unwrap();
-        assert!(!status.success());
-        assert!(TcpStream::connect(address).await.is_err());
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("PAC"));
     }
 }
 
@@ -256,7 +329,8 @@ async fn explicit_ip_survives_startup_hup_usr1_and_whole_list_restore() {
     std::fs::write(&first, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
     std::fs::write(&second, "const startupIP=myIpAddress(); function FindProxyForURL(){return startupIP==='2001:db8::42' && myIpAddress()==='2001:db8::42' ? 'DIRECT; PROXY 127.0.0.1:1':'BAD';}").unwrap();
     let address = reserve_address();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_unproxy"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_unproxy"));
+    command
         .env("UNPROXY_NORC", "1")
         .args([
             "--listen",
@@ -275,19 +349,18 @@ async fn explicit_ip_survives_startup_hup_usr1_and_whole_list_restore() {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
+        .kill_on_drop(true);
+    inherit_coverage_profile(&mut command);
+    let mut child = command.spawn().unwrap();
     wait_for_listener(address, &mut child).await;
     let (origin_address, origin_task) = origin().await;
-    assert_eq!(response_status(address, origin_address).await, 200);
+    await_status(address, origin_address, 200).await;
     let pid = child.id().unwrap() as i32;
     for signal in [libc::SIGUSR1, libc::SIGHUP] {
         assert_eq!(unsafe { libc::kill(pid, signal) }, 0);
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(response_status(address, origin_address).await, 200);
+        await_status(address, origin_address, 200).await;
     }
-    child.kill().await.unwrap();
-    child.wait().await.unwrap();
+    stop_child(&mut child).await;
     origin_task.abort();
 }

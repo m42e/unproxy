@@ -246,6 +246,29 @@ impl AuthFactory {
         }
     }
     pub async fn authorization(&self, host: &str) -> Result<Option<HeaderValue>> {
+        #[cfg(feature = "negotiate")]
+        {
+            self.authorization_with(host, native::initial_token).await
+        }
+        #[cfg(not(feature = "negotiate"))]
+        {
+            self.authorization_with(host, |_| {
+                Err(anyhow!("native Negotiate is unavailable in this build"))
+            })
+            .await
+        }
+    }
+
+    async fn authorization_with<F>(
+        &self,
+        host: &str,
+        negotiate_token: F,
+    ) -> Result<Option<HeaderValue>>
+    where
+        F: Fn(&str) -> Result<Option<Vec<u8>>> + Copy + Send + 'static,
+    {
+        #[cfg(not(feature = "negotiate"))]
+        let _ = negotiate_token;
         let mode = self.mode.clone();
         let host = host.to_owned();
         let timeout_host = host.clone();
@@ -266,21 +289,7 @@ impl AuthFactory {
                     }
                     #[cfg(feature = "negotiate")]
                     AuthMode::Negotiate(hosts) => {
-                        if !hosts.is_empty() && !hosts.iter().any(|h| h == &host) {
-                            return Ok(None);
-                        }
-                        let mut context = NegotiateContext::new(&host).with_context(|| {
-                            format!("initializing Negotiate for upstream {host}")
-                        })?;
-                        let token = context.step(None).with_context(|| {
-                            format!("generating Negotiate token for upstream {host}")
-                        })?;
-                        Ok(token
-                            .map(|t| {
-                                HeaderValue::from_str(&format!("Negotiate {}", STANDARD.encode(t)))
-                                    .context("invalid Negotiate header")
-                            })
-                            .transpose()?)
+                        negotiate_header(&host, &hosts, || negotiate_token(&host))
                     }
                 }
             }),
@@ -291,267 +300,31 @@ impl AuthFactory {
     }
 }
 
-/// Stateful native SPNEGO exchange. The dynamic library is retained with the context.
-#[cfg(all(feature = "negotiate", unix))]
-pub struct NegotiateContext {
-    lib: libloading::Library,
-    ctx: *mut std::ffi::c_void,
-    target: *mut std::ffi::c_void,
-    host: String,
-}
-#[cfg(all(feature = "negotiate", unix))]
-#[repr(C)]
-struct GssBuf {
-    len: usize,
-    value: *mut std::ffi::c_void,
-}
-#[cfg(all(feature = "negotiate", unix))]
-#[repr(C)]
-struct GssOid {
-    len: u32,
-    elements: *mut std::ffi::c_void,
-}
-#[cfg(all(feature = "negotiate", unix))]
-type GssStatus = i32;
-#[cfg(all(feature = "negotiate", unix))]
-type GssInitSecContext = unsafe extern "C" fn(
-    *mut u32,
-    *mut std::ffi::c_void,
-    *mut *mut std::ffi::c_void,
-    *mut std::ffi::c_void,
-    *mut GssOid,
-    u32,
-    u32,
-    *mut std::ffi::c_void,
-    *mut GssBuf,
-    *mut *mut GssOid,
-    *mut GssBuf,
-    *mut u32,
-    *mut u32,
-) -> GssStatus;
-#[cfg(all(feature = "negotiate", unix))]
-type GssReleaseBuffer = unsafe extern "C" fn(*mut u32, *mut GssBuf) -> GssStatus;
-#[cfg(all(feature = "negotiate", unix))]
-type GssDeleteContext =
-    unsafe extern "C" fn(*mut u32, *mut *mut std::ffi::c_void, *mut GssBuf) -> GssStatus;
-#[cfg(all(feature = "negotiate", unix))]
-type GssReleaseName = unsafe extern "C" fn(*mut u32, *mut *mut std::ffi::c_void) -> GssStatus;
-#[cfg(all(feature = "negotiate", unix))]
-impl NegotiateContext {
-    pub fn new(host: &str) -> Result<Self> {
-        unsafe {
-            let names: [&str; 5] = [
-                "libgssapi_krb5.so.2",
-                "libgssapi.so.3",
-                "libgssapi_krb5.dylib",
-                "/System/Library/Frameworks/GSS.framework/GSS",
-                "libgssapi.dylib",
-            ];
-            let lib = names
-                .iter()
-                .find_map(|n| libloading::Library::new(n).ok())
-                .ok_or_else(|| anyhow!("GSSAPI library is unavailable"))?;
-            let import: libloading::Symbol<
-                unsafe extern "C" fn(
-                    *mut u32,
-                    *mut GssBuf,
-                    *mut GssOid,
-                    *mut *mut std::ffi::c_void,
-                ) -> GssStatus,
-            > = lib.get(b"gss_import_name\0")?;
-            let mut ty = std::ptr::null_mut();
-            let mut output = 0;
-            let mut name = GssBuf {
-                len: 0,
-                value: std::ptr::null_mut(),
-            };
-            let target = format!("HTTP@{host}");
-            name.len = target.len();
-            name.value = target.as_ptr() as *mut _;
-            // host-based service name OID 1.2.840.113554.1.2.1.4
-            let mut name_oid_bytes: [u8; 10] =
-                [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x01, 0x04];
-            let mut name_oid = GssOid {
-                len: 10,
-                elements: name_oid_bytes.as_mut_ptr().cast(),
-            };
-            let status = import(&mut output, &mut name, &mut name_oid, &mut ty);
-            if status != 0 {
-                return Err(anyhow!(
-                    "GSSAPI name import failed for HTTP@{host}: major={status} ({}), minor={output} ({})",
-                    gss_status_text(&lib, status as u32, 1),
-                    gss_status_text(&lib, output, 2)
-                ));
-            }
-            Ok(Self {
-                lib,
-                ctx: std::ptr::null_mut(),
-                target: ty,
-                host: host.to_owned(),
-            })
-        }
+#[cfg(feature = "negotiate")]
+fn negotiate_header(
+    host: &str,
+    allowed_hosts: &[String],
+    initial_token: impl FnOnce() -> Result<Option<Vec<u8>>>,
+) -> Result<Option<HeaderValue>> {
+    if !allowed_hosts.is_empty() && !allowed_hosts.iter().any(|allowed| allowed == host) {
+        return Ok(None);
     }
-    pub fn step(&mut self, server_token: Option<&[u8]>) -> Result<Option<Vec<u8>>> {
-        unsafe {
-            let f: libloading::Symbol<GssInitSecContext> = self
-                .lib
-                .get(b"gss_init_sec_context\0")
-                .context(format!("loading GSSAPI context step for {}", self.host))?;
-            let mut input = GssBuf {
-                len: server_token.map_or(0, |v| v.len()),
-                value: server_token.map_or(std::ptr::null_mut::<std::ffi::c_void>(), |v| {
-                    v.as_ptr() as *mut std::ffi::c_void
-                }),
-            };
-            let mut out = GssBuf {
-                len: 0,
-                value: std::ptr::null_mut(),
-            };
-            let mut mech_bytes: [u8; 6] = [0x2b, 0x06, 0x01, 0x05, 0x05, 0x02];
-            let mut mech = GssOid {
-                len: 6,
-                elements: mech_bytes.as_mut_ptr().cast(),
-            };
-            let mut flags = 0;
-            let mut minor = 0;
-            // GSS_C_NO_CREDENTIAL = NULL, mutual-auth flag = 2.
-            let status = f(
-                &mut minor,
-                std::ptr::null_mut(),
-                &mut self.ctx,
-                self.target,
-                &mut mech,
-                2,
-                0,
-                std::ptr::null_mut(),
-                &mut input,
-                std::ptr::null_mut(),
-                &mut out,
-                &mut flags,
-                std::ptr::null_mut(),
-            );
-            let error = (status as u32 & 0xffff_0000) != 0;
-            let bytes = if out.len == 0 {
-                None
-            } else {
-                Some(std::slice::from_raw_parts(out.value as *const u8, out.len).to_vec())
-            };
-            release_gss_buffer(&self.lib, &mut minor, &mut out);
-            if error {
-                return Err(anyhow!(
-                    "Negotiate token step for {} failed: major={} ({}), minor={} ({})",
-                    self.host,
-                    status,
-                    gss_status_text(&self.lib, status as u32, 1),
-                    minor,
-                    gss_status_text(&self.lib, minor, 2)
-                ));
-            }
-            Ok(bytes)
-        }
-    }
+    let token = initial_token()
+        .with_context(|| format!("generating Negotiate authorization for upstream {host}"))?;
+    token
+        .map(|token| {
+            HeaderValue::from_str(&format!("Negotiate {}", STANDARD.encode(token)))
+                .context("invalid Negotiate header")
+        })
+        .transpose()
 }
-#[cfg(all(feature = "negotiate", unix))]
-unsafe fn release_gss_buffer(lib: &libloading::Library, minor: &mut u32, buf: &mut GssBuf) {
-    if !buf.value.is_null()
-        && let Ok(f) = unsafe { lib.get::<GssReleaseBuffer>(b"gss_release_buffer\0") }
-    {
-        unsafe {
-            f(minor, buf);
-        }
-    }
-}
-#[cfg(all(feature = "negotiate", unix))]
-fn gss_status_text(lib: &libloading::Library, value: u32, kind: i32) -> String {
-    unsafe {
-        let Ok(f) = lib.get::<unsafe extern "C" fn(
-            *mut u32,
-            u32,
-            i32,
-            *mut GssOid,
-            *mut u32,
-            *mut GssBuf,
-        ) -> GssStatus>(b"gss_display_status\0") else {
-            return "status text unavailable".into();
-        };
-        let (mut ctx, mut texts) = (0u32, Vec::new());
-        loop {
-            let (mut minor, mut buf) = (
-                0u32,
-                GssBuf {
-                    len: 0,
-                    value: std::ptr::null_mut(),
-                },
-            );
-            let result = f(
-                &mut minor,
-                value,
-                kind,
-                std::ptr::null_mut(),
-                &mut ctx,
-                &mut buf,
-            );
-            if result != 0 || buf.value.is_null() {
-                break;
-            }
-            texts.push(
-                String::from_utf8_lossy(std::slice::from_raw_parts(
-                    buf.value as *const u8,
-                    buf.len,
-                ))
-                .into_owned(),
-            );
-            release_gss_buffer(lib, &mut minor, &mut buf);
-            if ctx == 0 || texts.len() > 8 {
-                break;
-            }
-        }
-        if texts.is_empty() {
-            "status text unavailable".into()
-        } else {
-            texts.join("; ")
-        }
-    }
-}
-#[cfg(all(feature = "negotiate", unix))]
-impl Drop for NegotiateContext {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.ctx.is_null()
-                && let Ok(delete) = self
-                    .lib
-                    .get::<GssDeleteContext>(b"gss_delete_sec_context\0")
-            {
-                let mut minor = 0;
-                let mut out = GssBuf {
-                    len: 0,
-                    value: std::ptr::null_mut(),
-                };
-                delete(&mut minor, &mut self.ctx, &mut out);
-                if !out.value.is_null()
-                    && let Ok(release) = self.lib.get::<GssReleaseBuffer>(b"gss_release_buffer\0")
-                {
-                    release(&mut minor, &mut out);
-                }
-            }
-            if !self.target.is_null()
-                && let Ok(release) = self.lib.get::<GssReleaseName>(b"gss_release_name\0")
-            {
-                let mut minor = 0;
-                release(&mut minor, &mut self.target);
-            }
-        }
-    }
-}
-#[cfg(all(feature = "negotiate", not(unix), not(windows)))]
-impl NegotiateContext {
-    pub fn new(_: &str) -> Result<Self> {
-        Err(anyhow!("native Negotiate unavailable on this platform"))
-    }
-    pub fn step(&mut self, _: Option<&[u8]>) -> Result<Option<Vec<u8>>> {
-        Err(anyhow!("native Negotiate unavailable"))
-    }
-}
+
+#[cfg(feature = "negotiate")]
+#[path = "auth/native.rs"]
+mod native;
+#[cfg(feature = "negotiate")]
+pub use native::NegotiateContext;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,192 +352,177 @@ mod tests {
         assert!(c.replace_netrc("machine broken").is_err());
         assert_eq!(c.get("a").unwrap().0, "joe")
     }
-    #[cfg(all(feature = "negotiate", unix))]
+
     #[test]
-    fn native_gss_context_step_is_safe_without_a_ticket_fixture() {
-        let mut context = match NegotiateContext::new("localhost") {
-            Ok(c) => c,
-            Err(e) if e.to_string().contains("GSSAPI library is unavailable") => return,
-            Err(e) => panic!("GSSAPI name import failed: {e:#}"),
-        };
-        match context.step(None) {
-            Ok(None) => {}
-            Ok(Some(token)) => assert!(!token.is_empty()),
-            Err(e) => assert!(e.to_string().contains("localhost"), "{e:#}"),
+    fn netrc_quoting_escaping_comments_and_account_tokens_are_parsed() {
+        let store = CredentialStore::parse(
+            "machine 'corp host' login \"alice name\" password 'p # ss' account billing\n\
+             machine escaped login foo\\ bar password x\\#y # ignored comment\n\
+             default user fallback passwd",
+        )
+        .unwrap();
+        assert_eq!(
+            store.get("corp host"),
+            Some(("alice name".into(), "p # ss".into()))
+        );
+        assert_eq!(store.get("escaped"), Some(("foo bar".into(), "x#y".into())));
+        assert_eq!(store.get("other"), Some(("fallback".into(), "".into())));
+
+        let adjacent_comment = CredentialStore::parse(
+            "machine inline login person#discarded until newline\npassword secret",
+        )
+        .unwrap();
+        assert_eq!(
+            adjacent_comment.get("inline"),
+            Some(("person".into(), "secret".into()))
+        );
+        assert!(CredentialStore::parse("machine terminal user person account").is_ok());
+        assert_eq!(
+            CredentialStore::parse("machine  spaced login person")
+                .unwrap()
+                .get("spaced"),
+            Some(("person".into(), "".into()))
+        );
+
+        for input in [
+            "machine host",
+            "machine host password secret",
+            "default password secret",
+            "machine host login user unsupported value",
+            "nonsense host login user",
+            "machine host login user \\",
+            "machine host login 'unterminated",
+        ] {
+            assert!(CredentialStore::parse(input).is_err(), "accepted {input:?}");
         }
     }
-    #[cfg(all(feature = "negotiate", unix))]
-    #[test]
-    #[ignore = "requires a configured native GSS identity or ticket cache"]
-    fn native_gss_context_step_uses_host_based_spnego() {
-        let mut context = NegotiateContext::new("localhost").unwrap();
-        let token = context.step(None).unwrap().expect("initial SPNEGO token");
-        assert!(!token.is_empty());
-    }
-}
 
-#[cfg(all(feature = "negotiate", windows))]
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct SecHandle {
-    a: usize,
-    b: usize,
-}
-#[cfg(all(feature = "negotiate", windows))]
-#[repr(C)]
-struct SecBuffer {
-    size: u32,
-    kind: u32,
-    data: *mut std::ffi::c_void,
-}
-#[cfg(all(feature = "negotiate", windows))]
-#[repr(C)]
-struct SecBufferDesc {
-    version: u32,
-    count: u32,
-    buffers: *mut SecBuffer,
-}
-#[cfg(all(feature = "negotiate", windows))]
-type InitializeSecurityContextW = unsafe extern "system" fn(
-    *mut SecHandle,
-    *mut SecHandle,
-    *const u16,
-    u32,
-    u32,
-    u32,
-    *mut SecBufferDesc,
-    u32,
-    *mut SecHandle,
-    *mut SecBufferDesc,
-    *mut u32,
-    *mut i64,
-) -> i32;
-#[cfg(all(feature = "negotiate", windows))]
-type SspiHandleAction = unsafe extern "system" fn(*mut SecHandle) -> i32;
-#[cfg(all(feature = "negotiate", windows))]
-pub struct NegotiateContext {
-    lib: libloading::Library,
-    cred: SecHandle,
-    ctx: SecHandle,
-    target: Vec<u16>,
-}
-#[cfg(all(feature = "negotiate", windows))]
-impl NegotiateContext {
-    pub fn new(host: &str) -> Result<Self> {
-        unsafe {
-            let lib = libloading::Library::new("secur32.dll").context("loading Windows SSPI")?;
-            let acquire: libloading::Symbol<
-                unsafe extern "system" fn(
-                    *const u16,
-                    *const u16,
-                    u32,
-                    *mut std::ffi::c_void,
-                    *mut std::ffi::c_void,
-                    *mut std::ffi::c_void,
-                    *mut std::ffi::c_void,
-                    *mut SecHandle,
-                    *mut i64,
-                ) -> i32,
-            > = lib.get(b"AcquireCredentialsHandleW\0")?;
-            let mut cred = SecHandle { a: 0, b: 0 };
-            let package = "Negotiate"
-                .encode_utf16()
-                .chain(Some(0))
-                .collect::<Vec<_>>();
-            let status = acquire(
-                std::ptr::null(),
-                package.as_ptr(),
-                2,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut cred,
-                std::ptr::null_mut(),
-            );
-            if status < 0 {
-                return Err(anyhow!(
-                    "AcquireCredentialsHandleW failed: 0x{:08x}",
-                    status as u32
-                ));
-            }
-            Ok(Self {
-                lib,
-                cred,
-                ctx: SecHandle { a: 0, b: 0 },
-                target: format!("HTTP/{host}")
-                    .encode_utf16()
-                    .chain(Some(0))
-                    .collect(),
+    #[test]
+    fn auth_factory_debug_identifies_modes_without_exposing_passwords() {
+        assert_eq!(format!("{:?}", AuthFactory::no_auth()), "AuthFactory(None)");
+        let credentials =
+            CredentialStore::parse("machine proxy.example login alice password confidential")
+                .unwrap();
+        let debug = format!("{:?}", AuthFactory::basic(credentials));
+        assert!(debug.contains("AuthFactory(Basic)"));
+        assert!(debug.contains("proxy.example"));
+        assert!(!debug.contains("confidential"));
+    }
+
+    #[test]
+    fn credential_files_replace_and_surface_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("netrc");
+        std::fs::write(&path, "machine first login user password one").unwrap();
+        let store = CredentialStore::from_netrc(&path).unwrap();
+        assert_eq!(store.get("first"), Some(("user".into(), "one".into())));
+        std::fs::write(&path, "machine second login user password two").unwrap();
+        store.replace_file(&path).unwrap();
+        assert_eq!(store.hosts(), ["second"]);
+        assert!(store.replace_file(dir.path().join("missing")).is_err());
+        assert!(CredentialStore::from_netrc(dir.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn poisoned_credential_lock_returns_empty_safe_views_and_a_replace_error() {
+        let store = CredentialStore::parse("machine host login user password secret").unwrap();
+        let poisoned = store.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.0.write().unwrap();
+            panic!("poison credential store for this test");
+        })
+        .join();
+        assert!(store.hosts().is_empty());
+        assert!(!format!("{store:?}").contains("secret"));
+        assert!(store.replace_netrc("default login replacement").is_err());
+        assert_eq!(store.get("host"), None);
+    }
+
+    #[test]
+    fn negotiate_challenge_parser_skips_bad_and_non_text_values() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            http::header::PROXY_AUTHENTICATE,
+            HeaderValue::from_static("Negotiate !invalid, Basic realm=proxy"),
+        );
+        headers.append(
+            http::header::PROXY_AUTHENTICATE,
+            HeaderValue::from_static("nEgOtIaTe SGVsbG8="),
+        );
+        headers.append(
+            http::header::PROXY_AUTHENTICATE,
+            HeaderValue::from_bytes(&[0xff]).unwrap(),
+        );
+        assert_eq!(negotiate_server_token(&headers), Some(b"Hello".to_vec()));
+        let mut invalid = HeaderMap::new();
+        invalid.insert(
+            http::header::PROXY_AUTHENTICATE,
+            HeaderValue::from_static("Negotiate invalid-token"),
+        );
+        assert_eq!(negotiate_server_token(&invalid), None);
+    }
+    #[tokio::test]
+    #[cfg(feature = "negotiate")]
+    async fn negotiate_host_restriction_skips_unlisted_hosts_before_native_setup() {
+        let auth = AuthFactory::negotiate(vec!["proxy.corp.test".into()]);
+        assert_eq!(auth.authorization("proxy.public.test").await.unwrap(), None);
+        assert!(format!("{auth:?}").contains("proxy.corp.test"));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "negotiate")]
+    async fn negotiate_factory_uses_injected_token_provider_after_host_check() {
+        let allowed = AuthFactory::negotiate(vec!["proxy.corp.test".into()]);
+        let header = allowed
+            .authorization_with("proxy.corp.test", |_| Ok(Some(b"fixture".to_vec())))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(header, "Negotiate Zml4dHVyZQ==");
+
+        let blocked = allowed
+            .authorization_with("proxy.public.test", |_| {
+                panic!("a disallowed host must not request a token")
             })
-        }
+            .await
+            .unwrap();
+        assert!(blocked.is_none());
     }
-    pub fn step(&mut self, _server_token: Option<&[u8]>) -> Result<Option<Vec<u8>>> {
-        unsafe {
-            let init: libloading::Symbol<InitializeSecurityContextW> =
-                self.lib.get(b"InitializeSecurityContextW\0")?;
-            let _ = _server_token; // The Windows adapter intentionally ignores server challenge tokens.
-            let in_desc: *mut SecBufferDesc = std::ptr::null_mut();
-            let mut prior = self.ctx;
-            let prior_ptr = if prior.a == 0 && prior.b == 0 {
-                std::ptr::null_mut()
-            } else {
-                &mut prior as *mut _
-            };
-            let mut next = SecHandle { a: 0, b: 0 };
-            let mut storage = vec![0u8; 65536];
-            let mut outbuf = SecBuffer {
-                size: storage.len() as u32,
-                kind: 2,
-                data: storage.as_mut_ptr() as *mut _,
-            };
-            let mut outdesc = SecBufferDesc {
-                version: 0,
-                count: 1,
-                buffers: &mut outbuf,
-            };
-            let mut attrs = 0;
-            let status = init(
-                &mut self.cred,
-                prior_ptr,
-                self.target.as_ptr(),
-                2,
-                0,
-                0,
-                in_desc,
-                0,
-                &mut next,
-                &mut outdesc,
-                &mut attrs,
-                std::ptr::null_mut(),
-            );
-            if status < 0 {
-                return Err(anyhow!(
-                    "InitializeSecurityContextW failed: 0x{:08x}",
-                    status as u32
-                ));
-            }
-            self.ctx = next;
-            storage.truncate(outbuf.size as usize);
-            Ok((!storage.is_empty()).then_some(storage))
-        }
-    }
-}
 
-#[cfg(all(feature = "negotiate", windows))]
-impl Drop for NegotiateContext {
-    fn drop(&mut self) {
-        unsafe {
-            if (self.ctx.a != 0 || self.ctx.b != 0)
-                && let Ok(f) = self.lib.get::<SspiHandleAction>(b"DeleteSecurityContext\0")
-            {
-                f(&mut self.ctx);
-            }
-            if (self.cred.a != 0 || self.cred.b != 0)
-                && let Ok(f) = self.lib.get::<SspiHandleAction>(b"FreeCredentialsHandle\0")
-            {
-                f(&mut self.cred);
-            }
+    #[tokio::test]
+    #[cfg(feature = "negotiate")]
+    async fn allowed_negotiate_host_runs_the_native_authorization_path() {
+        let auth = AuthFactory::negotiate(Vec::new());
+        match auth.authorization("localhost").await {
+            Ok(Some(value)) => assert!(value.to_str().unwrap().starts_with("Negotiate ")),
+            Ok(None) => panic!("global Negotiate mode should attempt an initial token"),
+            Err(error) => assert!(format!("{error:#}").contains("localhost"), "{error:#}"),
         }
+    }
+    #[test]
+    #[cfg(feature = "negotiate")]
+    fn negotiate_header_enforces_host_allowlist_and_formats_or_omits_tokens() {
+        let allowed = vec!["proxy.corp.test".to_owned()];
+        assert_eq!(
+            negotiate_header("proxy.public.test", &allowed, || {
+                panic!("disallowed hosts must not create native contexts")
+            })
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            negotiate_header("proxy.corp.test", &allowed, || Ok(Some(b"hello".to_vec())))
+                .unwrap()
+                .unwrap(),
+            HeaderValue::from_static("Negotiate aGVsbG8=")
+        );
+        assert!(
+            negotiate_header("any.host", &[], || Ok(None))
+                .unwrap()
+                .is_none()
+        );
+        let error =
+            negotiate_header("broken.host", &[], || Err(anyhow!("fixture error"))).unwrap_err();
+        assert!(format!("{error:#}").contains("broken.host"));
     }
 }

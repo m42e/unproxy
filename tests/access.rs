@@ -78,3 +78,20 @@ fn successful_access_records_mark_missing_size_and_agent() {
     );
     assert!(entry.to_string().contains("200 -b \"-\""));
 }
+
+#[test]
+fn failed_access_records_quote_untrusted_error_text_and_missing_agent() {
+    let request = http::Request::get("http://example.test/resource")
+        .body(())
+        .unwrap();
+    let entry = AccessEntry::for_request(
+        "127.0.0.1:9876".parse().unwrap(),
+        None,
+        &request,
+        Duration::from_millis(5),
+        AccessOutcome::Error("bad \"header\"\\path\r\nnext".into()),
+    );
+    let text = entry.to_string();
+    assert!(text.contains("- \"GET http://example.test/resource HTTP/1.1\""));
+    assert!(text.contains("error: \"bad \\\"header\\\"\\\\path\\r\\nnext\" \"-\""));
+}

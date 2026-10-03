@@ -1,5 +1,5 @@
-use unproxy::{net::ConnectionOptions, pac::Policy, proxy::ContextBuilder, route::PathOrUri};
 use std::sync::Arc;
+use unproxy::{net::ConnectionOptions, pac::Policy, proxy::ContextBuilder, route::PathOrUri};
 
 const URL: &str = "http://example.test/";
 async fn route(policy: &Policy) -> String {

@@ -74,6 +74,14 @@ pub async fn run(a: MainArgs) -> Result<()> {
         interval: a.server_tcp_keepalive_interval,
         retries: a.server_tcp_keepalive_retries,
     };
+    #[cfg(unix)]
+    use tokio::signal::unix::{SignalKind, signal};
+    #[cfg(unix)]
+    let mut hup = signal(SignalKind::hangup())?;
+    #[cfg(unix)]
+    let mut direct = signal(SignalKind::user_defined1())?;
+    #[cfg(unix)]
+    let mut term = signal(SignalKind::terminate())?;
     let mut builder = ContextBuilder::new(policy.clone(), options)
         .connect_timeout(a.connect_timeout)
         .direct_fallback(a.direct_fallback)
@@ -101,14 +109,6 @@ pub async fn run(a: MainArgs) -> Result<()> {
     }
     tracing::info!(pac_sources=?sources,"proxy started");
 
-    #[cfg(unix)]
-    use tokio::signal::unix::{SignalKind, signal};
-    #[cfg(unix)]
-    let mut hup = signal(SignalKind::hangup())?;
-    #[cfg(unix)]
-    let mut direct = signal(SignalKind::user_defined1())?;
-    #[cfg(unix)]
-    let mut term = signal(SignalKind::terminate())?;
     #[cfg(target_os = "macos")]
     let mut notifications = crate::network_notifications::NotificationAdapter::start()
         .context("starting native network notification adapter")?;
@@ -308,6 +308,93 @@ mod tests {
         let auth = load_auth(&args).unwrap();
         let header = auth.authorization("proxy.example").await.unwrap().unwrap();
         assert_eq!(header, "Basic dGVzdC11c2VyOnRlc3QtcGFzcw==");
+    }
+
+    #[cfg(feature = "negotiate")]
+    #[test]
+    fn negotiate_startup_filters_global_empty_host_and_keeps_restrictions() {
+        let args =
+            MainArgs::try_parse_from(["unproxy", "--negotiate", "--negotiate", "proxy.corp.test"])
+                .unwrap();
+        let auth = load_auth(&args).unwrap();
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("proxy.corp.test"));
+        assert!(!debug.contains("\"\","));
+    }
+
+    #[tokio::test]
+    async fn native_network_events_clear_reload_and_retry_policy_transactionally() {
+        use crate::{
+            network_notifications::{NetworkEvent, TransitionState},
+            route::PathOrUri,
+        };
+        use futures_util::stream;
+        use std::{net::SocketAddr, sync::Arc};
+
+        let dir = tempfile::tempdir().unwrap();
+        let pac = dir.path().join("proxy.pac");
+        fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+        let policy = Arc::new(crate::pac::Policy::new(None).unwrap());
+        let input = stream::empty::<std::io::Result<(tokio::io::DuplexStream, SocketAddr)>>();
+        let context =
+            crate::proxy::ContextBuilder::new(policy, crate::net::ConnectionOptions::default())
+                .pac_source(PathOrUri::Path(pac.clone()))
+                .serve_connections(input)
+                .await
+                .unwrap();
+        let mut state = TransitionState::default();
+        assert!(
+            !handle_network_event(&context, &mut state, NetworkEvent::Available)
+                .await
+                .unwrap()
+        );
+        assert!(
+            handle_network_event(&context, &mut state, NetworkEvent::Unavailable)
+                .await
+                .unwrap()
+        );
+        assert!(!context.policy().is_loaded());
+        assert!(
+            !handle_network_event(&context, &mut state, NetworkEvent::Unavailable)
+                .await
+                .unwrap()
+        );
+
+        fs::write(
+            &pac,
+            "function FindProxyForURL(){return 'PROXY restored.test:8080';}",
+        )
+        .unwrap();
+        assert!(
+            handle_network_event(&context, &mut state, NetworkEvent::Available)
+                .await
+                .unwrap()
+        );
+        assert!(context.policy().is_loaded());
+
+        assert!(
+            handle_network_event(&context, &mut state, NetworkEvent::Unavailable)
+                .await
+                .unwrap()
+        );
+        fs::write(&pac, "function {").unwrap();
+        for _ in 0..2 {
+            let error = handle_network_event(&context, &mut state, NetworkEvent::Available)
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("PAC"));
+            assert!(!context.policy().is_loaded());
+        }
+        fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+        assert!(
+            handle_network_event(&context, &mut state, NetworkEvent::Available)
+                .await
+                .unwrap()
+        );
+        assert!(context.policy().is_loaded());
+        assert!(state.is_available());
+        context.shutdown();
+        assert!(context.wait_timeout(Duration::from_secs(1)).await);
     }
 
     #[test]

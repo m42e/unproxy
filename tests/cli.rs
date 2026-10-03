@@ -1,7 +1,23 @@
 use std::process::{Command, Output};
 
 fn run(binary: &str, args: &[&str]) -> Output {
-    Command::new(binary).args(args).output().unwrap()
+    let mut command = Command::new(binary);
+    command.args(args);
+    inherit_coverage_profile(&mut command);
+    command.output().unwrap()
+}
+
+fn inherit_coverage_profile(command: &mut Command) {
+    let Some(pattern) = std::env::var_os("LLVM_PROFILE_FILE") else {
+        return;
+    };
+    let pattern = pattern.to_string_lossy();
+    let unique = if pattern.contains("%p") && pattern.contains("%m") {
+        pattern.into_owned()
+    } else {
+        format!("{pattern}.child-%p-%m.profraw")
+    };
+    command.env("LLVM_PROFILE_FILE", unique);
 }
 
 #[test]
@@ -93,12 +109,81 @@ fn control_clis_report_invalid_commands_and_values_without_side_effects() {
 #[test]
 fn undns_reports_invalid_argument_types_before_starting() {
     let temp = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_undns"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_undns"));
+    command
         .args(["--port", "not-a-port"])
         .env("HOME", temp.path())
-        .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .output()
-        .unwrap();
+        .env("XDG_CONFIG_HOME", temp.path().join("config"));
+    inherit_coverage_profile(&mut command);
+    let output = command.output().unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid value"));
+}
+
+#[test]
+fn unproxy_reads_the_isolated_rc_unless_norc_is_set() {
+    let temp = tempfile::tempdir().unwrap();
+    #[cfg(target_os = "macos")]
+    let config = temp.path().join("Library/Application Support/unproxy");
+    #[cfg(target_os = "windows")]
+    let config = temp.path().join("AppData/Roaming/unproxy");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let config = temp.path().join("config/unproxy");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("unproxyrc"), "--not-a-real-settings-option\n").unwrap();
+
+    let mut with_rc_command = Command::new(env!("CARGO_BIN_EXE_unproxy"));
+    with_rc_command
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env_remove("UNPROXY_NORC");
+    inherit_coverage_profile(&mut with_rc_command);
+    let with_rc = with_rc_command.output().unwrap();
+    assert!(!with_rc.status.success());
+    assert!(String::from_utf8_lossy(&with_rc.stderr).contains("not-a-real-settings-option"));
+
+    let mut ignored_command = Command::new(env!("CARGO_BIN_EXE_unproxy"));
+    ignored_command
+        .arg("--help")
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("UNPROXY_NORC", "1");
+    inherit_coverage_profile(&mut ignored_command);
+    let ignored = ignored_command.output().unwrap();
+    assert!(
+        ignored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ignored.stderr)
+    );
+    assert!(String::from_utf8_lossy(&ignored.stdout).contains("Usage:"));
+}
+
+#[test]
+fn undns_reads_rc_tokens_before_help_and_uses_isolated_config_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    #[cfg(target_os = "macos")]
+    let config = temp.path().join("Library/Application Support/undns");
+    #[cfg(target_os = "windows")]
+    let config = temp.path().join("AppData/Roaming/undns");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let config = temp.path().join("config/undns");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("undnsrc"),
+        "# primary resolver\n\n--primary 127.0.0.1:5353\n--port 5454\n",
+    )
+    .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_undns"));
+    command
+        .arg("--help")
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join("config"));
+    inherit_coverage_profile(&mut command);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("--primary"));
 }

@@ -66,8 +66,10 @@ fn embedded_child_gets_no_rc_environment_without_suppressing_cli_arguments() {
     let mut perms = std::fs::metadata(&program).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&program, perms).unwrap();
-    let mut prefs = Preferences::default();
-    prefs.pac_file = temp.path().join("proxy.pac");
+    let prefs = Preferences {
+        pac_file: temp.path().join("proxy.pac"),
+        ..Preferences::default()
+    };
     std::fs::write(
         &prefs.pac_file,
         "function FindProxyForURL(url, host) { return \"DIRECT\"; }\n",
@@ -123,8 +125,10 @@ fn preferences_create_defaults_and_sanitize_invalid_saved_ports() {
 #[test]
 fn child_start_rejects_relative_and_missing_pac_paths_before_launching() {
     let mut child = ChildLifecycle::default();
-    let mut prefs = Preferences::default();
-    prefs.pac_file = "relative.pac".into();
+    let mut prefs = Preferences {
+        pac_file: "relative.pac".into(),
+        ..Preferences::default()
+    };
     assert!(child.start(std::path::Path::new("unused"), &prefs).is_err());
 
     let temp = tempfile::tempdir().unwrap();

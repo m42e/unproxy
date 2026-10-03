@@ -243,10 +243,10 @@ fn sign_macos_code(path: &Path, entitlements: Option<&Path>) -> Result<()> {
     .with_context(|| format!("verifying signature for {}", path.display()))
 }
 fn pkgbuild_signing_args(command: &mut Command) {
-    if let Ok(identity) = std::env::var("APPLE_INSTALLER_SIGNING_IDENTITY") {
-        if !identity.trim().is_empty() {
-            command.arg("--sign").arg(identity);
-        }
+    if let Ok(identity) = std::env::var("APPLE_INSTALLER_SIGNING_IDENTITY")
+        && !identity.trim().is_empty()
+    {
+        command.arg("--sign").arg(identity);
     }
 }
 fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bool) -> Result<()> {

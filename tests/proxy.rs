@@ -1170,10 +1170,12 @@ async fn ordinary_407_is_a_local_bad_gateway() {
         io.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
         String::from_utf8(request).unwrap()
     });
-    let mut options = ConnectionOptions::default();
-    options.auth = AuthFactory::basic(
-        CredentialStore::parse("machine 127.0.0.1 login alice password secret").unwrap(),
-    );
+    let options = ConnectionOptions {
+        auth: AuthFactory::basic(
+            CredentialStore::parse("machine 127.0.0.1 login alice password secret").unwrap(),
+        ),
+        ..ConnectionOptions::default()
+    };
     let proxy = ContextBuilder::new(Arc::new(policy), options)
         .listen("127.0.0.1:0".parse().unwrap())
         .bind()

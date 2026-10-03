@@ -180,21 +180,93 @@ impl Default for ConnectionOptions {
 }
 
 pub fn configure_keepalive(stream: &TcpStream, keepalive: &Keepalive) -> Result<()> {
+    configure_keepalive_with(stream, keepalive, |socket, time, interval, retries| {
+        let mut options = socket2::TcpKeepalive::new();
+        if let Some(time) = time {
+            options = options.with_time(time);
+        }
+        if let Some(interval) = interval {
+            options = options.with_interval(interval);
+        }
+        #[cfg(unix)]
+        if let Some(retries) = retries {
+            options = options.with_retries(retries);
+        }
+        #[cfg(not(unix))]
+        let _ = retries;
+        socket.set_tcp_keepalive(&options)
+    })
+}
+
+fn configure_keepalive_with(
+    stream: &TcpStream,
+    keepalive: &Keepalive,
+    set_options: impl FnOnce(
+        &socket2::SockRef<'_>,
+        Option<Duration>,
+        Option<Duration>,
+        Option<u32>,
+    ) -> std::io::Result<()>,
+) -> Result<()> {
     stream.set_nodelay(true)?;
     let socket = socket2::SockRef::from(stream);
-    let mut ka = socket2::TcpKeepalive::new();
-    if let Some(time) = keepalive.time {
-        ka = ka.with_time(time);
-    }
-    if let Some(interval) = keepalive.interval {
-        ka = ka.with_interval(interval);
-    }
     #[cfg(unix)]
-    if let Some(retries) = keepalive.retries {
-        ka = ka.with_retries(retries);
-    }
-    socket.set_tcp_keepalive(&ka)?;
+    let retries = keepalive.retries;
+    #[cfg(not(unix))]
+    let retries = None;
+    set_options(&socket, keepalive.time, keepalive.interval, retries)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod keepalive_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn configure_keepalive_passes_each_option_to_the_socket_setter() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let cases = [
+            Keepalive {
+                time: Some(Duration::from_secs(30)),
+                ..Keepalive::default()
+            },
+            Keepalive {
+                interval: Some(Duration::from_secs(10)),
+                ..Keepalive::default()
+            },
+            Keepalive {
+                retries: Some(3),
+                ..Keepalive::default()
+            },
+            Keepalive {
+                time: Some(Duration::from_secs(30)),
+                interval: Some(Duration::from_secs(10)),
+                retries: Some(3),
+            },
+        ];
+
+        for keepalive in cases {
+            let stream = TcpStream::connect(address).await.unwrap();
+            let _peer = listener.accept().await.unwrap();
+            let mut received = None;
+            configure_keepalive_with(&stream, &keepalive, |_, time, interval, retries| {
+                received = Some((time, interval, retries));
+                Ok(())
+            })
+            .unwrap();
+
+            assert!(stream.nodelay().unwrap());
+            #[cfg(unix)]
+            let expected_retries = keepalive.retries;
+            #[cfg(not(unix))]
+            let expected_retries = None;
+            assert_eq!(
+                received,
+                Some((keepalive.time, keepalive.interval, expected_retries))
+            );
+        }
+    }
 }
 
 async fn tcp(
@@ -500,6 +572,214 @@ mod pac_redirect_tests {
         assert!(validate_pac_redirect("https", &http).is_err());
         assert!(validate_pac_redirect("https", &https).is_ok());
         assert!(validate_pac_redirect("http", &https).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod pac_body_tests {
+    use super::*;
+    use std::task::{Context as TaskContext, Poll};
+
+    async fn input(bytes: &[u8]) -> BoxedIo {
+        let (mut writer, reader) = tokio::io::duplex(bytes.len().saturating_add(1));
+        writer.write_all(bytes).await.unwrap();
+        drop(writer);
+        Box::new(reader)
+    }
+
+    #[tokio::test]
+    async fn response_head_and_chunk_lines_enforce_limits_and_eof() {
+        let mut io = input(b"HTTP/1.1 200 OK\r\n").await;
+        assert!(
+            read_http_head(&mut io)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("closed")
+        );
+
+        let oversized_head = vec![b'x'; 64 * 1024 + 1];
+        let mut io = input(&oversized_head).await;
+        assert!(
+            read_http_head(&mut io)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("64 KiB")
+        );
+
+        let mut io = input(b"3").await;
+        assert!(
+            read_crlf_line(&mut io)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("truncated")
+        );
+
+        let mut long_line = vec![b'x'; 8193];
+        long_line.extend_from_slice(b"\r\n");
+        let mut io = input(&long_line).await;
+        assert!(
+            read_crlf_line(&mut io)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("too long")
+        );
+    }
+
+    #[tokio::test]
+    async fn chunked_pac_body_accepts_trailers_and_rejects_bad_framing() {
+        let mut io = input(b"3;name=value\r\nabc\r\n0\r\nX-Checksum: yes\r\n\r\n").await;
+        assert_eq!(
+            read_pac_body(
+                &mut io,
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+            )
+            .await
+            .unwrap(),
+            b"abc"
+        );
+
+        for (body, expected) in [
+            (&b"x\r\n"[..], "invalid chunk size"),
+            (&b"800001\r\n"[..], "8 MiB"),
+            (&b"1\r\naXX"[..], "invalid chunk framing"),
+            (&b"1\r\na"[..], "early eof"),
+        ] {
+            let mut io = input(body).await;
+            let error = read_pac_body(
+                &mut io,
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.to_lowercase().contains(&expected.to_lowercase()),
+                "expected {expected:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pac_body_content_length_is_validated_before_reading() {
+        let mut io = input(b"").await;
+        assert!(
+            read_pac_body(&mut io, "HTTP/1.1 200 OK\r\nContent-Length: nope\r\n\r\n")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("invalid Content-Length")
+        );
+
+        let mut io = input(b"").await;
+        assert!(
+            read_pac_body(
+                &mut io,
+                "HTTP/1.1 200 OK\r\nContent-Length: 8388609\r\n\r\n"
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("8 MiB")
+        );
+    }
+
+    struct OneRead {
+        sent: bool,
+    }
+
+    impl AsyncRead for OneRead {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+            output: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if !self.sent {
+                output.put_slice(b"hello");
+                self.sent = true;
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for OneRead {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+            _: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Pending
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct PartialWrite {
+        written: usize,
+    }
+
+    impl AsyncRead for PartialWrite {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+            _: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for PartialWrite {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.written >= 2 {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "partial destination failure",
+                )));
+            }
+            let count = bytes.len().min(2 - self.written);
+            self.written += count;
+            Poll::Ready(Ok(count))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _: &mut TaskContext<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_error_preserves_partial_directional_counts_and_source() {
+        let error = relay(OneRead { sent: false }, PartialWrite { written: 0 })
+            .await
+            .unwrap_err();
+        assert_eq!(error.source.kind(), std::io::ErrorKind::BrokenPipe);
+        assert_eq!((error.a_read, error.a_written), (5, 0));
+        assert_eq!((error.b_read, error.b_written), (0, 2));
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(error.to_string().contains("partial destination failure"));
+        assert!(
+            error
+                .to_string()
+                .contains("a read 5, wrote 0; b read 0, wrote 2")
+        );
     }
 }
 

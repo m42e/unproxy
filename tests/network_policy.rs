@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use unproxy::{
     net::ConnectionOptions,
     network_notifications::{NetworkEvent, TransitionState},
@@ -6,7 +7,6 @@ use unproxy::{
     route::PathOrUri,
     runtime::handle_network_event,
 };
-use std::sync::Arc;
 
 #[tokio::test]
 async fn native_and_manual_controls_compose_with_multiple_sources_and_ip_override() {

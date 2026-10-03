@@ -53,6 +53,11 @@ name = "native_notifications_main"
 path = "tests/native_notifications_main.rs"
 harness = false
 
+[[test]]
+name = "desktop_main"
+path = "tests/desktop_main.rs"
+harness = false
+
 [[bin]]
 name = "unproxy-tray"
 path = "src/bin/unproxy-tray.rs"

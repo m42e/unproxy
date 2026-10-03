@@ -1,15 +1,15 @@
 //! Controlled TLS endpoints test native certificate verification and nested tunnels.
+use std::{sync::Arc, time::Duration};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 use unproxy::{
     auth::{AuthFactory, CredentialStore},
     net::{ConnectionOptions, connect},
     pac::Policy,
     proxy::ContextBuilder,
     route::{Endpoint, Route},
-};
-use std::{sync::Arc, time::Duration};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
 };
 
 fn tls_options(auth: AuthFactory) -> ConnectionOptions {

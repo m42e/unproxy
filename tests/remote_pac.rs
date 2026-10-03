@@ -1,4 +1,3 @@
-use unproxy::net::fetch_remote_pac;
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -6,6 +5,7 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
+use unproxy::net::fetch_remote_pac;
 
 const LIMIT: usize = 8 * 1024 * 1024;
 const TEST_DEADLINE: Duration = Duration::from_secs(4);

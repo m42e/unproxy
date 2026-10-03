@@ -36,7 +36,6 @@ pub fn activated_listeners(name: &str) -> Result<Vec<TcpListener>> {
     }
     #[cfg(unix)]
     {
-        use std::os::fd::FromRawFd;
         let descriptors: Vec<i32>;
         #[cfg(target_os = "macos")]
         {
@@ -77,28 +76,34 @@ pub fn activated_listeners(name: &str) -> Result<Vec<TcpListener>> {
                 .transpose()?;
             descriptors = activation_descriptors(name, &count, &names, pid.as_deref())?;
         }
-        anyhow::ensure!(
-            !descriptors.is_empty(),
-            "no activated sockets match {name:?}"
-        );
-        let mut listeners = Vec::new();
-        for fd in descriptors {
-            anyhow::ensure!(fd >= 0, "invalid activated descriptor");
-            // The activation protocol transfers ownership of these descriptors.
-            let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
-            listener
-                .local_addr()
-                .context("activated descriptor is not a TCP listener")?;
-            listener.set_nonblocking(true)?;
-            listeners.push(TcpListener::from_std(listener)?);
-        }
-        Ok(listeners)
+        activated_listeners_from_fds(name, descriptors)
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = name;
         bail!("socket activation is unsupported on this platform");
     }
+}
+
+#[cfg(unix)]
+fn activated_listeners_from_fds(name: &str, descriptors: Vec<i32>) -> Result<Vec<TcpListener>> {
+    use std::os::fd::FromRawFd;
+    anyhow::ensure!(
+        !descriptors.is_empty(),
+        "no activated sockets match {name:?}"
+    );
+    let mut listeners = Vec::new();
+    for fd in descriptors {
+        anyhow::ensure!(fd >= 0, "invalid activated descriptor");
+        // The activation protocol transfers ownership of these descriptors.
+        let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+        listener
+            .local_addr()
+            .context("activated descriptor is not a TCP listener")?;
+        listener.set_nonblocking(true)?;
+        listeners.push(TcpListener::from_std(listener)?);
+    }
+    Ok(listeners)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -143,63 +148,103 @@ pub fn service_control(command: &str, registration: bool) -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        let domain = format!("gui/{}", unsafe { libc::getuid() });
-        let target = format!("{domain}/de.m42e.unproxy");
-        let plist = "/Library/LaunchAgents/de.m42e.unproxy.plist";
-        let run = |args: &[&str]| -> Result<()> {
-            let status = std::process::Command::new("/bin/launchctl")
-                .args(args)
-                .status()
-                .context("executing launchctl")?;
-            anyhow::ensure!(
-                status.success(),
-                "launchctl {} failed: {status}",
-                args.join(" ")
-            );
+        service_control_with(
+            command,
+            registration,
+            |program, args| {
+                invoke_service_status(program, args, |executable, args| {
+                    std::process::Command::new(executable).args(args).status()
+                })
+            },
+            |program, args| {
+                invoke_service_output(program, args, |executable, args| {
+                    std::process::Command::new(executable).args(args).output()
+                })
+            },
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn invoke_service_status(
+    program: &str,
+    args: &[&str],
+    execute: impl FnOnce(&str, &[&str]) -> std::io::Result<std::process::ExitStatus>,
+) -> Result<()> {
+    let executable = match program {
+        "launchctl" => "/bin/launchctl",
+        "ps" => "/bin/ps",
+        _ => bail!("unknown service command executable {program}"),
+    };
+    let status = execute(executable, args).with_context(|| format!("executing {program}"))?;
+    anyhow::ensure!(
+        status.success(),
+        "{program} {} failed: {status}",
+        args.join(" ")
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn invoke_service_output(
+    program: &str,
+    args: &[&str],
+    capture: impl FnOnce(&str, &[&str]) -> std::io::Result<std::process::Output>,
+) -> Result<String> {
+    let executable = match program {
+        "launchctl" => "/bin/launchctl",
+        _ => bail!("unknown service command executable {program}"),
+    };
+    let output = capture(executable, args).with_context(|| format!("executing {program}"))?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn service_control_with(
+    command: &str,
+    registration: bool,
+    mut invoke: impl FnMut(&str, &[&str]) -> Result<()>,
+    mut capture: impl FnMut(&str, &[&str]) -> Result<String>,
+) -> Result<()> {
+    let domain = format!("gui/{}", unsafe { libc::getuid() });
+    let target = format!("{domain}/de.m42e.unproxy");
+    let plist = "/Library/LaunchAgents/de.m42e.unproxy.plist";
+    match (registration, command) {
+        (_, "status") => {
+            invoke("launchctl", &["print", &target])?;
+            let output = capture("launchctl", &["print", &target])?;
+            if let Some(pid) = output
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("pid = "))
+            {
+                invoke("ps", &["-p", pid.trim(), "-o", "pid,etime,command"])?;
+            }
             Ok(())
-        };
-        match (registration, command) {
-            (_, "status") => {
-                run(&["print", &target])?;
-                let output = std::process::Command::new("/bin/launchctl")
-                    .args(["print", &target])
-                    .output()?;
-                if let Some(pid) = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .find_map(|line| line.trim().strip_prefix("pid = "))
-                {
-                    let status = std::process::Command::new("/bin/ps")
-                        .args(["-p", pid.trim(), "-o", "pid,etime,command"])
-                        .status()?;
-                    anyhow::ensure!(status.success(), "ps failed: {status}");
-                }
-                Ok(())
-            }
-            (false, "start") => run(&["kickstart", &target]),
-            (false, "restart") => run(&["kickstart", "-k", &target]),
-            (false, "stop") => run(&["kill", "TERM", &target]),
-            (false, "enable") => run(&["bootstrap", &domain, plist]),
-            (false, "disable") => run(&["bootout", &target]),
-            (true, "install") => {
-                run(&["enable", &target])?;
-                run(&["bootstrap", &domain, plist])?;
-                run(&["print", &target])?;
-                run(&["kickstart", &target])
-            }
-            (true, "uninstall") => {
-                let _ = run(&["kill", "TERM", &target]);
-                run(&["disable", &target])?;
-                run(&["bootout", &target])
-            }
-            _ => bail!(
-                "unknown command {command:?}; expected {}",
-                if registration {
-                    "install, uninstall, status"
-                } else {
-                    "status, start, restart, stop, enable, disable"
-                }
-            ),
         }
+        (false, "start") => invoke("launchctl", &["kickstart", &target]),
+        (false, "restart") => invoke("launchctl", &["kickstart", "-k", &target]),
+        (false, "stop") => invoke("launchctl", &["kill", "TERM", &target]),
+        (false, "enable") => invoke("launchctl", &["bootstrap", &domain, plist]),
+        (false, "disable") => invoke("launchctl", &["bootout", &target]),
+        (true, "install") => {
+            invoke("launchctl", &["enable", &target])?;
+            invoke("launchctl", &["bootstrap", &domain, plist])?;
+            invoke("launchctl", &["print", &target])?;
+            invoke("launchctl", &["kickstart", &target])
+        }
+        (true, "uninstall") => {
+            let _ = invoke("launchctl", &["kill", "TERM", &target]);
+            invoke("launchctl", &["disable", &target])?;
+            invoke("launchctl", &["bootout", &target])
+        }
+        _ => bail!(
+            "unknown command {command:?}; expected {}",
+            if registration {
+                "install, uninstall, status"
+            } else {
+                "status, start, restart, stop, enable, disable"
+            }
+        ),
     }
 }
 
@@ -254,6 +299,182 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn service_command_adapters_map_executables_and_preserve_status_errors() {
+        use std::os::unix::process::ExitStatusExt;
+
+        invoke_service_status("launchctl", &["print", "gui/501/service"], |path, args| {
+            assert_eq!(path, "/bin/launchctl");
+            assert_eq!(args, ["print", "gui/501/service"]);
+            Ok(std::process::ExitStatus::from_raw(0))
+        })
+        .unwrap();
+        invoke_service_status("ps", &["-p", "42"], |path, args| {
+            assert_eq!(path, "/bin/ps");
+            assert_eq!(args, ["-p", "42"]);
+            Ok(std::process::ExitStatus::from_raw(0))
+        })
+        .unwrap();
+
+        let failure = invoke_service_status("launchctl", &["kickstart"], |_, _| {
+            Ok(std::process::ExitStatus::from_raw(1))
+        })
+        .unwrap_err();
+        assert!(format!("{failure:#}").contains("launchctl kickstart failed"));
+        let spawn_error = invoke_service_status("ps", &["-p", "42"], |_, _| {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "fixture"))
+        })
+        .unwrap_err();
+        assert!(format!("{spawn_error:#}").contains("executing ps"));
+        assert!(invoke_service_status("unknown", &[], |_, _| unreachable!()).is_err());
+
+        let output = invoke_service_output("launchctl", &["print"], |path, args| {
+            assert_eq!(path, "/bin/launchctl");
+            assert_eq!(args, ["print"]);
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: b"pid = 42\n".to_vec(),
+                stderr: vec![],
+            })
+        })
+        .unwrap();
+        assert_eq!(output, "pid = 42\n");
+        assert!(invoke_service_output("ps", &[], |_, _| unreachable!()).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn service_control_dispatches_commands_and_ignores_uninstall_termination_failure() {
+        use std::{cell::RefCell, string::ToString};
+
+        let calls = RefCell::new(Vec::<(String, Vec<String>)>::new());
+        let refuse_kill = RefCell::new(false);
+        let captured_output = RefCell::new("service state\n  pid = 1234\n".to_owned());
+        let target = format!("gui/{}/de.m42e.unproxy", unsafe { libc::getuid() });
+        let domain = format!("gui/{}", unsafe { libc::getuid() });
+        let mut invoke = |program: &str, args: &[&str]| {
+            calls.borrow_mut().push((
+                program.to_owned(),
+                args.iter().map(ToString::to_string).collect(),
+            ));
+            if args.first() == Some(&"kill") && *refuse_kill.borrow() {
+                bail!("fixture refuses stop")
+            }
+            Ok(())
+        };
+        let mut capture = |program: &str, args: &[&str]| {
+            calls.borrow_mut().push((
+                format!("{program} output"),
+                args.iter().map(ToString::to_string).collect(),
+            ));
+            Ok(captured_output.borrow().clone())
+        };
+
+        for (command, args) in [
+            ("start", vec!["kickstart", target.as_str()]),
+            ("restart", vec!["kickstart", "-k", target.as_str()]),
+            ("stop", vec!["kill", "TERM", target.as_str()]),
+            (
+                "enable",
+                vec![
+                    "bootstrap",
+                    domain.as_str(),
+                    "/Library/LaunchAgents/de.m42e.unproxy.plist",
+                ],
+            ),
+            ("disable", vec!["bootout", target.as_str()]),
+        ] {
+            service_control_with(command, false, &mut invoke, &mut capture).unwrap();
+            assert_eq!(calls.borrow().last().unwrap().1, args);
+        }
+
+        calls.borrow_mut().clear();
+        service_control_with("install", true, &mut invoke, &mut capture).unwrap();
+        assert_eq!(calls.borrow().len(), 4);
+        assert_eq!(calls.borrow()[0].1, ["enable", target.as_str()]);
+        assert_eq!(
+            calls.borrow()[1].1,
+            [
+                "bootstrap",
+                domain.as_str(),
+                "/Library/LaunchAgents/de.m42e.unproxy.plist"
+            ]
+        );
+        assert_eq!(calls.borrow()[3].1, ["kickstart", target.as_str()]);
+
+        calls.borrow_mut().clear();
+        *refuse_kill.borrow_mut() = true;
+        service_control_with("uninstall", true, &mut invoke, &mut capture).unwrap();
+        assert_eq!(calls.borrow().len(), 3);
+        assert_eq!(calls.borrow()[0].1, ["kill", "TERM", target.as_str()]);
+        assert_eq!(calls.borrow()[1].1, ["disable", target.as_str()]);
+        assert_eq!(calls.borrow()[2].1, ["bootout", target.as_str()]);
+
+        calls.borrow_mut().clear();
+        service_control_with("status", false, &mut invoke, &mut capture).unwrap();
+        assert_eq!(calls.borrow().len(), 3);
+        assert_eq!(calls.borrow()[0].1, ["print", target.as_str()]);
+        assert_eq!(calls.borrow()[1].0, "launchctl output");
+        assert_eq!(calls.borrow()[2].0, "ps");
+        assert_eq!(
+            calls.borrow()[2].1,
+            ["-p", "1234", "-o", "pid,etime,command"]
+        );
+
+        calls.borrow_mut().clear();
+        *captured_output.borrow_mut() = "service has no process".to_owned();
+        service_control_with("status", false, &mut invoke, &mut capture).unwrap();
+        assert_eq!(calls.borrow().len(), 2);
+        assert!(service_control_with("bad", true, &mut invoke, &mut capture).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_platform_entry_points_fail_or_succeed_without_mutating_preferences() {
+        assert!(attach_console().is_ok());
+        assert!(!default_interface_ipv4().is_unspecified());
+        let error = activated_listeners("unproxy-test-listener-that-does-not-exist").unwrap_err();
+        assert!(
+            error.to_string().contains("launchd socket activation")
+                || error.to_string().contains("no activated sockets")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn activated_descriptor_conversion_validates_and_takes_ownership() {
+        use std::os::fd::AsRawFd;
+
+        assert!(
+            activated_listeners_from_fds("fixture", vec![])
+                .unwrap_err()
+                .to_string()
+                .contains("no activated sockets")
+        );
+        assert!(
+            activated_listeners_from_fds("fixture", vec![-1])
+                .unwrap_err()
+                .to_string()
+                .contains("invalid activated descriptor")
+        );
+
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = tcp.local_addr().unwrap();
+        let duplicate = unsafe { libc::dup(tcp.as_raw_fd()) };
+        assert!(duplicate >= 0);
+        let listeners = activated_listeners_from_fds("fixture", vec![duplicate]).unwrap();
+        assert_eq!(listeners[0].local_addr().unwrap(), address);
+        drop(listeners);
+
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let duplicate = unsafe { libc::dup(file.as_raw_fd()) };
+        assert!(duplicate >= 0);
+        let error = activated_listeners_from_fds("fixture", vec![duplicate]).unwrap_err();
+        assert!(error.to_string().contains("not a TCP listener"));
+        assert_eq!(unsafe { libc::fcntl(duplicate, libc::F_GETFD) }, -1);
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn service_control_reports_launchd_is_unavailable() {
@@ -289,6 +510,8 @@ mod macos_preferences {
         fn CFArrayCreate(allocator: Ref, values: *const Ref, count: isize, callbacks: Ref) -> Ref;
         fn CFArrayGetCount(array: Ref) -> isize;
         fn CFArrayGetValueAtIndex(array: Ref, index: isize) -> Ref;
+        #[cfg(test)]
+        fn CFNumberGetValue(number: Ref, kind: isize, value: *mut c_void) -> u8;
         fn CFDictionaryCreateMutable(
             allocator: Ref,
             capacity: isize,
@@ -296,6 +519,8 @@ mod macos_preferences {
             values: Ref,
         ) -> *mut c_void;
         fn CFDictionarySetValue(dictionary: *mut c_void, key: Ref, value: Ref);
+        #[cfg(test)]
+        fn CFDictionaryGetValue(dictionary: Ref, key: Ref) -> Ref;
         static kCFTypeArrayCallBacks: u8;
         static kCFTypeDictionaryKeyCallBacks: u8;
         static kCFTypeDictionaryValueCallBacks: u8;
@@ -369,41 +594,8 @@ mod macos_preferences {
             unsafe { AuthorizationFree(self.0, 0) };
         }
     }
-    pub fn set_proxy(port: u16) -> Result<usize> {
-        // Every CF object returned by a Create/Copy function is owned locally.
+    fn proxy_config(port: u16) -> Owned {
         unsafe {
-            let mut item = AuthorizationItem {
-                name: c"system.preferences".as_ptr(),
-                value_len: 0,
-                value: std::ptr::null_mut(),
-                flags: 0,
-            };
-            let rights = AuthorizationRights {
-                count: 1,
-                items: &mut item,
-            };
-            let mut auth = std::ptr::null_mut();
-            let status = AuthorizationCreate(&rights, std::ptr::null(), 1 | 2 | 16, &mut auth);
-            anyhow::ensure!(status == 0, "authorization failed: {status}");
-            let auth = Authorization(auth);
-            let name = string("Unproxy");
-            let prefs = Owned(SCPreferencesCreateWithAuthorization(
-                std::ptr::null(),
-                name.0,
-                std::ptr::null(),
-                auth.0,
-            ));
-            anyhow::ensure!(
-                !prefs.0.is_null(),
-                "creating network preferences failed: {}",
-                SCError()
-            );
-            let services = Owned(SCNetworkServiceCopyAll(prefs.0));
-            anyhow::ensure!(
-                !services.0.is_null(),
-                "enumerating network services failed: {}",
-                SCError()
-            );
             let config = Owned(CFDictionaryCreateMutable(
                 std::ptr::null(),
                 0,
@@ -444,6 +636,45 @@ mod macos_preferences {
                 (&raw const kCFTypeArrayCallBacks).cast(),
             ));
             CFDictionarySetValue(config.0.cast_mut(), string("ExceptionsList").0, array.0);
+            config
+        }
+    }
+    pub fn set_proxy(port: u16) -> Result<usize> {
+        // Every CF object returned by a Create/Copy function is owned locally.
+        unsafe {
+            let mut item = AuthorizationItem {
+                name: c"system.preferences".as_ptr(),
+                value_len: 0,
+                value: std::ptr::null_mut(),
+                flags: 0,
+            };
+            let rights = AuthorizationRights {
+                count: 1,
+                items: &mut item,
+            };
+            let mut auth = std::ptr::null_mut();
+            let status = AuthorizationCreate(&rights, std::ptr::null(), 1 | 2 | 16, &mut auth);
+            anyhow::ensure!(status == 0, "authorization failed: {status}");
+            let auth = Authorization(auth);
+            let name = string("Unproxy");
+            let prefs = Owned(SCPreferencesCreateWithAuthorization(
+                std::ptr::null(),
+                name.0,
+                std::ptr::null(),
+                auth.0,
+            ));
+            anyhow::ensure!(
+                !prefs.0.is_null(),
+                "creating network preferences failed: {}",
+                SCError()
+            );
+            let services = Owned(SCNetworkServiceCopyAll(prefs.0));
+            anyhow::ensure!(
+                !services.0.is_null(),
+                "enumerating network services failed: {}",
+                SCError()
+            );
+            let config = proxy_config(port);
             let ethernet = string("Ethernet");
             let wifi = string("IEEE80211");
             let proxies = string("Proxies");
@@ -490,6 +721,73 @@ mod macos_preferences {
                 SCPreferencesSynchronize(prefs.0);
             }
             Ok(changed)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        unsafe fn number_at(config: &Owned, key: &str) -> i32 {
+            let key = string(key);
+            let value = unsafe { CFDictionaryGetValue(config.0, key.0) };
+            assert!(!value.is_null());
+            let mut number = 0i32;
+            assert_ne!(
+                unsafe { CFNumberGetValue(value, 3, (&mut number as *mut i32).cast()) },
+                0
+            );
+            number
+        }
+
+        #[test]
+        fn proxy_dictionary_encodes_enabled_and_disabled_loopback_settings() {
+            let enabled = proxy_config(8123);
+            unsafe {
+                for key in ["HTTPEnable", "HTTPSEnable"] {
+                    assert_eq!(number_at(&enabled, key), 1);
+                }
+                for key in [
+                    "ProxyAutoDiscoveryEnable",
+                    "ProxyAutoConfigEnable",
+                    "SOCKSEnable",
+                    "GopherEnable",
+                ] {
+                    assert_eq!(number_at(&enabled, key), 0);
+                }
+                for (key, expected) in [("HTTPProxy", "127.0.0.1"), ("HTTPSProxy", "127.0.0.1")] {
+                    let key = string(key);
+                    let value = CFDictionaryGetValue(enabled.0, key.0);
+                    let expected = string(expected);
+                    assert_ne!(CFEqual(value, expected.0), 0);
+                }
+                for key in ["HTTPPort", "HTTPSPort"] {
+                    assert_eq!(number_at(&enabled, key), 8123);
+                }
+                let key = string("ExceptionsList");
+                let exceptions = CFDictionaryGetValue(enabled.0, key.0);
+                assert_eq!(CFArrayGetCount(exceptions), 4);
+                for (index, expected) in ["::1", "127.0.0.1", "localhost", "*.local"]
+                    .iter()
+                    .enumerate()
+                {
+                    let actual = CFArrayGetValueAtIndex(exceptions, index as isize);
+                    let expected = string(expected);
+                    assert_ne!(CFEqual(actual, expected.0), 0);
+                }
+            }
+
+            let disabled = proxy_config(0);
+            unsafe {
+                assert_eq!(number_at(&disabled, "HTTPEnable"), 0);
+                assert_eq!(number_at(&disabled, "HTTPSEnable"), 0);
+                for key in ["HTTPProxy", "HTTPSProxy", "HTTPPort", "HTTPSPort"] {
+                    let key = string(key);
+                    assert!(CFDictionaryGetValue(disabled.0, key.0).is_null());
+                }
+                let key = string("ExceptionsList");
+                assert_eq!(CFArrayGetCount(CFDictionaryGetValue(disabled.0, key.0)), 4);
+            }
         }
     }
 }

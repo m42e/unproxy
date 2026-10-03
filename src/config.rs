@@ -237,6 +237,28 @@ pub fn verbosity_level(v: u8, q: u8) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_file_discovery_helpers_return_only_real_files() {
+        if let Some(path) = settings_path() {
+            assert!(path.is_file(), "settings path must be readable: {path:?}");
+        }
+        if let Some(path) = pac_path() {
+            assert!(path.is_file(), "PAC path must exist: {path:?}");
+        }
+        assert_eq!(
+            netrc_default(),
+            dirs::home_dir().map(|home| home.join(".netrc"))
+        );
+    }
+
+    #[test]
+    fn parse_main_from_preserves_clap_error_context() {
+        let error =
+            parse_main_from(vec!["unproxy".into(), "--unknown-option".into()], false).unwrap_err();
+        assert!(error.to_string().contains("unexpected argument"));
+    }
+
     #[test]
     fn parses_listeners() {
         let a = MainArgs::try_parse_from(["x"]).unwrap();
@@ -367,12 +389,11 @@ mod tests {
             "127.0.0.1",
             "127.0.0.1:nope",
         ] {
-            match MainArgs::try_parse_from(["x", "--listen", invalid]) {
-                Ok(args) => assert!(
+            if let Ok(args) = MainArgs::try_parse_from(["x", "--listen", invalid]) {
+                assert!(
                     args.listen_addrs().is_err(),
                     "address {invalid} should be rejected"
-                ),
-                Err(_) => {}
+                );
             }
         }
     }
@@ -412,5 +433,35 @@ mod tests {
         fs::write(&p, "# hi\n--listen 127.0.0.1:5\n").unwrap();
         assert_eq!(token_file(&p), ["--listen", "127.0.0.1:5"]);
         let _ = fs::remove_file(p);
+    }
+
+    #[test]
+    fn file_discovery_skips_missing_and_directory_candidates_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let directory = dir.path().join("directory");
+        fs::create_dir(&directory).unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        fs::write(&first, "first").unwrap();
+        fs::write(&second, "second").unwrap();
+
+        assert_eq!(
+            first_readable([missing, directory, second.clone(), first]),
+            Some(second)
+        );
+        assert_eq!(first_readable(std::iter::empty()), None);
+        assert_eq!(token_file(&dir.path().join("absent")), Vec::<String>::new());
+        let invalid = dir.path().join("invalid-utf8");
+        fs::write(&invalid, [0xff, 0xfe]).unwrap();
+        assert!(token_file(&invalid).is_empty());
+    }
+
+    #[test]
+    fn timeout_accessor_returns_configured_duration() {
+        let args = MainArgs::try_parse_from(["x", "--connect-timeout", "2.5"]).unwrap();
+        assert_eq!(args.timeout(), Duration::from_millis(2500));
+        assert_eq!(verbosity_level(1, 0), Some("debug"));
+        assert_eq!(verbosity_level(0, u8::MAX), None);
     }
 }
