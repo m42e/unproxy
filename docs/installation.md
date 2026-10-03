@@ -1,37 +1,77 @@
-# Installation and client setup
+# Install Unproxy
 
-Build with cargo build --release --locked --bins, or install the primary proxy
-using cargo install --path . --bin unproxy --locked. Optional binaries are
-paceval, undns, native controls and development utilities.
+Download the release package for your operating system from the project's
+Releases page. Choose a file for your operating system and processor. If you
+are unsure, use the normal 64-bit Intel/AMD package for Windows or Linux, or
+the macOS package for your Mac.
 
-On Debian, install the generated .deb using apt install ./unproxy-VERSION-TARGET.deb.
-The package installs the primary proxy and a user systemd service. On macOS,
-the .pkg installs /opt/unproxy/bin, a launch agent and /etc/paths.d integration.
-The separately generated app ZIP and native app installer both contain
-Unproxy.app, its `unproxy` child, and the login helper. The menu extra opens port and PAC editors, saves the
-CONNECT, DIRECT fallback, Negotiate, and login-start choices, and writes child
-output to `~/Library/Application Support/Unproxy/unproxy.log`.
+## Windows
 
-Windows ZIPs contain `unproxy.exe`, `UnproxyTray.exe`, its tray controller,
-`install.ps1`, and `uninstall.ps1`. Run `install.ps1` to install under
-`%LOCALAPPDATA%\Unproxy\bin`; login startup is per-user and enabled by default.
-Use `install.ps1 -DisableLoginStartup` to install without it. Run
-`uninstall.ps1` to stop the tray and child and remove binaries/shortcuts while
-preserving preferences and logs; add `-RemoveUserData` to delete those too.
-Windows settings and rotating logs are under `%LOCALAPPDATA%\Unproxy`. Neither
-desktop controller changes operating-system proxy settings or installs a
-Windows service.
+1. Download and extract the Windows ZIP.
+2. Open the extracted folder in File Explorer.
+3. Right-click the folder background and choose **Open in Terminal**.
+4. In PowerShell, run:
 
-Generic portable ZIPs contain unproxy, paceval and undns. Platform-native
-installers intentionally contain the proxy and platform integrations only.
+   ```powershell
+   Set-ExecutionPolicy -Scope Process Bypass
+   .\install.ps1
+   ```
 
-```sh
-export http_proxy=http://127.0.0.1:3128
-export https_proxy=http://127.0.0.1:3128
-export no_proxy=127.0.0.1,localhost,::1
+5. The Unproxy tray icon appears near the clock. Use its menu to start or stop
+   the proxy and edit the PAC file. The installer adds Unproxy to your Start
+   menu and starts it when you sign in.
+
+To remove Unproxy, open the extracted ZIP folder in PowerShell and run:
+
+```powershell
+.\uninstall.ps1
 ```
 
-These variables configure clients, not the main proxy's upstream policy.
-Configure a browser's HTTP and HTTPS proxy at 127.0.0.1:3128 or use the generated
-local PAC at http://127.0.0.1:3128/proxy.pac. The generated PAC only points to the
-local listener; it does not disclose the upstream policy.
+Add `-RemoveUserData` to also delete Unproxy preferences and logs.
+
+## macOS
+
+1. Download the macOS app installer (`*-app.pkg`) and open it.
+2. Follow the installer prompts, then open **Unproxy** from Applications.
+3. Click the Unproxy icon in the menu bar and choose **Start**.
+
+Use **Edit PAC File…** in the menu to select your organization's PAC file. Use
+**Start at Login** in the same menu to control whether the app opens when you
+sign in.
+
+## Debian or Ubuntu
+
+Open a terminal in the folder containing the downloaded `.deb` package and run:
+
+```sh
+sudo apt install ./unproxy-VERSION-TARGET.deb
+systemctl --user enable --now unproxy
+systemctl --user status unproxy
+```
+
+Replace `VERSION-TARGET` with the version and architecture in the downloaded
+filename. The last command should show the service as active. To stop it, run
+`systemctl --user stop unproxy`. To start it again, run
+`systemctl --user start unproxy`.
+
+## Build from source
+
+Use this if you have the source checkout and Rust installed. On Linux, install
+the compiler and TLS build dependencies first (Debian/Ubuntu: `build-essential`,
+`pkg-config`, and `libssl-dev`). Then, from the project folder, run:
+
+```sh
+cargo build --release --locked --bins
+```
+
+Start the built proxy with `./target/release/unproxy` on macOS/Linux or
+`target\release\unproxy.exe` on Windows. See [Use Unproxy](user-guide.md) to
+connect an application and configure a PAC file.
+
+## Remove Unproxy
+
+- **Windows:** Run `uninstall.ps1` from the extracted Windows ZIP. Add
+  `-RemoveUserData` if you also want to delete preferences and logs.
+- **macOS:** For the menu bar app, turn off **Start at Login**, quit Unproxy,
+  then move it from Applications to the Trash.
+- **Debian/Ubuntu:** Run `sudo apt remove unproxy`.

@@ -534,31 +534,6 @@ fn info_plist(id: &str, executable: &str, minimum: &str) -> String {
     )
 }
 fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
-    std::fs::create_dir_all("docs")?;
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    let executable = PathBuf::from("target")
-        .join(profile)
-        .join(format!("unproxy{suffix}"));
-    if !executable.exists() {
-        build(profile == "release", None, false)?;
-    }
-    let help = Command::new(executable)
-        .arg("--help")
-        .env("UNPROXY_NORC", "1")
-        .output()?;
-    anyhow::ensure!(help.status.success(), "help generation failed");
-    std::fs::write(
-        "docs/cli.md",
-        format!(
-            "# Command-line reference\n\nGenerated with settings-file reading disabled.\n\n```text\n{}```\n",
-            String::from_utf8(help.stdout)?
-        ),
-    )?;
     let book = output.join("docs");
     std::fs::create_dir_all(&book)?;
     let mut pages = std::fs::read_dir("docs")?
@@ -587,7 +562,7 @@ fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
     }
     std::fs::write(
         book.join("index.html"),
-        "<!doctype html><meta http-equiv=refresh content='0;url=introduction.html'><a href=introduction.html>Documentation</a>",
+        "<!doctype html><meta http-equiv=refresh content='0;url=user-guide.html'><a href=user-guide.html>Use Unproxy</a>",
     )?;
     let mut landing = std::fs::read_to_string("site/index.html")?
         .replace("@VERSION@", &html_escape(unproxy::VERSION));
