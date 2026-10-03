@@ -3,10 +3,10 @@ use unproxy::desktop::{BundlePaths, ChildLifecycle, Preferences};
 #[test]
 fn preferences_have_expected_defaults_and_supported_flags() {
     let p = Preferences::default();
-    assert_eq!(p.port, 8080);
-    assert!(!p.negotiate && !p.proxytunnel && !p.direct_fallback && !p.autostart);
+    assert_eq!(p.port, 3128);
+    assert!(!p.negotiate && !p.proxytunnel && !p.direct_fallback && p.autostart);
     let args = p.child_args();
-    assert!(args.windows(2).any(|a| a == ["--listen", "127.0.0.1:8080"]));
+    assert!(args.windows(2).any(|a| a == ["--listen", "127.0.0.1:3128"]));
     assert!(args.contains(&"--pac-file".into()));
     assert!(
         args.windows(2)
@@ -33,7 +33,7 @@ fn app_bundle_paths_point_to_packaged_child_and_login_item() {
     let paths = BundlePaths::from_main_executable(exe).unwrap();
     assert_eq!(
         paths.child,
-        std::path::PathBuf::from("/Applications/Unproxy.app/Contents/Resources/unproxy")
+        std::path::PathBuf::from("/Applications/Unproxy.app/Contents/MacOS/unproxy")
     );
     assert_eq!(
         paths.login_helper,
@@ -66,7 +66,13 @@ fn embedded_child_gets_no_rc_environment_without_suppressing_cli_arguments() {
     let mut perms = std::fs::metadata(&program).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&program, perms).unwrap();
-    let prefs = Preferences::default();
+    let mut prefs = Preferences::default();
+    prefs.pac_file = temp.path().join("proxy.pac");
+    std::fs::write(
+        &prefs.pac_file,
+        "function FindProxyForURL(url, host) { return \"DIRECT\"; }\n",
+    )
+    .unwrap();
     assert!(prefs.child_args().contains(&"--pac-file".into()));
     let mut child = ChildLifecycle::default();
     child.start(&program, &prefs).unwrap();

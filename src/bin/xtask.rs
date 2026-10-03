@@ -236,6 +236,11 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
     } else {
         vec![format]
     };
+    anyhow::ensure!(
+        !matches!(format, Format::Windows)
+            || target.map_or(cfg!(windows), |t| t.contains("windows")),
+        "Windows ZIPs require a Windows target when packaging from another operating system"
+    );
     build(true, target, no_negotiate)?;
     std::fs::create_dir_all(output)?;
     let target_name = target
@@ -262,22 +267,32 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
             Format::Native => unreachable!("native is expanded before packaging"),
             Format::Portable | Format::Windows => {
                 let bins = if matches!(format, Format::Windows) {
-                    vec!["unproxy"]
+                    vec!["unproxy", "unproxy-tray"]
                 } else {
                     vec!["unproxy", "paceval", "undns"]
                 };
                 for name in bins {
-                    executable(&source_bin(name), &staging.join(format!("{name}{suffix}")))?;
+                    let output_name = if name == "unproxy-tray" {
+                        "UnproxyTray"
+                    } else {
+                        name
+                    };
+                    executable(
+                        &source_bin(name),
+                        &staging.join(format!("{output_name}{suffix}")),
+                    )?;
                 }
-                if windows {
+                if matches!(format, Format::Windows) {
                     std::fs::copy("assets/install.ps1", staging.join("install.ps1"))?;
+                    std::fs::copy("assets/uninstall.ps1", staging.join("uninstall.ps1"))?;
+                    std::fs::copy("assets/unproxy-tray.ps1", staging.join("unproxy-tray.ps1"))?;
                 }
                 std::fs::copy("README.md", staging.join("README.md"))?;
                 std::fs::copy("assets/proxy.pac", staging.join("proxy.pac.sample"))?;
                 std::fs::write(
                     staging.join("metadata.json"),
                     serde_json::to_vec_pretty(
-                        &serde_json::json!({"version":unproxy::VERSION,"target":target_name,"negotiate":!no_negotiate,"dns_version":unproxy::DNS_VERSION}),
+                        &serde_json::json!({"version":unproxy::VERSION,"target":target_name,"negotiate":!no_negotiate,"components":if matches!(format, Format::Windows) { vec!["unproxy.exe", "UnproxyTray.exe", "unproxy-tray.ps1", "install.ps1", "uninstall.ps1", "metadata.json"] } else { vec!["unproxy", "paceval", "undns"] },"dns_version":unproxy::DNS_VERSION}),
                     )?,
                 )?;
                 zip(&staging, &output.join(format!("{package_name}.zip")))?;
@@ -396,7 +411,7 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                 );
                 let app = staging.join("Unproxy.app/Contents");
                 executable(&source_bin("unproxy-app"), &app.join("MacOS/unproxy-app"))?;
-                executable(&source_bin("unproxy"), &app.join("Resources/unproxy"))?;
+                executable(&source_bin("unproxy"), &app.join("MacOS/unproxy"))?;
                 let helper = app.join("Library/LoginItems/UnproxyLoginHelper.app/Contents");
                 executable(
                     &source_bin("unproxy-login-helper"),
@@ -422,7 +437,40 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                     "assets/child-entitlements.plist",
                     app.join("child-entitlements.plist"),
                 )?;
+                std::fs::write(
+                    app.join("Resources/metadata.json"),
+                    serde_json::to_vec_pretty(
+                        &serde_json::json!({"version":unproxy::VERSION,"bundle_id":"de.m42e.unproxy.app","helper_bundle_id":"de.m42e.unproxy.login-helper","minimum_macos":"11.1"}),
+                    )?,
+                )?;
                 zip(&staging, &output.join(format!("{package_name}-app.zip")))?;
+                let pkg_root = staging.join("pkg-root");
+                copy_tree(
+                    &staging.join("Unproxy.app"),
+                    &pkg_root.join("Applications/Unproxy.app"),
+                )?;
+                if cfg!(target_os = "macos") {
+                    run(Command::new("pkgbuild")
+                        .arg("--root")
+                        .arg(&pkg_root)
+                        .args([
+                            "--identifier",
+                            "de.m42e.unproxy.app",
+                            "--version",
+                            unproxy::VERSION.split('+').next().unwrap(),
+                            "--install-location",
+                            "/",
+                        ])
+                        .arg(output.join(format!("{package_name}-app.pkg"))))?;
+                } else {
+                    zip(
+                        &pkg_root,
+                        &output.join(format!("{package_name}-app-pkg-staging.zip")),
+                    )?;
+                    println!(
+                        "Created an app package staging archive; pkgbuild on macOS is required for the native .pkg."
+                    );
+                }
             }
         }
         std::fs::remove_dir_all(&staging)?;

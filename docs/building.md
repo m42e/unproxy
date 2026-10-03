@@ -14,6 +14,7 @@ cargo xtask package --format native
 cargo xtask package --format portable
 cargo xtask package --format macos
 cargo xtask package --format app
+cargo xtask package --format windows --target x86_64-pc-windows-msvc
 ```
 
 `cargo xtask` is the repository's Rust-based task runner. Its `native` package
@@ -29,6 +30,8 @@ without fetching anything. Package names contain version and target information.
 macOS pkgbuild creates genuine .pkg files only on macOS; other hosts produce a
 clearly named staging ZIP when supplied cross-built macOS binaries. Debian
 assembly requires dpkg-deb and supports amd64, arm64 and i386.
+The app package command writes the app ZIP and also creates an
+`-app.pkg` installer on macOS (or a clearly named staging archive elsewhere).
 
 For Windows GNU cross builds on Linux install a MinGW compiler, add
 x86_64-pc-windows-gnu (or aarch64-pc-windows-gnullvm with its LLVM toolchain),
@@ -36,6 +39,9 @@ configure Cargo's target linker, and run cargo build --release --locked
 --target x86_64-pc-windows-gnu. Native Windows builds use MSVC. TLS uses Schannel
 for the Windows target and requires no cross OpenSSL installation. macOS
 x86-64 and ARM64 builds require the corresponding rustup targets and Apple SDK.
+The Windows ZIP bundles both executables, the per-user tray controller, and
+reversible install/uninstall scripts. Cross packaging requires an explicit
+Windows target.
 
 xtask supports build/check/docs/package/copy/unpack/bump/release-notes/coverage.
 Coverage requires cargo-llvm-cov and llvm-tools-preview and writes an HTML report.
