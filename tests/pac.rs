@@ -162,19 +162,19 @@ fn alert_and_default_policy_evaluate_as_direct() {
 #[test]
 fn resolvability_and_common_shell_patterns_choose_expected_routes() {
     let mut resolvable = Pac::new(Some(
-        "function FindProxyForURL(url,host){ return isResolvable(host) ? 'DIRECT' : 'PROXY proxy.test:8080'; }",
+        "function dnsResolve(host){ return host === 'resolved.test' ? '192.0.2.1' : null; } function FindProxyForURL(url,host){ return isResolvable(host) ? 'DIRECT' : 'PROXY proxy.test:8080'; }",
     ))
     .unwrap();
     assert_eq!(
         resolvable
-            .evaluate("http://localhost/", "localhost")
+            .evaluate("http://resolved.test/", "resolved.test")
             .unwrap()
             .to_string(),
         "DIRECT"
     );
     assert_eq!(
         resolvable
-            .evaluate("http://does-not-exist.invalid/", "does-not-exist.invalid")
+            .evaluate("http://unresolved.test/", "unresolved.test")
             .unwrap()
             .to_string(),
         "HTTP proxy.test:8080"

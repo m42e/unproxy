@@ -80,6 +80,27 @@ async fn generated_pac_uses_local_host_header() {
 }
 
 #[tokio::test]
+async fn access_page_renders_untrusted_event_text_as_text() {
+    let proxy = start(Policy::new(None).unwrap()).await;
+    let addr = proxy.local_addrs()[0];
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(
+            format!("GET /access.html HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("p.textContent=e.data"), "{response}");
+    assert!(!response.contains("innerHTML"), "{response}");
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
 async fn local_errors_and_self_loop_are_rejected() {
     let proxy = start(Policy::new(None).unwrap()).await;
     let addr = proxy.local_addrs()[0];

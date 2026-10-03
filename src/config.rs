@@ -339,6 +339,73 @@ mod tests {
         assert!(MainArgs::try_parse_from(["x", "--connect-timeout", "NaN"]).is_err());
         assert!(MainArgs::try_parse_from(["x", "--connect-timeout", "-1"]).is_err());
     }
+
+    #[test]
+    fn duration_arguments_cover_zero_fraction_and_invalid_boundaries() {
+        for (value, expected) in [("0", Duration::ZERO), ("0.125", Duration::from_millis(125))] {
+            let args = MainArgs::try_parse_from(["x", "--exchange-timeout", value]).unwrap();
+            assert_eq!(args.exchange_timeout, expected, "value {value}");
+        }
+
+        for value in ["-0.1", "NaN", "inf", "-inf", "invalid", "1e100"] {
+            let result = MainArgs::try_parse_from(["x", "--exchange-timeout", value]);
+            assert!(result.is_err(), "value {value} should be rejected");
+        }
+    }
+
+    #[test]
+    fn listener_arguments_require_numeric_concrete_addresses() {
+        for valid in ["127.0.0.1:0", "[::1]:3128"] {
+            let args = MainArgs::try_parse_from(["x", "--listen", valid]).unwrap();
+            assert_eq!(args.listen_addrs().unwrap().len(), 1, "address {valid}");
+        }
+
+        for invalid in [
+            "localhost:3128",
+            "0.0.0.0:3128",
+            "[::]:3128",
+            "127.0.0.1",
+            "127.0.0.1:nope",
+        ] {
+            match MainArgs::try_parse_from(["x", "--listen", invalid]) {
+                Ok(args) => assert!(
+                    args.listen_addrs().is_err(),
+                    "address {invalid} should be rejected"
+                ),
+                Err(_) => {}
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_limits_parse_zero_and_one_without_overflow() {
+        for (name, field) in [("--max-sessions", 0usize), ("--parallel-connect", 0usize)] {
+            let args = MainArgs::try_parse_from(["x", name, "0"]).unwrap();
+            let actual = if name == "--max-sessions" {
+                args.max_sessions
+            } else {
+                args.parallel_connect
+            };
+            assert_eq!(actual, field);
+            let args = MainArgs::try_parse_from(["x", name, "1"]).unwrap();
+            let actual = if name == "--max-sessions" {
+                args.max_sessions
+            } else {
+                args.parallel_connect
+            };
+            assert_eq!(actual, 1);
+            assert!(MainArgs::try_parse_from(["x", name, "184467440737095516160"]).is_err());
+        }
+    }
+
+    #[cfg(feature = "negotiate")]
+    #[test]
+    fn explicit_netrc_conflicts_with_negotiate_before_startup() {
+        assert!(
+            MainArgs::try_parse_from(["x", "--netrc-file", "credentials.netrc", "--negotiate",])
+                .is_err()
+        );
+    }
     #[test]
     fn token_lines() {
         let p = std::env::temp_dir().join("pd-config-test");

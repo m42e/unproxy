@@ -1173,6 +1173,18 @@ mod wait_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[test]
+    fn builder_normalizes_zero_session_and_parallel_limits() {
+        let builder = ContextBuilder::new(
+            Arc::new(Policy::new(None).unwrap()),
+            ConnectionOptions::default(),
+        )
+        .max_sessions(0)
+        .parallel_connect(0);
+        assert_eq!(builder.session_limit.available_permits(), 1);
+        assert_eq!(builder.parallel, 1);
+    }
+
     #[tokio::test]
     async fn wait_observes_shutdown_without_triggering_it() {
         let policy = Arc::new(Policy::new(None).unwrap());

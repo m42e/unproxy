@@ -44,3 +44,31 @@ jobs:
         with:
           targets: x86_64-apple-darwin
       - run: cargo build --locked --release --target x86_64-apple-darwin --bins
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-llvm-cov --version 0.8.5 --locked
+      - run: cargo llvm-cov clean --workspace
+      - run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path coverage-all-features.lcov
+      - run: cargo llvm-cov clean --workspace
+      - run: cargo llvm-cov --locked --no-default-features --workspace --lcov --output-path coverage-no-default-features.lcov
+      - name: Record coverage environment
+        run: |
+          {
+            echo "commit=${GITHUB_SHA}"
+            echo "os=$(uname -a)"
+            echo "rustc=$(rustc --version)"
+            echo "cargo_llvm_cov=$(cargo llvm-cov --version)"
+            echo "features=all-features and no-default-features"
+            echo "branch_metrics=unavailable in the generated Rust coverage report"
+          } > coverage-metadata.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            coverage-*.lcov
+            coverage-metadata.txt
