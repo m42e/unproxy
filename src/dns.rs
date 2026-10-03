@@ -315,7 +315,7 @@ pub async fn serve(
         port,
     ))
     .await?;
-    tracing::info!(address=%socket.local_addr()?, "dnsdetox listening");
+    tracing::info!(address=%socket.local_addr()?, "undns listening");
     let s = std::sync::Arc::new(socket);
     let mut buf = vec![0; 65507];
     loop {

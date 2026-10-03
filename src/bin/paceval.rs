@@ -4,9 +4,14 @@ use std::{env, fs};
 
 fn run() -> Result<()> {
     let raw_args: Vec<String> = env::args().skip(1).collect();
-    if raw_args.first().is_some_and(|s| s == "-h" || s == "--help") {
+    if raw_args.iter().any(|s| s == "-h" || s == "--help") {
         println!(
-            "Usage: paceval <local-pac-file> [url ...]\nEvaluate URIs using a local PAC file."
+            "Usage: paceval <local-pac-file> [url ...]\n\
+Evaluate one or more URLs using a local PAC script and print the selected routes.\n\
+The PAC file is read from disk and is not fetched from a URL. Each input URL must\n\
+include a host. With no URLs, the PAC file is still checked for load errors.\n\
+\nExample:\n\
+  paceval proxy.pac https://example.com/ http://intranet/"
         );
         return Ok(());
     }

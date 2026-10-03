@@ -87,7 +87,7 @@ async fn origin() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
 fn runtime_products_have_usable_help_and_versions() {
     for binary in [
         env!("CARGO_BIN_EXE_unproxy"),
-        env!("CARGO_BIN_EXE_dnsdetox"),
+        env!("CARGO_BIN_EXE_undns"),
         env!("CARGO_BIN_EXE_paceval"),
     ] {
         let output = std::process::Command::new(binary)
@@ -105,7 +105,7 @@ fn runtime_products_have_usable_help_and_versions() {
     }
     for (binary, version) in [
         (env!("CARGO_BIN_EXE_unproxy"), unproxy::VERSION),
-        (env!("CARGO_BIN_EXE_dnsdetox"), unproxy::DNS_VERSION),
+        (env!("CARGO_BIN_EXE_undns"), unproxy::DNS_VERSION),
     ] {
         let output = std::process::Command::new(binary)
             .arg("--version")

@@ -33,6 +33,6 @@ xtask supports build/check/docs/package/copy/unpack/bump/release-notes/coverage.
 Coverage requires cargo-llvm-cov and llvm-tools-preview and writes an HTML report.
 toml-query -f FILE [-n NAME] KEY [INDEX ...] prints a nested value; strings have
 no surrounding quotes. unproxy-version defaults to version=VALUE and accepts
-dnsdetox or -r for raw output. Version bumping is explicit and updates manifest
+undns or -r for raw output. Version bumping is explicit and updates manifest
 and lockfile. Tagged CI releases validate, package, publish artifacts and deploy
 the static site; ordinary runtime startup has none of those side effects.

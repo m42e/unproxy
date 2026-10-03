@@ -75,64 +75,96 @@ pub fn netrc_default() -> Option<PathBuf> {
     dirs::home_dir().map(|p| p.join(".netrc"))
 }
 #[derive(Parser, Debug, Clone)]
-#[command(name = "unproxy", version = crate::VERSION, args_override_self = true)]
+#[command(
+    name = "unproxy",
+    version = crate::VERSION,
+    about = "Local HTTP proxy with PAC based routing and corporate authentication",
+    long_about = "Run a local HTTP proxy that routes requests through upstream proxies according to PAC scripts. By default it listens on 127.0.0.1:3128. Options from the unproxy settings file are loaded first; command-line options take precedence. Set UNPROXY_NORC=1 to ignore the settings file. Use paceval to inspect PAC routing and unproxyctl to control the system service.",
+    args_override_self = true
+)]
 pub struct MainArgs {
+    /// Increase log verbosity; repeat to enable DEBUG and TRACE output.
     #[arg(short='v',long="verbose",action=clap::ArgAction::Count)]
     pub verbose: u8,
+    /// Decrease log verbosity; repeat to disable logging.
     #[arg(short='q',long="quiet",action=clap::ArgAction::Count)]
     pub quiet: u8,
+    /// Write diagnostic logs to this file, truncating it at startup.
     #[arg(long)]
     pub logfile: Option<PathBuf>,
+    /// Listen on this numeric IP address and port; may be repeated (default: 127.0.0.1:3128).
     #[arg(short='L',long="listen",value_delimiter=None)]
     pub listen: Vec<String>,
+    /// Accept connections from a named socket-activation listener.
     #[arg(long = "activate-socket")]
     pub activate_socket: Option<String>,
+    /// Load a PAC script from a local path or HTTP(S) URL; may be repeated.
     #[arg(short = 'p', long = "pac-file", action = clap::ArgAction::Append)]
     pub pac_file: Vec<String>,
+    /// Override the IP address returned by PAC's myIpAddress() function.
     #[arg(long = "my-ip-address")]
     pub my_ip_address: Option<IpAddr>,
+    /// Read upstream proxy credentials from this netrc file (default: ~/.netrc).
     #[arg(long = "netrc-file")]
     #[cfg_attr(feature = "negotiate", arg(conflicts_with = "negotiate"))]
     pub netrc_file: Option<PathBuf>,
     #[cfg(feature = "negotiate")]
+    /// Use Negotiate authentication; optionally restrict it to a host, repeatable.
     #[arg(short='n',long="negotiate",num_args=0..=1,default_missing_value="",action=clap::ArgAction::Append)]
     pub negotiate: Vec<String>,
+    /// Use an upstream HTTP CONNECT tunnel for every request.
     #[arg(long = "proxytunnel")]
     pub proxytunnel: bool,
+    /// Try a direct connection after all selected proxy routes fail.
     #[arg(long = "direct-fallback")]
     pub direct_fallback: bool,
     /// Fail closed until a routing script loads and on PAC evaluation errors.
     #[arg(long = "strict-policy")]
     pub strict_policy: bool,
+    /// Maximum time in seconds to receive request headers.
     #[arg(long = "header-timeout", value_parser=parse_duration, default_value="15")]
     pub header_timeout: Duration,
+    /// Maximum idle time in seconds for frontend and upstream HTTP connections.
     #[arg(long = "idle-timeout", value_parser=parse_duration, default_value="60")]
     pub idle_timeout: Duration,
+    /// Maximum time in seconds for an upstream HTTP exchange.
     #[arg(long = "exchange-timeout", value_parser=parse_duration, default_value="30")]
     pub exchange_timeout: Duration,
+    /// Maximum number of simultaneous client sessions, including CONNECT tunnels.
     #[arg(long = "max-sessions", default_value = "256")]
     pub max_sessions: usize,
+    /// Timeout in seconds for each upstream connection attempt.
     #[arg(short='c',long="connect-timeout",value_parser=parse_duration,default_value="10")]
     pub connect_timeout: Duration,
+    /// Race concurrent upstream connection attempts and use the first success.
     #[arg(long)]
     pub race_connect: bool,
+    /// Maximum number of upstream connection attempts to run concurrently.
     #[arg(long = "parallel-connect", default_value = "1")]
     pub parallel_connect: usize,
+    /// Set the client-side TCP keepalive idle time in seconds.
     #[arg(long="client-tcp-keepalive-time",value_parser=parse_duration)]
     pub client_tcp_keepalive_time: Option<Duration>,
+    /// Set the client-side TCP keepalive probe interval in seconds.
     #[arg(long="client-tcp-keepalive-interval",value_parser=parse_duration)]
     pub client_tcp_keepalive_interval: Option<Duration>,
+    /// Set the number of unacknowledged client-side TCP keepalive probes.
     #[arg(long = "client-tcp-keepalive-retries")]
     pub client_tcp_keepalive_retries: Option<u32>,
+    /// Set the server-side TCP keepalive idle time in seconds.
     #[arg(long="server-tcp-keepalive-time",value_parser=parse_duration)]
     pub server_tcp_keepalive_time: Option<Duration>,
+    /// Set the server-side TCP keepalive probe interval in seconds.
     #[arg(long="server-tcp-keepalive-interval",value_parser=parse_duration)]
     pub server_tcp_keepalive_interval: Option<Duration>,
+    /// Set the number of unacknowledged server-side TCP keepalive probes.
     #[arg(long = "server-tcp-keepalive-retries")]
     pub server_tcp_keepalive_retries: Option<u32>,
+    /// Wait this many seconds for active sessions to finish during shutdown.
     #[arg(long = "graceful-shutdown-timeout", default_value = "30")]
     pub graceful_shutdown_timeout: u64,
     #[cfg(windows)]
+    /// Attach the process to the parent console before printing help or errors.
     #[arg(long)]
     pub attach_console: bool,
 }

@@ -13,7 +13,7 @@ The default listener is 127.0.0.1:3128. Management pages at /, /proxy.pac,
 /access.html and /access.log share this listener. Only origin-form GET requests
 select these resources. Access events are live and bounded, without history.
 
-The separate dnsdetox companion asks a primary UDP resolver first and sends the
+The separate undns companion asks a primary UDP resolver first and sends the
 original query to a secondary DoH resolver only when the primary response has
 questions and no answers. Primary timeout and malformed responses do not trigger
 secondary fallback. This service does not automatically replace system DNS.

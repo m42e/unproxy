@@ -8,7 +8,10 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(about = "Build, validate, document and package Unproxy")]
+#[command(
+    about = "Build, validate, document and package Unproxy",
+    long_about = "Development and release utility for the Unproxy repository. Select a subcommand to build binaries, run the project checks, generate documentation, package releases, or manage release metadata."
+)]
 struct Args {
     #[command(subcommand)]
     command: Task,
@@ -240,7 +243,7 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
             let bins = if matches!(format, Format::Windows) {
                 vec!["unproxy"]
             } else {
-                vec!["unproxy", "paceval", "dnsdetox"]
+                vec!["unproxy", "paceval", "undns"]
             };
             for name in bins {
                 executable(&source_bin(name), &staging.join(format!("{name}{suffix}")))?;

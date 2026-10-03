@@ -1,7 +1,7 @@
 # DNS companion
 
 ```sh
-dnsdetox --primary 192.0.2.53:53 --port 5353 --proxy http://127.0.0.1:3128 --secondary https://8.8.8.8/dns-query
+undns --primary 192.0.2.53:53 --port 5353 --proxy http://127.0.0.1:3128 --secondary https://8.8.8.8/dns-query
 ```
 
 --primary is required and numeric IP:port. The loopback UDP port defaults to
@@ -9,9 +9,9 @@ dnsdetox --primary 192.0.2.53:53 --port 5353 --proxy http://127.0.0.1:3128 --sec
 overrides http://127.0.0.1:3128. HTTP and HTTPS proxy URLs are accepted.
 The secondary URI defaults to https://8.8.8.8/dns-query.
 
-dnsdetoxrc discovery uses the dnsdetox product configuration directory, then
-Unix /etc/dnsdetox and /usr/local/etc/dnsdetox or Windows executable-adjacent
-dnsdetoxrc/dnsdetoxrc.txt. It uses the same token-only settings syntax and CLI
+undnsrc discovery uses the undns product configuration directory, then
+Unix /etc/undns and /usr/local/etc/undns or Windows executable-adjacent
+undnsrc/undnsrc.txt. It uses the same token-only settings syntax and CLI
 scalar overrides, with RUST_LOG diagnostics and no NORC switch.
 
 Primary queries use fresh UDP sockets and independently bounded 500 ms send

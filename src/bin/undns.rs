@@ -2,33 +2,43 @@ use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use std::{env, fs, net::SocketAddr, path::PathBuf};
 #[derive(Parser, Debug)]
-#[command(name="dnsdetox",version=unproxy::DNS_VERSION,args_override_self=true)]
+#[command(
+    name = "undns",
+    version = unproxy::DNS_VERSION,
+    about = "Run a local DNS-over-HTTPS forwarding service",
+    long_about = "Listen for DNS queries on a local UDP port, forward them to a primary DNS server through Unproxy, and use a secondary DNS-over-HTTPS endpoint as fallback. Options may also be read from the undnsrc configuration file; command-line values take precedence.",
+    args_override_self = true
+)]
 struct Args {
+    /// Local UDP port to listen on.
     #[arg(long, default_value_t = 5353)]
     port: u16,
+    /// HTTP or HTTPS URL of the proxy used to reach the primary DNS server.
     #[arg(long)]
     proxy: Option<String>,
+    /// Address of the primary DNS server.
     #[arg(long, required = true)]
     primary: Option<SocketAddr>,
+    /// DNS-over-HTTPS fallback URL.
     #[arg(long, default_value = "https://8.8.8.8/dns-query")]
     secondary: http::Uri,
 }
 fn config() -> Option<PathBuf> {
     let mut p = vec![];
     if let Some(d) = dirs::config_dir() {
-        p.push(d.join("dnsdetox/dnsdetoxrc"))
+        p.push(d.join("undns/undnsrc"))
     }
     #[cfg(unix)]
     {
-        p.push("/etc/dnsdetox/dnsdetoxrc".into());
-        p.push("/usr/local/etc/dnsdetox/dnsdetoxrc".into());
+        p.push("/etc/undns/undnsrc".into());
+        p.push("/usr/local/etc/undns/undnsrc".into());
     }
     #[cfg(windows)]
     if let Ok(e) = env::current_exe()
         && let Some(d) = e.parent()
     {
-        p.push(d.join("dnsdetoxrc"));
-        p.push(d.join("dnsdetoxrc.txt"));
+        p.push(d.join("undnsrc"));
+        p.push(d.join("undnsrc.txt"));
     }
     p.into_iter().find(|x| fs::read(x).is_ok())
 }

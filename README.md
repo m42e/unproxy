@@ -27,7 +27,7 @@ credential handling.
 
 ```sh
 cargo run --bin paceval -- assets/proxy.pac https://example.org/
-cargo run --bin dnsdetox -- --primary 192.0.2.53:53
+cargo run --bin undns -- --primary 192.0.2.53:53
 cargo run --bin xtask -- check
 cargo run --bin xtask -- docs --repository OWNER/REPOSITORY
 cargo run --bin xtask -- package --format portable
@@ -38,7 +38,7 @@ settings, authentication, services, platform integration, building, API usage,
 compatibility corrections, and validation. `xtask docs` produces a static book and
 landing page in `dist/site`; its CLI reference comes from executable help with
 settings reading disabled. Native packages contain the primary proxy and native
-integration; generic portable archives also contain paceval and dnsdetox.
+integration; generic portable archives also contain paceval and undns.
 
 Negotiate is enabled by default and dynamically uses native GSSAPI or SSPI.
 `cargo build --no-default-features` removes its CLI and adapter. Linux native TLS

@@ -1,15 +1,19 @@
 fn main() {
     let result = (|| -> anyhow::Result<()> {
-        let mut args = std::env::args().skip(1);
-        let text = args.next().ok_or_else(|| {
-            anyhow::anyhow!("Usage: unproxy-system-proxy PORT (0 disables proxies)")
-        })?;
-        if text == "--help" || text == "-h" {
+        let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
+        if raw_args.iter().any(|s| s == "--help" || s == "-h") {
             println!(
-                "unproxy-system-proxy PORT\n0 disables HTTP/HTTPS proxies; 1..65535 enables 127.0.0.1:PORT."
+                "Usage: unproxy-system-proxy PORT\n\
+Set the operating system's HTTP and HTTPS proxy for network services.\n\
+\nPORT is an unsigned 16-bit number. Use 0 to disable the system proxy, or\n\
+1..65535 to set it to 127.0.0.1:PORT. This does not start or stop Unproxy."
             );
             return Ok(());
         }
+        let mut args = raw_args.into_iter();
+        let text = args.next().ok_or_else(|| {
+            anyhow::anyhow!("Usage: unproxy-system-proxy PORT (0 disables proxies)")
+        })?;
         anyhow::ensure!(args.next().is_none(), "expected one unsigned 16-bit port");
         let port = text
             .parse::<u16>()

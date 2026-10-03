@@ -66,7 +66,7 @@ The addendum is covered by proposal-specific tests and combined integration test
 | #626 | Runaway evaluation recovery and failed top-level candidate rollback in `pac_policy_626` and `policy_composition` |
 | #627 | Slow remote startup, failed startup sources and awaitable supplied-stream initialization in `lifecycle`, `policy_startup` and `streams` |
 | #631 | State transitions, duplicate suppression, failed-restore retry and IP/listener preservation in `network_notifications` and `network_policy`; real private-name distributed delivery in `native_notifications_main` |
-| #632 | The DNS companion already uses valid edition-2024 bindings; all-target builds/tests include `dnsdetox`, plus unchanged wire/transport tests in `dns` and `tls` |
+| #632 | The DNS companion already uses valid edition-2024 bindings; all-target builds/tests include `undns`, plus unchanged wire/transport tests in `dns` and `tls` |
 | #633 | Exhaustive reversed weekday/hour pairs and exact date permutations under controlled local/GMT clocks in `pac_clock` |
 | #634 | Repeatable CLI order, mixed symlink/HTTP sources, whole-set rollback, runtime/cache isolation and top-level IP in `config`, `policy_sources` and `policy_composition` |
 

@@ -2,7 +2,7 @@
 
 Build with cargo build --release --locked --bins, or install the primary proxy
 using cargo install --path . --bin unproxy --locked. Optional binaries are
-paceval, dnsdetox, native controls and development utilities.
+paceval, undns, native controls and development utilities.
 
 On Debian, install the generated .deb using apt install ./unproxy-VERSION-TARGET.deb.
 The package installs the primary proxy and a user systemd service. On macOS,
@@ -12,7 +12,7 @@ Windows ZIPs contain unproxy.exe and install.ps1; running that script installs
 under LOCALAPPDATA and sets the current user's Run entry named Unproxy.
 It does not configure Windows proxy preferences or install a Windows service.
 
-Generic portable ZIPs contain unproxy, paceval and dnsdetox. Platform-native
+Generic portable ZIPs contain unproxy, paceval and undns. Platform-native
 installers intentionally contain the proxy and platform integrations only.
 
 ```sh
