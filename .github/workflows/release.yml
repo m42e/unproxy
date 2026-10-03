@@ -6,10 +6,14 @@ permissions:
   contents: write
   pages: write
   id-token: write
+env:
+  UNPROXY_REVISION: ${{ github.sha }}
+  MACOS_SIGNING_SECRETS_PRESENT: ${{ secrets.APPLE_CERT_BASE64 != '' && secrets.APPLE_CERT_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+  MACOS_NOTARIZATION_SECRETS_PRESENT: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+  MACOS_INSTALLER_SECRETS_PRESENT: ${{ secrets.APPLE_INSTALLER_CERT_BASE64 != '' && secrets.APPLE_INSTALLER_CERT_PASSWORD != '' && secrets.APPLE_INSTALLER_SIGNING_IDENTITY != '' }}
+  WINDOWS_SIGNING_SECRETS_PRESENT: ${{ secrets.WINDOWS_CERT_BASE64 != '' && secrets.WINDOWS_CERT_PASSWORD != '' }}
 jobs:
   build:
-    env:
-      UNPROXY_REVISION: ${{ github.sha }}
     strategy:
       matrix:
         os: [ubuntu-latest, macos-14, windows-latest]
@@ -21,7 +25,125 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask check
-      - run: cargo xtask package --format native
+      - name: Prepare Apple signing keychain
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERT_BASE64: ${{ secrets.APPLE_CERT_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_INSTALLER_CERT_BASE64: ${{ secrets.APPLE_INSTALLER_CERT_BASE64 }}
+          APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if [ "$MACOS_SIGNING_SECRETS_PRESENT" != "true" ]; then
+            echo "Apple signing secrets not configured; macOS release artifacts will be unsigned."
+            exit 0
+          fi
+
+          keychain_path="$RUNNER_TEMP/unproxy-signing.keychain-db"
+          import_certificate() {
+            local name="$1" data="$2" password="$3"
+            local cert_path="$RUNNER_TEMP/$name.p12"
+            printf '%s' "$data" | base64 --decode > "$cert_path" 2>/dev/null || \
+              printf '%s' "$data" | base64 -D > "$cert_path"
+            security import "$cert_path" -k "$keychain_path" -P "$password" \
+              -T /usr/bin/codesign -T /usr/bin/security
+          }
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          echo "UNPROXY_TEMP_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
+          security default-keychain -s "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          import_certificate apple-application "$APPLE_CERT_BASE64" "$APPLE_CERT_PASSWORD"
+          if [ "$MACOS_INSTALLER_SECRETS_PRESENT" = "true" ]; then
+            import_certificate apple-installer "$APPLE_INSTALLER_CERT_BASE64" "$APPLE_INSTALLER_CERT_PASSWORD"
+          fi
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path"
+      - name: Package native release
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
+        run: cargo xtask package --format native
+      - name: Sign Windows executables
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if ($env:WINDOWS_SIGNING_SECRETS_PRESENT -ne 'true') {
+            Write-Host 'Windows signing secrets not configured; leaving release ZIP unsigned.'
+            exit 0
+          }
+
+          $certPath = Join-Path $env:RUNNER_TEMP 'unproxy-signing.pfx'
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signtool) { throw 'signtool.exe was not found in the Windows SDK.' }
+
+          $zip = Get-ChildItem dist -Filter '*.zip' | Select-Object -First 1
+          if (-not $zip) { throw 'Windows release ZIP was not created.' }
+          $unpack = Join-Path $env:RUNNER_TEMP 'unproxy-windows-package'
+          Expand-Archive -LiteralPath $zip.FullName -DestinationPath $unpack -Force
+          Get-ChildItem $unpack -Filter '*.exe' -Recurse | ForEach-Object {
+            & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+              /f $certPath /p $env:WINDOWS_CERT_PASSWORD $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Signing failed for $($_.Name)." }
+            & $signtool verify /pa /all /v $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Signature verification failed for $($_.Name)." }
+          }
+          Remove-Item $zip.FullName
+          Compress-Archive -Path (Join-Path $unpack '*') -DestinationPath $zip.FullName -CompressionLevel Optimal
+      - name: Notarize and staple macOS release artifacts
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ "$MACOS_SIGNING_SECRETS_PRESENT" != "true" ]; then
+            echo "Skipping notarization because the macOS application signing credentials are unavailable."
+            exit 0
+          fi
+          if [ "$MACOS_NOTARIZATION_SECRETS_PRESENT" != "true" ]; then
+            echo "Apple notarization secrets not configured; signed macOS artifacts will not be notarized."
+            exit 0
+          fi
+
+          for artifact in dist/*-app.zip; do
+            [ -f "$artifact" ] || continue
+            xcrun notarytool submit "$artifact" --wait \
+              --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID"
+            workdir="$RUNNER_TEMP/staple-app"
+            rm -rf "$workdir"
+            mkdir -p "$workdir"
+            ditto -x -k "$artifact" "$workdir"
+            app_path=$(find "$workdir" -name 'Unproxy.app' -type d -print -quit)
+            [ -n "$app_path" ] || { echo "Unproxy.app missing from $artifact"; exit 1; }
+            xcrun stapler staple "$app_path"
+            xcrun stapler validate "$app_path"
+            rm -f "$artifact"
+            (cd "$workdir" && zip -qry "$artifact" .)
+          done
+
+          if [ "$MACOS_INSTALLER_SECRETS_PRESENT" = "true" ]; then
+            for artifact in dist/*.pkg; do
+              [ -f "$artifact" ] || continue
+              xcrun notarytool submit "$artifact" --wait \
+                --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID"
+              xcrun stapler staple "$artifact"
+              xcrun stapler validate "$artifact"
+            done
+          else
+            echo "Developer ID Installer secrets not configured; .pkg files will not be signed or notarized."
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ runner.os }}
@@ -29,6 +151,13 @@ jobs:
             dist/*.zip
             dist/*.deb
             dist/*.pkg
+      - name: Clean up Apple signing keychain
+        if: runner.os == 'macOS' && always()
+        shell: bash
+        run: |
+          if [ -n "${UNPROXY_TEMP_KEYCHAIN:-}" ] && [ -f "$UNPROXY_TEMP_KEYCHAIN" ]; then
+            security delete-keychain "$UNPROXY_TEMP_KEYCHAIN"
+          fi
   publish:
     needs: build
     runs-on: ubuntu-latest

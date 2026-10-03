@@ -218,6 +218,37 @@ fn executable(from: &Path, to: &Path) -> Result<()> {
     }
     Ok(())
 }
+fn sign_macos_code(path: &Path, entitlements: Option<&Path>) -> Result<()> {
+    let Ok(identity) = std::env::var("APPLE_SIGNING_IDENTITY") else {
+        return Ok(());
+    };
+    if identity.trim().is_empty() {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        cfg!(target_os = "macos"),
+        "APPLE_SIGNING_IDENTITY can only be used when packaging on macOS"
+    );
+    let mut command = Command::new("codesign");
+    command.args(["--force", "--options", "runtime", "--timestamp"]);
+    if let Some(entitlements) = entitlements {
+        command.arg("--entitlements").arg(entitlements);
+    }
+    command.args(["--sign", &identity]).arg(path);
+    run(&mut command).with_context(|| format!("signing {}", path.display()))?;
+    run(Command::new("codesign")
+        .arg("--verify")
+        .arg("--verbose=2")
+        .arg(path))
+    .with_context(|| format!("verifying signature for {}", path.display()))
+}
+fn pkgbuild_signing_args(command: &mut Command) {
+    if let Ok(identity) = std::env::var("APPLE_INSTALLER_SIGNING_IDENTITY") {
+        if !identity.trim().is_empty() {
+            command.arg("--sign").arg(identity);
+        }
+    }
+}
 fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bool) -> Result<()> {
     let formats: Vec<Format> = if matches!(format, Format::Native) {
         anyhow::ensure!(
@@ -362,6 +393,7 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                         &source_bin(name),
                         &staging.join("opt/unproxy/bin").join(name),
                     )?;
+                    sign_macos_code(&staging.join("opt/unproxy/bin").join(name), None)?;
                 }
                 let agents = staging.join("Library/LaunchAgents");
                 std::fs::create_dir_all(&agents)?;
@@ -381,7 +413,8 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                             &hooks.join(hook),
                         )?;
                     }
-                    run(Command::new("pkgbuild")
+                    let mut command = Command::new("pkgbuild");
+                    command
                         .arg("--root")
                         .arg(&staging)
                         .args([
@@ -394,7 +427,9 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                             "--scripts",
                         ])
                         .arg(&hooks)
-                        .arg(output.join(format!("{package_name}.pkg"))))?;
+                        .arg(output.join(format!("{package_name}.pkg")));
+                    pkgbuild_signing_args(&mut command);
+                    run(&mut command)?;
                     std::fs::remove_dir_all(hooks)?;
                 } else {
                     package_name.push_str("-staging");
@@ -437,11 +472,21 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                     "assets/child-entitlements.plist",
                     app.join("child-entitlements.plist"),
                 )?;
+                std::fs::create_dir_all(app.join("Resources"))?;
                 std::fs::write(
                     app.join("Resources/metadata.json"),
                     serde_json::to_vec_pretty(
                         &serde_json::json!({"version":unproxy::VERSION,"bundle_id":"de.m42e.unproxy.app","helper_bundle_id":"de.m42e.unproxy.login-helper","minimum_macos":"11.1"}),
                     )?,
+                )?;
+                sign_macos_code(&app.join("MacOS/unproxy"), None)?;
+                sign_macos_code(
+                    helper.parent().context("helper bundle has no parent")?,
+                    Some(&app.join("child-entitlements.plist")),
+                )?;
+                sign_macos_code(
+                    app.parent().context("app bundle has no parent")?,
+                    Some(&app.join("entitlements.plist")),
                 )?;
                 zip(&staging, &output.join(format!("{package_name}-app.zip")))?;
                 let pkg_root = staging.join("pkg-root");
@@ -450,7 +495,8 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                     &pkg_root.join("Applications/Unproxy.app"),
                 )?;
                 if cfg!(target_os = "macos") {
-                    run(Command::new("pkgbuild")
+                    let mut command = Command::new("pkgbuild");
+                    command
                         .arg("--root")
                         .arg(&pkg_root)
                         .args([
@@ -461,7 +507,9 @@ fn package(format: Format, target: Option<&str>, output: &Path, no_negotiate: bo
                             "--install-location",
                             "/",
                         ])
-                        .arg(output.join(format!("{package_name}-app.pkg"))))?;
+                        .arg(output.join(format!("{package_name}-app.pkg")));
+                    pkgbuild_signing_args(&mut command);
+                    run(&mut command)?;
                 } else {
                     zip(
                         &pkg_root,
