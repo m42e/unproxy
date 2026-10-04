@@ -47,9 +47,31 @@ if (-not ($script:p.PSObject.Properties.Name -contains 'listeners')) {
 if (-not ($script:p.PSObject.Properties.Name -contains 'pacFiles')) {
     $script:p | Add-Member -NotePropertyName pacFiles -NotePropertyValue @()
 }
+
+function Get-PacUri([string]$value) {
+    $uri = $null
+    if ([Uri]::TryCreate($value.Trim(), [UriKind]::Absolute, [ref]$uri) -and
+        ($uri.Scheme -eq [Uri]::UriSchemeHttp -or $uri.Scheme -eq [Uri]::UriSchemeHttps) -and
+        -not [string]::IsNullOrWhiteSpace($uri.Host) -and
+        [string]::IsNullOrEmpty($uri.UserInfo) -and
+        [string]::IsNullOrEmpty($uri.Fragment)) {
+        return $uri
+    }
+    return $null
+}
+
 if (-not $script:p.pacFile) { $script:p.pacFile = Join-Path $root 'proxy.pac' }
-if (-not [IO.Path]::IsPathRooted([string]$script:p.pacFile)) {
+$initialPacUri = Get-PacUri ([string]$script:p.pacFile)
+if ($initialPacUri) {
+    $script:p.pacFile = $initialPacUri.AbsoluteUri
+} elseif (-not [IO.Path]::IsPathRooted([string]$script:p.pacFile)) {
     $script:p.pacFile = [IO.Path]::GetFullPath((Join-Path $root ([string]$script:p.pacFile)))
+}
+if ($script:p.pacFiles -and @($script:p.pacFiles).Count -gt 0) {
+    $script:p.pacFiles = @($script:p.pacFiles | ForEach-Object {
+        $uri = Get-PacUri ([string]$_)
+        if ($uri) { $uri.AbsoluteUri } else { [string]$_ }
+    })
 }
 if (-not $hasPreferences -and $script:p.pacFile -eq (Join-Path $root 'proxy.pac')) {
     'function FindProxyForURL(url, host) { return "DIRECT"; }' |
@@ -269,6 +291,141 @@ function Get-PacFiles {
     return @()
 }
 
+function Get-RemotePacContent([Uri]$uri) {
+    $current = $uri
+    for ($redirect = 0; $redirect -le 9; $redirect++) {
+        if ($current.Scheme -ne [Uri]::UriSchemeHttp -and
+            $current.Scheme -ne [Uri]::UriSchemeHttps) {
+            throw "PAC URL must use HTTP or HTTPS: $current"
+        }
+        $request = [Net.HttpWebRequest]::Create($current)
+        $request.Method = 'GET'
+        $request.AllowAutoRedirect = $false
+        $request.Timeout = 15000
+        $request.ReadWriteTimeout = 15000
+        $response = $null
+        try {
+            $response = [Net.HttpWebResponse]$request.GetResponse()
+        } catch [Net.WebException] {
+            if (-not $_.Exception.Response) { throw }
+            $response = [Net.HttpWebResponse]$_.Exception.Response
+        }
+        try {
+            $status = [int]$response.StatusCode
+            if ($status -in @(301, 302, 307, 308)) {
+                if ($redirect -eq 9) { throw 'PAC URL redirected too many times.' }
+                $location = $response.Headers['Location']
+                if ([string]::IsNullOrWhiteSpace($location)) {
+                    throw 'PAC redirect did not include a Location header.'
+                }
+                $next = [Uri]::new($current, $location)
+                if (($next.Scheme -ne [Uri]::UriSchemeHttp -and
+                    $next.Scheme -ne [Uri]::UriSchemeHttps) -or
+                    -not [string]::IsNullOrEmpty($next.UserInfo) -or
+                    -not [string]::IsNullOrEmpty($next.Fragment) -or
+                    ($current.Scheme -eq [Uri]::UriSchemeHttps -and
+                    $next.Scheme -ne [Uri]::UriSchemeHttps)) {
+                    throw 'PAC redirect must use HTTP or HTTPS, cannot include credentials or a fragment, and cannot downgrade HTTPS to HTTP.'
+                }
+                $current = $next
+                continue
+            }
+            if ($status -ne 200) { throw "Remote PAC returned HTTP $status." }
+            if ($response.ContentLength -gt 8388608) {
+                throw 'PAC response exceeds 8 MiB.'
+            }
+            $stream = $response.GetResponseStream()
+            $memory = [IO.MemoryStream]::new()
+            try {
+                $buffer = New-Object byte[] 8192
+                while (($count = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    if ($memory.Length + $count -gt 8388608) {
+                        throw 'PAC response exceeds 8 MiB.'
+                    }
+                    $memory.Write($buffer, 0, $count)
+                }
+                $utf8 = [Text.UTF8Encoding]::new($false, $true)
+                return $utf8.GetString($memory.ToArray())
+            } finally {
+                $memory.Dispose()
+                $stream.Dispose()
+            }
+        } finally {
+            $response.Dispose()
+        }
+    }
+    throw 'PAC URL redirected too many times.'
+}
+
+function Show-PacContent([string]$source, [string]$content, $owner) {
+    $viewer = [Windows.Forms.Form]::new()
+    $viewer.Text = "PAC content — $source"
+    $viewer.StartPosition = [Windows.Forms.FormStartPosition]::CenterParent
+    $viewer.Size = [Drawing.Size]::new(900, 650)
+    $viewer.MinimizeBox = $false
+    $viewer.MaximizeBox = $true
+    $text = [Windows.Forms.RichTextBox]::new()
+    $text.Dock = [Windows.Forms.DockStyle]::Fill
+    $text.ReadOnly = $true
+    $text.WordWrap = $false
+    $text.DetectUrls = $false
+    $text.Font = [Drawing.Font]::new('Consolas', 10)
+    $text.Text = $content
+    [void]$viewer.Controls.Add($text)
+    [void]$viewer.ShowDialog($owner)
+    $viewer.Dispose()
+}
+
+function Prompt-PacUrl($owner) {
+    $dialog = [Windows.Forms.Form]::new()
+    $dialog.Text = 'Add PAC URL'
+    $dialog.StartPosition = [Windows.Forms.FormStartPosition]::CenterParent
+    $dialog.FormBorderStyle = [Windows.Forms.FormBorderStyle]::FixedDialog
+    $dialog.ClientSize = [Drawing.Size]::new(520, 125)
+    $dialog.MinimizeBox = $false
+    $dialog.MaximizeBox = $false
+    $label = [Windows.Forms.Label]::new()
+    $label.Text = 'HTTP or HTTPS URL'
+    $label.Location = [Drawing.Point]::new(12, 12)
+    $label.AutoSize = $true
+    [void]$dialog.Controls.Add($label)
+    $urlBox = [Windows.Forms.TextBox]::new()
+    $urlBox.Location = [Drawing.Point]::new(12, 34)
+    $urlBox.Size = [Drawing.Size]::new(496, 24)
+    [void]$dialog.Controls.Add($urlBox)
+    $add = [Windows.Forms.Button]::new()
+    $add.Text = 'Add'
+    $add.Location = [Drawing.Point]::new(338, 78)
+    $add.Size = [Drawing.Size]::new(80, 30)
+    [void]$dialog.Controls.Add($add)
+    $cancel = [Windows.Forms.Button]::new()
+    $cancel.Text = 'Cancel'
+    $cancel.Location = [Drawing.Point]::new(428, 78)
+    $cancel.Size = [Drawing.Size]::new(80, 30)
+    $cancel.DialogResult = [Windows.Forms.DialogResult]::Cancel
+    [void]$dialog.Controls.Add($cancel)
+    $dialog.AcceptButton = $add
+    $dialog.CancelButton = $cancel
+    $add.add_Click(({
+        $uri = Get-PacUri $urlBox.Text
+        if (-not $uri) {
+            [Windows.Forms.MessageBox]::Show(
+                'Enter a valid HTTP or HTTPS URL without embedded credentials or a fragment.',
+                'Unproxy Settings') | Out-Null
+            return
+        }
+        $dialog.Tag = $uri.AbsoluteUri
+        $dialog.DialogResult = [Windows.Forms.DialogResult]::OK
+        $dialog.Close()
+    }).GetNewClosure())
+    $result = $dialog.ShowDialog($owner)
+    $value = if ($result -eq [Windows.Forms.DialogResult]::OK) {
+        [string]$dialog.Tag
+    } else { $null }
+    $dialog.Dispose()
+    return $value
+}
+
 function Start-Proxy {
     Refresh-State
     if ($script:child) { return }
@@ -294,6 +451,13 @@ function Start-Proxy {
         return
     }
     foreach ($pacFile in $pacFiles) {
+        $uri = Get-PacUri ([string]$pacFile)
+        if ($uri) { continue }
+        if ([string]$pacFile -match '^(?i:https?)://') {
+            [Windows.Forms.MessageBox]::Show(
+                "Enter a valid HTTP or HTTPS PAC URL: $pacFile", 'Unproxy') | Out-Null
+            return
+        }
         if (-not [IO.Path]::IsPathRooted([string]$pacFile)) {
             [Windows.Forms.MessageBox]::Show('PAC paths must be absolute.', 'Unproxy') | Out-Null
             return
@@ -419,7 +583,7 @@ function Show-Settings {
     }).GetNewClosure())
 
     $pacLabel = [Windows.Forms.Label]::new()
-    $pacLabel.Text = 'PAC files (top to bottom; first non-DIRECT result wins)'
+    $pacLabel.Text = 'PAC files or URLs (top to bottom; first non-DIRECT result wins)'
     $pacLabel.Location = [Drawing.Point]::new(20, 278)
     $pacLabel.AutoSize = $true
     [void]$form.Controls.Add($pacLabel)
@@ -448,30 +612,67 @@ function Show-Settings {
         $row.Size = [Drawing.Size]::new(635, 32)
         $pathBox = [Windows.Forms.TextBox]::new()
         $pathBox.Location = [Drawing.Point]::new(5, 4)
-        $pathBox.Size = [Drawing.Size]::new(360, 24)
+        $pathBox.Size = [Drawing.Size]::new(275, 24)
         $pathBox.Text = $value
         [void]$row.Controls.Add($pathBox)
+        $open = [Windows.Forms.Button]::new()
+        $open.Location = [Drawing.Point]::new(285, 2)
+        $open.Size = [Drawing.Size]::new(65, 27)
+        [void]$row.Controls.Add($open)
         $browse = [Windows.Forms.Button]::new()
         $browse.Text = 'Browse…'
-        $browse.Location = [Drawing.Point]::new(370, 2)
+        $browse.Location = [Drawing.Point]::new(355, 2)
         $browse.Size = [Drawing.Size]::new(72, 27)
         [void]$row.Controls.Add($browse)
         $up = [Windows.Forms.Button]::new()
         $up.Text = 'Up'
-        $up.Location = [Drawing.Point]::new(449, 2)
-        $up.Size = [Drawing.Size]::new(46, 27)
+        $up.Location = [Drawing.Point]::new(432, 2)
+        $up.Size = [Drawing.Size]::new(44, 27)
         [void]$row.Controls.Add($up)
         $down = [Windows.Forms.Button]::new()
         $down.Text = 'Down'
-        $down.Location = [Drawing.Point]::new(499, 2)
+        $down.Location = [Drawing.Point]::new(480, 2)
         $down.Size = [Drawing.Size]::new(50, 27)
         [void]$row.Controls.Add($down)
         $remove = [Windows.Forms.Button]::new()
         $remove.Text = 'Remove'
-        $remove.Location = [Drawing.Point]::new(554, 2)
-        $remove.Size = [Drawing.Size]::new(72, 27)
+        $remove.Location = [Drawing.Point]::new(534, 2)
+        $remove.Size = [Drawing.Size]::new(88, 27)
         [void]$row.Controls.Add($remove)
-        $entry = [pscustomobject]@{ Panel = $row; Path = $pathBox; Up = $up; Down = $down }
+        $entry = [pscustomobject]@{
+            Panel = $row; Path = $pathBox; Open = $open; Up = $up; Down = $down
+        }
+        $setOpenLabel = ({
+            $entry.Open.Text = if (Get-PacUri $entry.Path.Text) { 'View' } else { 'Open' }
+        }).GetNewClosure()
+        & $setOpenLabel
+        $pathBox.add_TextChanged(({
+            & $setOpenLabel
+        }).GetNewClosure())
+        $open.add_Click(({
+            $source = $entry.Path.Text.Trim()
+            $uri = Get-PacUri $source
+            try {
+                if ($uri) {
+                    $content = Get-RemotePacContent $uri
+                    Show-PacContent $uri.AbsoluteUri $content $form
+                } elseif ($source -match '^(?i:https?)://') {
+                    throw 'Enter a valid HTTP or HTTPS PAC URL.'
+                } else {
+                    if (-not [IO.Path]::IsPathRooted($source)) {
+                        throw 'PAC path must be absolute.'
+                    }
+                    $path = [IO.Path]::GetFullPath($source)
+                    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                        throw "PAC file not found: $path"
+                    }
+                    Start-Process -FilePath $path -ErrorAction Stop
+                }
+            } catch {
+                [Windows.Forms.MessageBox]::Show(
+                    "Could not open PAC source:`n$_", 'Unproxy Settings') | Out-Null
+            }
+        }).GetNewClosure())
         $browse.add_Click(({
             $picker = [Windows.Forms.OpenFileDialog]::new()
             $picker.Title = 'Choose a PAC file'
@@ -524,6 +725,16 @@ function Show-Settings {
             & $addPacRow $picker.FileName
         }
         $picker.Dispose()
+    }).GetNewClosure())
+
+    $addPacUrlButton = [Windows.Forms.Button]::new()
+    $addPacUrlButton.Text = 'Add PAC URL…'
+    $addPacUrlButton.Location = [Drawing.Point]::new(150, 440)
+    $addPacUrlButton.Size = [Drawing.Size]::new(120, 30)
+    [void]$form.Controls.Add($addPacUrlButton)
+    $addPacUrlButton.add_Click(({
+        $url = Prompt-PacUrl $form
+        if ($url) { & $addPacRow $url }
     }).GetNewClosure())
 
     $tunnel = [Windows.Forms.CheckBox]::new()
@@ -596,24 +807,33 @@ function Show-Settings {
 
         $pacFiles = @()
         foreach ($entry in $pacRows) {
-            $path = $entry.Path.Text.Trim()
-            if (-not [IO.Path]::IsPathRooted($path)) {
+            $source = $entry.Path.Text.Trim()
+            $uri = Get-PacUri $source
+            if ($uri) {
+                $source = $uri.AbsoluteUri
+            } elseif ($source -match '^(?i:https?)://') {
                 [Windows.Forms.MessageBox]::Show(
-                    "PAC paths must be absolute: $path", 'Unproxy Settings') | Out-Null
+                    "Enter a valid HTTP or HTTPS PAC URL: $source", 'Unproxy Settings') | Out-Null
+                return
+            } else {
+                if (-not [IO.Path]::IsPathRooted($source)) {
+                    [Windows.Forms.MessageBox]::Show(
+                        "PAC paths must be absolute: $source", 'Unproxy Settings') | Out-Null
+                    return
+                }
+                if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+                    [Windows.Forms.MessageBox]::Show(
+                        "PAC file not found: $source", 'Unproxy Settings') | Out-Null
+                    return
+                }
+                $source = [IO.Path]::GetFullPath($source)
+            }
+            if ($pacFiles -contains $source) {
+                [Windows.Forms.MessageBox]::Show(
+                    "PAC source is listed more than once: $source", 'Unproxy Settings') | Out-Null
                 return
             }
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-                [Windows.Forms.MessageBox]::Show(
-                    "PAC file not found: $path", 'Unproxy Settings') | Out-Null
-                return
-            }
-            $fullPath = [IO.Path]::GetFullPath($path)
-            if ($pacFiles -contains $fullPath) {
-                [Windows.Forms.MessageBox]::Show(
-                    "PAC file is listed more than once: $fullPath", 'Unproxy Settings') | Out-Null
-                return
-            }
-            $pacFiles += $fullPath
+            $pacFiles += $source
         }
         if ($pacFiles.Count -eq 0) {
             [Windows.Forms.MessageBox]::Show(

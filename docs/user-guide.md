@@ -79,9 +79,12 @@ To combine PAC files, repeat `--pac-file`; the files are evaluated from first
 to last. A PAC result containing a proxy route is used, while an all-`DIRECT`
 result lets evaluation continue to the next file.
 
-On Windows, put PAC files anywhere accessible and choose **Settings…** in the
-tray menu. Use **Add PAC File…**, each row's **Remove**, and **Up**/**Down** to
-edit the ordered list. On macOS, choose **Settings…** from the Unproxy menu bar
+On Windows, choose **Settings…** in the tray menu. Use **Add PAC File…** for a
+local file or **Add PAC URL…** for an HTTP(S) PAC URL. Each source row has an
+**Open** button for local files, which launches the default app, or a **View**
+button for remote URLs, which displays the downloaded text. Use each row's
+**Remove** and **Up**/**Down** buttons to edit the ordered list. On macOS,
+choose **Settings…** from the Unproxy menu bar
 menu to see listeners and PAC files together. Select a row and use **+** or **−**
 to add or remove entries; the arrows change their order. PAC file **+** opens a
 file chooser, and listener **+** adds a row you can edit in place. Double-click
