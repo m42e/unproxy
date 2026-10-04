@@ -53,37 +53,46 @@ for states in combinations(palettes.map { Array($0.1.keys).sorted() }) {
     let tile = NSBezierPath(roundedRect: NSRect(x: 2, y: 2, width: 60, height: 60), xRadius: 16, yRadius: 16)
     NSGradient(colors: [NSColor(hex: 0x20386F), NSColor(hex: 0x111D3D)])!.draw(in: tile, angle: 135)
 
-    let route = NSBezierPath()
-    route.lineWidth = 5.5
-    route.lineCapStyle = .round
-    route.lineJoinStyle = .round
-    route.move(to: NSPoint(x: 19, y: 13))
-    route.line(to: NSPoint(x: 19, y: 26))
-    route.curve(to: NSPoint(x: 32, y: 41), controlPoint1: NSPoint(x: 19, y: 35), controlPoint2: NSPoint(x: 24, y: 41))
-    route.curve(to: NSPoint(x: 45, y: 26), controlPoint1: NSPoint(x: 40, y: 41), controlPoint2: NSPoint(x: 45, y: 35))
-    route.line(to: NSPoint(x: 45, y: 15))
-    NSGradient(colors: [NSColor(hex: 0xF5FBFF), NSColor(hex: 0xA9D8FF)])!.draw(in: route, angle: 135)
+    let symbolColor = NSColor(hex: 0xEAF4FF)
+    let arrows = NSBezierPath()
+    arrows.lineWidth = 4.2
+    arrows.lineCapStyle = .round
+    arrows.lineJoinStyle = .round
+    arrows.move(to: NSPoint(x: 6.5, y: 25))
+    arrows.line(to: NSPoint(x: 23.5, y: 25))
+    arrows.move(to: NSPoint(x: 17, y: 18.5))
+    arrows.line(to: NSPoint(x: 23.5, y: 25))
+    arrows.line(to: NSPoint(x: 17, y: 31.5))
+    arrows.move(to: NSPoint(x: 40.5, y: 25))
+    arrows.line(to: NSPoint(x: 57.5, y: 25))
+    arrows.move(to: NSPoint(x: 51, y: 18.5))
+    arrows.line(to: NSPoint(x: 57.5, y: 25))
+    arrows.line(to: NSPoint(x: 51, y: 31.5))
+    symbolColor.setStroke()
+    arrows.stroke()
 
-    let arrow = NSBezierPath()
-    arrow.lineWidth = 4.5
-    arrow.lineCapStyle = .round
-    arrow.lineJoinStyle = .round
-    arrow.move(to: NSPoint(x: 38, y: 16))
-    arrow.line(to: NSPoint(x: 45, y: 9))
-    arrow.line(to: NSPoint(x: 52, y: 16))
-    NSColor(hex: 0x55E1C1).setStroke()
-    arrow.stroke()
-    NSColor(hex: 0x55E1C1).setFill()
-    NSBezierPath(ovalIn: NSRect(x: 15.8, y: 9.8, width: 6.4, height: 6.4)).fill()
+    let square = NSBezierPath(
+        roundedRect: NSRect(x: 23.5, y: 16.5, width: 17, height: 17),
+        xRadius: 3,
+        yRadius: 3
+    )
+    square.lineWidth = 4.2
+    symbolColor.setStroke()
+    square.stroke()
 
-    let centers: [CGFloat] = [12, 25.3, 38.7, 52]
+    let centers: [CGFloat] = [10, 24.7, 39.3, 54]
+    let statusY: CGFloat = 50.5
     for (index, center) in centers.enumerated() {
         NSColor(hex: 0xEAF4FF).setStroke()
-        let badge = NSBezierPath(ovalIn: NSRect(x: center - 4.1, y: 48.9, width: 8.2, height: 8.2))
-        badge.lineWidth = 1.6
+        let badge = NSBezierPath(
+            ovalIn: NSRect(x: center - 6.5, y: statusY - 8.9, width: 13, height: 17.8)
+        )
+        badge.lineWidth = 0.8
         badge.stroke()
         palettes[index].1[states[index]]!.setFill()
-        NSBezierPath(ovalIn: NSRect(x: center - 3.2, y: 49.8, width: 6.4, height: 6.4)).fill()
+        NSBezierPath(
+            ovalIn: NSRect(x: center - 6.3, y: statusY - 8.5, width: 12.6, height: 17)
+        ).fill()
     }
 
     NSGraphicsContext.restoreGraphicsState()
