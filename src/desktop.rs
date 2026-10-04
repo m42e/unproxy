@@ -21,6 +21,8 @@ pub struct Preferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listeners: Option<Vec<String>>,
     pub pac_file: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pac_files: Option<Vec<PathBuf>>,
     pub negotiate: bool,
     pub proxytunnel: bool,
     pub direct_fallback: bool,
@@ -75,6 +77,7 @@ impl Default for Preferences {
             port: 3128,
             listeners: None,
             pac_file: default_pac_path(),
+            pac_files: None,
             negotiate: false,
             proxytunnel: false,
             direct_fallback: false,
@@ -164,18 +167,23 @@ impl Preferences {
             .next()
             .unwrap_or_else(|| format!("127.0.0.1:{}", self.legacy_port()))
     }
+    pub fn effective_pac_files(&self) -> Vec<PathBuf> {
+        if let Some(files) = self.pac_files.as_ref().filter(|files| !files.is_empty()) {
+            return files.clone();
+        }
+        vec![self.pac_file.clone()]
+    }
     pub fn child_args(&self) -> Vec<String> {
         let mut a = Vec::new();
         for listener in self.effective_listeners() {
             a.push("--listen".into());
             a.push(listener);
         }
-        a.extend([
-            "--graceful-shutdown-timeout".into(),
-            "0".into(),
-            "--pac-file".into(),
-            self.pac_file.to_string_lossy().into_owned(),
-        ]);
+        a.extend(["--graceful-shutdown-timeout".into(), "0".into()]);
+        for pac_file in self.effective_pac_files() {
+            a.push("--pac-file".into());
+            a.push(pac_file.to_string_lossy().into_owned());
+        }
         if self.proxytunnel {
             a.push("--proxytunnel".into())
         }
@@ -302,14 +310,16 @@ impl ChildLifecycle {
         if self.is_running() {
             return Ok(());
         }
-        anyhow::ensure!(prefs.pac_file.is_absolute(), "PAC path must be absolute");
-        anyhow::ensure!(
-            prefs.pac_file.is_file(),
-            "PAC file is missing: {}",
-            prefs.pac_file.display()
-        );
-        std::fs::File::open(&prefs.pac_file)
-            .with_context(|| format!("read PAC file {}", prefs.pac_file.display()))?;
+        for pac_file in prefs.effective_pac_files() {
+            anyhow::ensure!(pac_file.is_absolute(), "PAC path must be absolute");
+            anyhow::ensure!(
+                pac_file.is_file(),
+                "PAC file is missing: {}",
+                pac_file.display()
+            );
+            std::fs::File::open(&pac_file)
+                .with_context(|| format!("read PAC file {}", pac_file.display()))?;
+        }
         if let Some(parent) = self.log_path().parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -1249,21 +1259,22 @@ mod native {
     fn listener_settings_page(
         prefs: &Preferences,
         listeners: &[String],
-    ) -> Result<(isize, Vec<String>, Preferences)> {
+        pac_files: &[PathBuf],
+    ) -> Result<(isize, Vec<String>, Vec<PathBuf>, Preferences)> {
         let alert: *mut AnyObject = unsafe { msg_send![objc2::class!(NSAlert), new] };
         let _: () = unsafe { msg_send![alert, setMessageText:cocoa_string("Unproxy Settings")] };
         let _: () = unsafe {
-            msg_send![alert, setInformativeText:cocoa_string("Configure listeners, PAC routing, and proxy behavior.")]
+            msg_send![alert, setInformativeText:cocoa_string("Configure listeners, ordered PAC files, and proxy behavior.")]
         };
         let _: *mut AnyObject =
             unsafe { msg_send![alert, addButtonWithTitle:cocoa_string("Cancel")] };
         let _: *mut AnyObject =
-            unsafe { msg_send![alert, addButtonWithTitle:cocoa_string("Add/Remove Listener…")] };
+            unsafe { msg_send![alert, addButtonWithTitle:cocoa_string("Edit Lists…")] };
         let _: *mut AnyObject =
             unsafe { msg_send![alert, addButtonWithTitle:cocoa_string("Save")] };
 
         let accessory: *mut AnyObject = unsafe { msg_send![objc2::class!(NSView), alloc] };
-        let height = 210.0 + listeners.len() as f64 * 32.0;
+        let height = 220.0 + (listeners.len() + pac_files.len()) as f64 * 32.0;
         let accessory: *mut AnyObject =
             unsafe { msg_send![accessory, initWithFrame:rect(0.0, 0.0, 460.0, height)] };
         settings_label(
@@ -1278,9 +1289,22 @@ mod native {
             let _: () = unsafe { msg_send![accessory, addSubview:field] };
             listener_fields.push(field);
         }
-        settings_label(accessory, "PAC file path", 130.0);
-        let pac = settings_text_field(&prefs.pac_file.to_string_lossy(), "Absolute path", 101.0);
-        let _: () = unsafe { msg_send![accessory, addSubview:pac] };
+        settings_label(
+            accessory,
+            "PAC files (top to bottom; first non-DIRECT result wins)",
+            171.0 + pac_files.len() as f64 * 32.0,
+        );
+        let mut pac_fields = Vec::with_capacity(pac_files.len());
+        for (index, pac_file) in pac_files.iter().enumerate() {
+            let y = 141.0 + pac_files.len() as f64 * 32.0 - index as f64 * 32.0;
+            let field = settings_text_field(
+                &pac_file.to_string_lossy(),
+                "Absolute path to a PAC file",
+                y,
+            );
+            let _: () = unsafe { msg_send![accessory, addSubview:field] };
+            pac_fields.push(field);
+        }
         let tunnel = settings_checkbox(accessory, "Always use CONNECT", prefs.proxytunnel, 70.0);
         let direct = settings_checkbox(accessory, "DIRECT fallback", prefs.direct_fallback, 47.0);
         #[cfg(feature = "negotiate")]
@@ -1293,8 +1317,14 @@ mod native {
             .into_iter()
             .map(read_text_field)
             .collect::<Result<Vec<_>>>()?;
+        let edited_pac_files = pac_fields
+            .into_iter()
+            .map(read_text_field)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
         let mut updated = prefs.clone();
-        updated.pac_file = PathBuf::from(read_text_field(pac)?);
         let tunnel_state: isize = unsafe { msg_send![tunnel, state] };
         let direct_state: isize = unsafe { msg_send![direct, state] };
         updated.proxytunnel = tunnel_state != 0;
@@ -1306,17 +1336,19 @@ mod native {
         }
         #[cfg(not(feature = "negotiate"))]
         let _ = negotiate;
-        Ok((response, edited_listeners, updated))
+        Ok((response, edited_listeners, edited_pac_files, updated))
     }
-    fn choose_listener_to_remove(listeners: &[String]) -> Option<usize> {
+    fn choose_list_item(values: &[String], prompt: &str) -> Option<usize> {
         let escape = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
-        let items = listeners
+        let items = values
             .iter()
             .map(|listener| format!("\"{}\"", escape(listener)))
             .collect::<Vec<_>>()
             .join(", ");
-        let script =
-            format!("choose from list {{{items}}} with prompt \"Choose a listener to remove\"");
+        let script = format!(
+            "choose from list {{{items}}} with prompt \"{}\"",
+            escape(prompt)
+        );
         let output = Command::new("osascript")
             .args(["-e", &script])
             .output()
@@ -1325,10 +1357,10 @@ mod native {
             return None;
         }
         let selected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        listeners.iter().position(|listener| listener == &selected)
+        values.iter().position(|value| value == &selected)
     }
-    fn choose_listener_action() -> Option<bool> {
-        let script = "choose from list {\"Add listener\", \"Remove listener\"} with prompt \"Choose an action\"";
+    fn choose_list_action() -> Option<&'static str> {
+        let script = "choose from list {\"Add listener\", \"Remove listener\", \"Add PAC file\", \"Remove PAC file\", \"Move PAC file up\", \"Move PAC file down\"} with prompt \"Choose a list action\"";
         let output = Command::new("osascript")
             .args(["-e", script])
             .output()
@@ -1338,23 +1370,43 @@ mod native {
         }
         let selected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         match selected.as_str() {
-            "Add listener" => Some(true),
-            "Remove listener" => Some(false),
+            "Add listener" => Some("add_listener"),
+            "Remove listener" => Some("remove_listener"),
+            "Add PAC file" => Some("add_pac"),
+            "Remove PAC file" => Some("remove_pac"),
+            "Move PAC file up" => Some("move_pac_up"),
+            "Move PAC file down" => Some("move_pac_down"),
             _ => None,
         }
+    }
+    fn choose_pac_file() -> Option<PathBuf> {
+        let output = Command::new("osascript")
+            .args([
+                "-e",
+                "POSIX path of (choose file with prompt \"Choose a PAC file\")",
+            ])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        (!path.is_empty()).then(|| PathBuf::from(path))
     }
     fn settings_dialog(prefs: &Preferences) -> Result<Option<Preferences>> {
         let mut updated = prefs.clone();
         let mut listeners = prefs.effective_listeners();
+        let mut pac_files = prefs.effective_pac_files();
         loop {
-            let (response, edited_listeners, edited_prefs) =
-                listener_settings_page(&updated, &listeners)?;
+            let (response, edited_listeners, edited_pac_files, edited_prefs) =
+                listener_settings_page(&updated, &listeners, &pac_files)?;
             listeners = edited_listeners;
+            pac_files = edited_pac_files;
             updated = edited_prefs;
             match response {
                 1000 => return Ok(None),
-                1001 => match choose_listener_action() {
-                    Some(true) => {
+                1001 => match choose_list_action() {
+                    Some("add_listener") => {
                         if let Some(listener) = prompt(
                             "Listener address and port (use brackets for IPv6)",
                             "127.0.0.1:8080",
@@ -1362,15 +1414,61 @@ mod native {
                             listeners.push(listener);
                         }
                     }
-                    Some(false) if listeners.len() > 1 => {
-                        if let Some(index) = choose_listener_to_remove(&listeners) {
+                    Some("remove_listener") if listeners.len() > 1 => {
+                        if let Some(index) =
+                            choose_list_item(&listeners, "Choose a listener to remove")
+                        {
                             listeners.remove(index);
                         }
                     }
-                    Some(false) => {
+                    Some("remove_listener") => {
                         show_message("Unproxy Settings", "At least one listener is required.")
                     }
+                    Some("add_pac") => {
+                        if let Some(pac_file) = choose_pac_file() {
+                            pac_files.push(pac_file);
+                        }
+                    }
+                    Some("remove_pac") if pac_files.len() > 1 => {
+                        let choices = pac_files
+                            .iter()
+                            .map(|pac_file| pac_file.to_string_lossy().into_owned())
+                            .collect::<Vec<_>>();
+                        if let Some(index) =
+                            choose_list_item(&choices, "Choose a PAC file to remove")
+                        {
+                            pac_files.remove(index);
+                        }
+                    }
+                    Some("remove_pac") => {
+                        show_message("Unproxy Settings", "At least one PAC file is required.")
+                    }
+                    Some("move_pac_up") if pac_files.len() > 1 => {
+                        let choices = pac_files
+                            .iter()
+                            .map(|pac_file| pac_file.to_string_lossy().into_owned())
+                            .collect::<Vec<_>>();
+                        if let Some(index) = choose_list_item(&choices, "Choose a PAC file to move")
+                        {
+                            if index > 0 {
+                                pac_files.swap(index, index - 1);
+                            }
+                        }
+                    }
+                    Some("move_pac_down") if pac_files.len() > 1 => {
+                        let choices = pac_files
+                            .iter()
+                            .map(|pac_file| pac_file.to_string_lossy().into_owned())
+                            .collect::<Vec<_>>();
+                        if let Some(index) = choose_list_item(&choices, "Choose a PAC file to move")
+                        {
+                            if index + 1 < pac_files.len() {
+                                pac_files.swap(index, index + 1);
+                            }
+                        }
+                    }
                     None => {}
+                    _ => {}
                 },
                 1002 => {
                     let parsed = listeners
@@ -1393,12 +1491,46 @@ mod native {
                         show_message("Invalid listener", "Listener addresses must be unique.");
                         continue;
                     }
-                    if !updated.pac_file.is_absolute() {
-                        show_message("Invalid PAC file", "PAC file path must be absolute.");
+                    if pac_files.is_empty() {
+                        show_message("Invalid PAC files", "At least one PAC file is required.");
+                        continue;
+                    }
+                    let mut unique_pac_files = std::collections::HashSet::new();
+                    let mut pac_error = None;
+                    for pac_file in &pac_files {
+                        if !pac_file.is_absolute() {
+                            pac_error =
+                                Some(format!("PAC path must be absolute: {}", pac_file.display()));
+                            break;
+                        }
+                        if !pac_file.is_file() {
+                            pac_error =
+                                Some(format!("PAC file is missing: {}", pac_file.display()));
+                            break;
+                        }
+                        if !unique_pac_files.insert(pac_file.clone()) {
+                            pac_error = Some(format!(
+                                "PAC file is listed more than once: {}",
+                                pac_file.display()
+                            ));
+                            break;
+                        }
+                        if let Err(error) = std::fs::File::open(pac_file) {
+                            pac_error = Some(format!(
+                                "Could not read PAC file {}: {error}",
+                                pac_file.display()
+                            ));
+                            break;
+                        }
+                    }
+                    if let Some(error) = pac_error {
+                        show_message("Invalid PAC files", &error);
                         continue;
                     }
                     updated.port = u32::from(parsed[0].port());
                     updated.listeners = Some(parsed.iter().map(ToString::to_string).collect());
+                    updated.pac_file = pac_files[0].clone();
+                    updated.pac_files = Some(pac_files);
                     return Ok(Some(updated));
                 }
                 _ => return Ok(None),
@@ -1410,7 +1542,7 @@ mod native {
             return Ok(());
         };
         let restart_required = updated.effective_listeners() != state.prefs.effective_listeners()
-            || updated.pac_file != state.prefs.pac_file
+            || updated.effective_pac_files() != state.prefs.effective_pac_files()
             || updated.negotiate != state.prefs.negotiate
             || updated.proxytunnel != state.prefs.proxytunnel
             || updated.direct_fallback != state.prefs.direct_fallback;
@@ -1540,6 +1672,30 @@ mod native {
         if !p.pac_file.is_absolute() {
             p.pac_file = std::env::current_dir()?.join(&p.pac_file);
         }
+        let pac_files = get("pacFiles");
+        if !pac_files.is_null() {
+            let count: usize = unsafe { msg_send![pac_files, count] };
+            let mut values = Vec::with_capacity(count);
+            for index in 0..count {
+                let item: *mut AnyObject = unsafe { msg_send![pac_files, objectAtIndex:index] };
+                let bytes: *const std::ffi::c_char = unsafe { msg_send![item, UTF8String] };
+                if !bytes.is_null() {
+                    let mut path = PathBuf::from(
+                        unsafe { std::ffi::CStr::from_ptr(bytes) }
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                    if !path.is_absolute() {
+                        path = std::env::current_dir()?.join(path);
+                    }
+                    values.push(path);
+                }
+            }
+            if let Some(first) = values.first() {
+                p.pac_file = first.clone();
+            }
+            p.pac_files = Some(values);
+        }
         for (name, field) in [
             ("negotiate", 0u8),
             ("proxytunnel", 1),
@@ -1581,6 +1737,17 @@ mod native {
             let _: () = unsafe { msg_send![d,setObject:array,forKey:cocoa_string("listeners")] };
         } else {
             let _: () = unsafe { msg_send![d,removeObjectForKey:cocoa_string("listeners")] };
+        }
+        if let Some(pac_files) = &p.pac_files {
+            let array: *mut AnyObject = unsafe { msg_send![objc2::class!(NSMutableArray), new] };
+            for pac_file in pac_files {
+                let _: () = unsafe {
+                    msg_send![array, addObject:cocoa_string(&pac_file.to_string_lossy())]
+                };
+            }
+            let _: () = unsafe { msg_send![d,setObject:array,forKey:cocoa_string("pacFiles")] };
+        } else {
+            let _: () = unsafe { msg_send![d,removeObjectForKey:cocoa_string("pacFiles")] };
         }
         let _: () = unsafe {
             msg_send![d,setObject:cocoa_string(&p.pac_file.to_string_lossy()),forKey:cocoa_string("pacFile")]
@@ -1863,6 +2030,7 @@ mod native {
                 port: 65535,
                 listeners: None,
                 pac_file: pac_file.to_owned(),
+                pac_files: None,
                 negotiate: true,
                 proxytunnel: false,
                 direct_fallback: false,

@@ -18,9 +18,9 @@ the macOS package for your Mac.
    ```
 
 5. The Unproxy tray icon appears near the clock. Click its status row to start
-   or stop the proxy. Choose **Settings…** to edit listeners, the PAC file, and
-   proxy behavior. The installer adds Unproxy to your Start menu and starts it
-   when you sign in; you can change that in Settings.
+   or stop the proxy. Choose **Settings…** to edit listeners, ordered PAC
+   files, and proxy behavior. The installer adds Unproxy to your Start menu and
+   starts it when you sign in; you can change that in Settings.
 
 To remove Unproxy, open the extracted ZIP folder in PowerShell and run:
 
@@ -37,9 +37,9 @@ Add `-RemoveUserData` to also delete Unproxy preferences and logs.
 3. Click the Unproxy icon in the menu bar. Its status row starts or stops the
    proxy.
 
-Choose **Settings…** to set listeners, the PAC file, and proxy behavior. Use
-**Start with Login** to control whether the app opens when you sign in. The menu
-also has actions to open the log and copy the proxy address.
+Choose **Settings…** to set listeners, ordered PAC files, and proxy behavior.
+Use **Start with Login** to control whether the app opens when you sign in. The
+menu also has actions to open the log and copy the proxy address.
 
 ## Debian or Ubuntu
 

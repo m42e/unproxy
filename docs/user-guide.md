@@ -75,13 +75,19 @@ or:
 unproxy --pac-file https://proxy.example.org/company.pac
 ```
 
-On Windows, put the PAC file at `%LOCALAPPDATA%\Unproxy\proxy.pac` and choose
-**Settings…** in the tray menu. On macOS, choose **Settings…** from the Unproxy
-menu bar menu. Add a listener for each numeric IP address and port; write IPv6
-addresses in brackets, such as `[::1]:3128`. Both desktop apps start with IPv4
-and IPv6 loopback listeners on port 3128. Use the listener controls in Settings
-to add or remove entries. **Copy Proxy Address** copies the first listener. On
-Linux, create `~/.config/unproxy/unproxyrc` and put this in it:
+To combine PAC files, repeat `--pac-file`; the files are evaluated from first
+to last. A PAC result containing a proxy route is used, while an all-`DIRECT`
+result lets evaluation continue to the next file.
+
+On Windows, put PAC files anywhere accessible and choose **Settings…** in the
+tray menu. Use **Add PAC File…**, each row's **Remove**, and **Up**/**Down** to
+edit the ordered list. On macOS, choose **Settings…** from the Unproxy menu bar
+menu, then **Edit Lists…** to add, remove, or move PAC files. Add a listener for
+each numeric IP address and port; write IPv6 addresses in brackets, such as
+`[::1]:3128`. Both desktop apps start with IPv4 and IPv6 loopback listeners on
+port 3128. Use the listener controls in Settings to add or remove entries.
+**Copy Proxy Address** copies the first listener. On Linux, create
+`~/.config/unproxy/unproxyrc` and put this in it:
 
 ```text
 --pac-file /path/to/company.pac

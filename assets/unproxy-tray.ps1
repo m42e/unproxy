@@ -44,6 +44,9 @@ $script:p = if ($hasPreferences) {
 if (-not ($script:p.PSObject.Properties.Name -contains 'listeners')) {
     $script:p | Add-Member -NotePropertyName listeners -NotePropertyValue @()
 }
+if (-not ($script:p.PSObject.Properties.Name -contains 'pacFiles')) {
+    $script:p | Add-Member -NotePropertyName pacFiles -NotePropertyValue @()
+}
 if (-not $script:p.pacFile) { $script:p.pacFile = Join-Path $root 'proxy.pac' }
 if (-not [IO.Path]::IsPathRooted([string]$script:p.pacFile)) {
     $script:p.pacFile = [IO.Path]::GetFullPath((Join-Path $root ([string]$script:p.pacFile)))
@@ -258,6 +261,14 @@ function Get-ListenerAddresses {
     return @("127.0.0.1:$port", "[::1]:$port")
 }
 
+function Get-PacFiles {
+    if ($script:p.pacFiles -and @($script:p.pacFiles).Count -gt 0) {
+        return @($script:p.pacFiles | ForEach-Object { [string]$_ })
+    }
+    if ($script:p.pacFile) { return @([string]$script:p.pacFile) }
+    return @()
+}
+
 function Start-Proxy {
     Refresh-State
     if ($script:child) { return }
@@ -277,14 +288,21 @@ function Start-Proxy {
             return
         }
     }
-    if (-not [IO.Path]::IsPathRooted([string]$script:p.pacFile)) {
-        [Windows.Forms.MessageBox]::Show('PAC path must be absolute.', 'Unproxy') | Out-Null
+    $pacFiles = @(Get-PacFiles)
+    if ($pacFiles.Count -eq 0) {
+        [Windows.Forms.MessageBox]::Show('At least one PAC file is required.', 'Unproxy') | Out-Null
         return
     }
-    if (-not (Test-Path -LiteralPath $script:p.pacFile -PathType Leaf)) {
-        [Windows.Forms.MessageBox]::Show(
-            "PAC file not found: $($script:p.pacFile)", 'Unproxy') | Out-Null
-        return
+    foreach ($pacFile in $pacFiles) {
+        if (-not [IO.Path]::IsPathRooted([string]$pacFile)) {
+            [Windows.Forms.MessageBox]::Show('PAC paths must be absolute.', 'Unproxy') | Out-Null
+            return
+        }
+        if (-not (Test-Path -LiteralPath $pacFile -PathType Leaf)) {
+            [Windows.Forms.MessageBox]::Show(
+                "PAC file not found: $pacFile", 'Unproxy') | Out-Null
+            return
+        }
     }
 
     $exe = Join-Path $bin 'unproxy.exe'
@@ -292,10 +310,8 @@ function Start-Proxy {
     foreach ($listener in $listenerAddresses) {
         $arguments += @('--listen', [string]$listener)
     }
-    $arguments += @(
-        '--pac-file', $script:p.pacFile,
-        '--graceful-shutdown-timeout', '0'
-    )
+    foreach ($pacFile in $pacFiles) { $arguments += @('--pac-file', [string]$pacFile) }
+    $arguments += @('--graceful-shutdown-timeout', '0')
     if ($script:p.proxytunnel) { $arguments += '--proxytunnel' }
     if ($script:p.directFallback) { $arguments += '--direct-fallback' }
     if ($script:p.negotiate -and $script:negotiateAvailable) { $arguments += '--negotiate' }
@@ -345,7 +361,7 @@ function Show-Settings {
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
     $form.ShowInTaskbar = $false
-    $form.ClientSize = [Drawing.Size]::new(700, 525)
+    $form.ClientSize = [Drawing.Size]::new(700, 690)
 
     $listenersLabel = [Windows.Forms.Label]::new()
     $listenersLabel.Text = 'Listeners (numeric IP address and port; IPv6 in brackets)'
@@ -403,50 +419,130 @@ function Show-Settings {
     }).GetNewClosure())
 
     $pacLabel = [Windows.Forms.Label]::new()
-    $pacLabel.Text = 'PAC file path'
+    $pacLabel.Text = 'PAC files (top to bottom; first non-DIRECT result wins)'
     $pacLabel.Location = [Drawing.Point]::new(20, 278)
     $pacLabel.AutoSize = $true
     [void]$form.Controls.Add($pacLabel)
 
-    $pacBox = [Windows.Forms.TextBox]::new()
-    $pacBox.Location = [Drawing.Point]::new(205, 273)
-    $pacBox.Size = [Drawing.Size]::new(410, 24)
-    $pacBox.Text = [string]$script:p.pacFile
-    [void]$form.Controls.Add($pacBox)
+    $pacPanel = [Windows.Forms.Panel]::new()
+    $pacPanel.Location = [Drawing.Point]::new(20, 302)
+    $pacPanel.Size = [Drawing.Size]::new(660, 130)
+    $pacPanel.AutoScroll = $true
+    $pacPanel.BorderStyle = [Windows.Forms.BorderStyle]::FixedSingle
+    [void]$form.Controls.Add($pacPanel)
+    $pacRows = [Collections.ArrayList]::new()
+    $renderPacRows = ({
+        $pacPanel.Controls.Clear()
+        for ($index = 0; $index -lt $pacRows.Count; $index++) {
+            $entry = $pacRows[$index]
+            $entry.Panel.Location = [Drawing.Point]::new(0, $index * 34)
+            $entry.Up.Enabled = $index -gt 0
+            $entry.Down.Enabled = $index -lt ($pacRows.Count - 1)
+            [void]$pacPanel.Controls.Add($entry.Panel)
+        }
+        $pacPanel.AutoScrollMinSize = [Drawing.Size]::new(0, $pacRows.Count * 34)
+    }).GetNewClosure()
+    $addPacRow = ({
+        param([string]$value)
+        $row = [Windows.Forms.Panel]::new()
+        $row.Size = [Drawing.Size]::new(635, 32)
+        $pathBox = [Windows.Forms.TextBox]::new()
+        $pathBox.Location = [Drawing.Point]::new(5, 4)
+        $pathBox.Size = [Drawing.Size]::new(360, 24)
+        $pathBox.Text = $value
+        [void]$row.Controls.Add($pathBox)
+        $browse = [Windows.Forms.Button]::new()
+        $browse.Text = 'Browse…'
+        $browse.Location = [Drawing.Point]::new(370, 2)
+        $browse.Size = [Drawing.Size]::new(72, 27)
+        [void]$row.Controls.Add($browse)
+        $up = [Windows.Forms.Button]::new()
+        $up.Text = 'Up'
+        $up.Location = [Drawing.Point]::new(449, 2)
+        $up.Size = [Drawing.Size]::new(46, 27)
+        [void]$row.Controls.Add($up)
+        $down = [Windows.Forms.Button]::new()
+        $down.Text = 'Down'
+        $down.Location = [Drawing.Point]::new(499, 2)
+        $down.Size = [Drawing.Size]::new(50, 27)
+        [void]$row.Controls.Add($down)
+        $remove = [Windows.Forms.Button]::new()
+        $remove.Text = 'Remove'
+        $remove.Location = [Drawing.Point]::new(554, 2)
+        $remove.Size = [Drawing.Size]::new(72, 27)
+        [void]$row.Controls.Add($remove)
+        $entry = [pscustomobject]@{ Panel = $row; Path = $pathBox; Up = $up; Down = $down }
+        $browse.add_Click(({
+            $picker = [Windows.Forms.OpenFileDialog]::new()
+            $picker.Title = 'Choose a PAC file'
+            $picker.Filter = 'PAC files (*.pac)|*.pac|All files (*.*)|*.*'
+            if (Test-Path -LiteralPath $entry.Path.Text -PathType Leaf) {
+                $picker.FileName = $entry.Path.Text
+            }
+            if ($picker.ShowDialog($form) -eq [Windows.Forms.DialogResult]::OK) {
+                $entry.Path.Text = $picker.FileName
+            }
+            $picker.Dispose()
+        }).GetNewClosure())
+        $up.add_Click(({
+            $index = $pacRows.IndexOf($entry)
+            if ($index -gt 0) {
+                $previous = $pacRows[$index - 1]
+                $pacRows[$index - 1] = $entry
+                $pacRows[$index] = $previous
+                & $renderPacRows
+            }
+        }).GetNewClosure())
+        $down.add_Click(({
+            $index = $pacRows.IndexOf($entry)
+            if ($index -lt ($pacRows.Count - 1)) {
+                $next = $pacRows[$index + 1]
+                $pacRows[$index + 1] = $entry
+                $pacRows[$index] = $next
+                & $renderPacRows
+            }
+        }).GetNewClosure())
+        $remove.add_Click(({
+            [void]$pacRows.Remove($entry)
+            & $renderPacRows
+        }).GetNewClosure())
+        [void]$pacRows.Add($entry)
+        & $renderPacRows
+    }).GetNewClosure()
+    foreach ($pacFile in @(Get-PacFiles)) { & $addPacRow ([string]$pacFile) }
 
-    $browseButton = [Windows.Forms.Button]::new()
-    $browseButton.Text = 'Browse…'
-    $browseButton.Location = [Drawing.Point]::new(625, 271)
-    $browseButton.Size = [Drawing.Size]::new(55, 27)
-    [void]$form.Controls.Add($browseButton)
-    $browseButton.add_Click(({
+    $addPacButton = [Windows.Forms.Button]::new()
+    $addPacButton.Text = 'Add PAC File…'
+    $addPacButton.Location = [Drawing.Point]::new(20, 440)
+    $addPacButton.Size = [Drawing.Size]::new(120, 30)
+    [void]$form.Controls.Add($addPacButton)
+    $addPacButton.add_Click(({
         $picker = [Windows.Forms.OpenFileDialog]::new()
         $picker.Title = 'Choose a PAC file'
         $picker.Filter = 'PAC files (*.pac)|*.pac|All files (*.*)|*.*'
-        $picker.FileName = $pacBox.Text
         if ($picker.ShowDialog($form) -eq [Windows.Forms.DialogResult]::OK) {
-            $pacBox.Text = $picker.FileName
+            & $addPacRow $picker.FileName
         }
         $picker.Dispose()
     }).GetNewClosure())
 
     $tunnel = [Windows.Forms.CheckBox]::new()
     $tunnel.Text = 'Always use CONNECT'
-    $tunnel.Location = [Drawing.Point]::new(205, 315)
+    $tunnel.Location = [Drawing.Point]::new(205, 490)
     $tunnel.AutoSize = $true
     $tunnel.Checked = [bool]$script:p.proxytunnel
     [void]$form.Controls.Add($tunnel)
 
     $direct = [Windows.Forms.CheckBox]::new()
     $direct.Text = 'DIRECT fallback'
-    $direct.Location = [Drawing.Point]::new(205, 345)
+    $direct.Location = [Drawing.Point]::new(205, 520)
     $direct.AutoSize = $true
     $direct.Checked = [bool]$script:p.directFallback
     [void]$form.Controls.Add($direct)
 
     $negotiate = [Windows.Forms.CheckBox]::new()
     $negotiate.Text = 'Negotiate'
-    $negotiate.Location = [Drawing.Point]::new(205, 375)
+    $negotiate.Location = [Drawing.Point]::new(205, 550)
     $negotiate.AutoSize = $true
     $negotiate.Checked = [bool]$script:p.negotiate
     $negotiate.Enabled = [bool]$script:negotiateAvailable
@@ -454,21 +550,21 @@ function Show-Settings {
 
     $autostart = [Windows.Forms.CheckBox]::new()
     $autostart.Text = 'Start Unproxy when I sign in'
-    $autostart.Location = [Drawing.Point]::new(205, 405)
+    $autostart.Location = [Drawing.Point]::new(205, 580)
     $autostart.AutoSize = $true
     $autostart.Checked = [bool]$script:p.autostart
     [void]$form.Controls.Add($autostart)
 
     $saveButton = [Windows.Forms.Button]::new()
     $saveButton.Text = 'Save'
-    $saveButton.Location = [Drawing.Point]::new(500, 470)
+    $saveButton.Location = [Drawing.Point]::new(500, 635)
     $saveButton.Size = [Drawing.Size]::new(80, 30)
     $saveButton.DialogResult = [Windows.Forms.DialogResult]::None
     [void]$form.Controls.Add($saveButton)
 
     $cancelButton = [Windows.Forms.Button]::new()
     $cancelButton.Text = 'Cancel'
-    $cancelButton.Location = [Drawing.Point]::new(590, 470)
+    $cancelButton.Location = [Drawing.Point]::new(590, 635)
     $cancelButton.Size = [Drawing.Size]::new(80, 30)
     $cancelButton.DialogResult = [Windows.Forms.DialogResult]::Cancel
     [void]$form.Controls.Add($cancelButton)
@@ -476,12 +572,6 @@ function Show-Settings {
     $form.CancelButton = $cancelButton
 
     $saveButton.add_Click(({
-        if (-not [IO.Path]::IsPathRooted($pacBox.Text)) {
-            [Windows.Forms.MessageBox]::Show(
-                'PAC path must be absolute.', 'Unproxy Settings') | Out-Null
-            return
-        }
-
         $listenerAddresses = @()
         foreach ($entry in $listenerRows) {
             $parsed = Parse-ListenerAddress $entry.Address.Text
@@ -504,11 +594,39 @@ function Show-Settings {
             return
         }
 
+        $pacFiles = @()
+        foreach ($entry in $pacRows) {
+            $path = $entry.Path.Text.Trim()
+            if (-not [IO.Path]::IsPathRooted($path)) {
+                [Windows.Forms.MessageBox]::Show(
+                    "PAC paths must be absolute: $path", 'Unproxy Settings') | Out-Null
+                return
+            }
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                [Windows.Forms.MessageBox]::Show(
+                    "PAC file not found: $path", 'Unproxy Settings') | Out-Null
+                return
+            }
+            $fullPath = [IO.Path]::GetFullPath($path)
+            if ($pacFiles -contains $fullPath) {
+                [Windows.Forms.MessageBox]::Show(
+                    "PAC file is listed more than once: $fullPath", 'Unproxy Settings') | Out-Null
+                return
+            }
+            $pacFiles += $fullPath
+        }
+        if ($pacFiles.Count -eq 0) {
+            [Windows.Forms.MessageBox]::Show(
+                'At least one PAC file is required.', 'Unproxy Settings') | Out-Null
+            return
+        }
+
         $wasRunning = $null -ne $script:child
         $previousAutostart = [bool]$script:p.autostart
         $previousListeners = @(Get-ListenerAddresses)
+        $previousPacFiles = @(Get-PacFiles)
         $restartRequired = (($previousListeners -join "`n") -cne ($listenerAddresses -join "`n")) -or
-            ([string]$script:p.pacFile -cne [string]$pacBox.Text) -or
+            (($previousPacFiles -join "`n") -cne ($pacFiles -join "`n")) -or
             ([bool]$script:p.proxytunnel -ne [bool]$tunnel.Checked) -or
             ([bool]$script:p.directFallback -ne [bool]$direct.Checked) -or
             ([bool]$script:negotiateAvailable -and
@@ -517,6 +635,7 @@ function Show-Settings {
         $previous = [pscustomobject]@{
             port = $script:p.port
             listeners = @($script:p.listeners)
+            pacFiles = @($script:p.pacFiles)
             pacFile = $script:p.pacFile
             proxytunnel = $script:p.proxytunnel
             directFallback = $script:p.directFallback
@@ -524,7 +643,8 @@ function Show-Settings {
         }
         $script:p.listeners = $listenerAddresses
         $script:p.port = [long]$firstListener.Port
-        $script:p.pacFile = $pacBox.Text
+        $script:p.pacFiles = $pacFiles
+        $script:p.pacFile = $pacFiles[0]
         $script:p.proxytunnel = [bool]$tunnel.Checked
         $script:p.directFallback = [bool]$direct.Checked
         if ($script:negotiateAvailable) {
@@ -541,6 +661,7 @@ function Show-Settings {
             }
             $script:p.port = $previous.port
             $script:p.listeners = $previous.listeners
+            $script:p.pacFiles = $previous.pacFiles
             $script:p.pacFile = $previous.pacFile
             $script:p.proxytunnel = $previous.proxytunnel
             $script:p.directFallback = $previous.directFallback
