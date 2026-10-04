@@ -28,6 +28,17 @@ fn preferences_have_expected_defaults_and_supported_flags() {
 }
 
 #[test]
+fn primary_listener_uses_the_first_configured_listener_or_loopback_default() {
+    assert_eq!(Preferences::default().primary_listener(), "127.0.0.1:3128");
+
+    let preferences = Preferences {
+        listeners: Some(vec!["127.0.0.2:8080".into(), "127.0.0.1:3128".into()]),
+        ..Preferences::default()
+    };
+    assert_eq!(preferences.primary_listener(), "127.0.0.2:8080");
+}
+
+#[test]
 fn app_bundle_paths_point_to_packaged_child_and_login_item() {
     let exe = std::path::Path::new("/Applications/Unproxy.app/Contents/MacOS/unproxy-app");
     let paths = BundlePaths::from_main_executable(exe).unwrap();

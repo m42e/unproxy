@@ -71,6 +71,13 @@ impl DesktopDefaults {
     }
 }
 
+fn apply_desktop_defaults_json(preferences: &mut Preferences, json: Option<&str>) {
+    if let Some(defaults) = json.and_then(|json| serde_json::from_str::<DesktopDefaults>(json).ok())
+    {
+        defaults.apply(preferences);
+    }
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         let mut preferences = Self {
@@ -83,11 +90,10 @@ impl Default for Preferences {
             direct_fallback: false,
             autostart: true,
         };
-        if let Some(defaults) = option_env!("UNPROXY_DESKTOP_DEFAULTS_JSON")
-            .and_then(|json| serde_json::from_str::<DesktopDefaults>(json).ok())
-        {
-            defaults.apply(&mut preferences);
-        }
+        apply_desktop_defaults_json(
+            &mut preferences,
+            option_env!("UNPROXY_DESKTOP_DEFAULTS_JSON"),
+        );
         preferences
     }
 }
@@ -3550,6 +3556,10 @@ mod tests {
 
     #[test]
     fn remote_pac_uris_are_validated_and_scheme_is_normalized() {
+        let http = parse_remote_pac_uri("HTTP://proxy.example.org/company.pac")
+            .unwrap()
+            .unwrap();
+        assert_eq!(http.to_string(), "http://proxy.example.org/company.pac");
         let uri = parse_remote_pac_uri("HTTPS://proxy.example.org/company.pac?team=a")
             .unwrap()
             .unwrap();
@@ -3561,11 +3571,22 @@ mod tests {
             parse_remote_pac_uri("https://user:password@proxy.example.org/policy.pac").is_err()
         );
         assert!(parse_remote_pac_uri("https:///policy.pac").is_err());
+        assert!(
+            parse_remote_pac_uri("ftp://proxy.example.org/policy.pac")
+                .unwrap()
+                .is_none()
+        );
         assert!(parse_remote_pac_uri("/tmp/company.pac").unwrap().is_none());
         assert_eq!(
             resolve_pac_source(PathBuf::from("HTTPS://proxy.example.org/company.pac")).unwrap(),
             PathBuf::from("https://proxy.example.org/company.pac")
         );
+        assert_eq!(
+            resolve_pac_source(PathBuf::from("proxy.pac")).unwrap(),
+            std::env::current_dir().unwrap().join("proxy.pac")
+        );
+        let absolute = std::env::current_exe().unwrap();
+        assert_eq!(resolve_pac_source(absolute.clone()).unwrap(), absolute);
     }
 
     #[cfg(unix)]
@@ -3624,6 +3645,22 @@ mod tests {
         let original = preferences.clone();
         DesktopDefaults::default().apply(&mut preferences);
         assert_eq!(preferences, original);
+
+        let absolute_pac = std::env::current_exe().unwrap();
+        DesktopDefaults {
+            pac_file: Some(absolute_pac.clone()),
+            ..DesktopDefaults::default()
+        }
+        .apply(&mut preferences);
+        assert_eq!(preferences.pac_file, absolute_pac);
+
+        let mut embedded = Preferences::default();
+        apply_desktop_defaults_json(&mut embedded, Some(r#"{"port":4321,"autostart":false}"#));
+        assert_eq!(embedded.port, 4321);
+        assert!(!embedded.autostart);
+        let unchanged = embedded.clone();
+        apply_desktop_defaults_json(&mut embedded, Some("invalid JSON"));
+        assert_eq!(embedded, unchanged);
     }
 
     #[test]
@@ -3786,7 +3823,13 @@ mod tests {
         assert!(args.contains("--direct-fallback"));
         #[cfg(feature = "negotiate")]
         assert!(!args.contains("--negotiate"));
-        assert!(child.last_exit.as_deref().unwrap().contains("status"));
+        assert!(
+            child
+                .last_exit
+                .as_deref()
+                .unwrap()
+                .contains("Proxy exited unexpectedly")
+        );
         let log = std::fs::read_to_string(dir.path().join("support/unproxy.log")).unwrap();
         assert!(log.contains("out\n"));
         assert!(log.contains("err\n"));
