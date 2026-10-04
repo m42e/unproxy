@@ -1681,6 +1681,23 @@ mod native {
             open_pac_file(&path)
         }
     }
+    fn pac_source_to_copy(values: &[String], selected_row: isize) -> Result<&str> {
+        anyhow::ensure!(selected_row >= 0, "select a PAC source first");
+        values
+            .get(selected_row as usize)
+            .map(String::as_str)
+            .context("selected PAC source is unavailable")
+    }
+    fn selected_pac_source() -> Result<String> {
+        let table = *PAC_FILE_TABLE.lock().unwrap() as *mut AnyObject;
+        anyhow::ensure!(!table.is_null(), "PAC file table is unavailable");
+        let row: isize = unsafe { msg_send![table, selectedRow] };
+        let values = EDITOR_PAC_FILES.lock().unwrap();
+        Ok(pac_source_to_copy(&values, row)?.to_owned())
+    }
+    fn copy_selected_pac_source() -> Result<()> {
+        copy_to_clipboard(&selected_pac_source()?)
+    }
     unsafe extern "C-unwind" fn list_row_count(
         _this: *mut AnyObject,
         _cmd: Sel,
@@ -1813,6 +1830,12 @@ mod native {
         if action == 1207 {
             if let Err(error) = add_remote_pac_file() {
                 show_message("Could not add PAC URL", &format!("{error:#}"));
+            }
+            return;
+        }
+        if action == 1208 {
+            if let Err(error) = copy_selected_pac_source() {
+                show_message("Could not copy PAC source", &format!("{error:#}"));
             }
             return;
         }
@@ -2129,7 +2152,7 @@ mod native {
             "Add URL…",
             "Add a remote HTTP or HTTPS PAC URL",
             1207,
-            rect(620.0, 168.0, 100.0, 26.0),
+            rect(612.0, 168.0, 100.0, 26.0),
             None,
         );
         settings_button(
@@ -2138,7 +2161,16 @@ mod native {
             "Open / View",
             "Open the selected local PAC file or view a remote PAC URL",
             1206,
-            rect(728.0, 168.0, 128.0, 26.0),
+            rect(720.0, 168.0, 124.0, 26.0),
+            None,
+        );
+        settings_button(
+            content,
+            target,
+            "Copy Path",
+            "Copy the selected PAC file path or URL to the clipboard",
+            1208,
+            rect(852.0, 168.0, 84.0, 26.0),
             None,
         );
 
@@ -2227,10 +2259,7 @@ mod native {
         let copied: objc2::runtime::Bool = unsafe {
             msg_send![pasteboard, setString:cocoa_string(value), forType:cocoa_string("public.utf8-plain-text")]
         };
-        anyhow::ensure!(
-            copied.as_bool(),
-            "macOS pasteboard rejected the proxy address"
-        );
+        anyhow::ensure!(copied.as_bool(), "macOS pasteboard rejected the text");
         Ok(())
     }
     fn show_message(title: &str, message: &str) {
@@ -3020,17 +3049,20 @@ mod native {
             let subview_count: usize = unsafe { msg_send![subviews, count] };
             let mut has_open_view = false;
             let mut has_add_url = false;
+            let mut has_copy_path = false;
             for index in 0..subview_count {
                 let subview: *mut AnyObject = unsafe { msg_send![subviews, objectAtIndex:index] };
                 let tag: isize = unsafe { msg_send![subview, tag] };
                 has_open_view |= tag == 1206;
                 has_add_url |= tag == 1207;
+                has_copy_path |= tag == 1208;
             }
             anyhow::ensure!(
                 has_open_view,
                 "settings window has no Open / View PAC button"
             );
             anyhow::ensure!(has_add_url, "settings window has no Add URL button");
+            anyhow::ensure!(has_copy_path, "settings window has no Copy Path button");
             let original_listeners = prefs.effective_listeners();
 
             let listener_rows: isize =
@@ -3491,6 +3523,24 @@ mod native {
                 command.get_args().collect::<Vec<_>>(),
                 vec![std::ffi::OsStr::new("-e"), path.as_os_str()]
             );
+        }
+
+        #[test]
+        fn copy_selection_returns_the_exact_pac_path_or_url() {
+            let values = vec![
+                "/Users/matthias/Library/Application Support/Unproxy/proxy.pac".to_owned(),
+                "https://example.test/proxy.pac".to_owned(),
+            ];
+            assert_eq!(
+                pac_source_to_copy(&values, 0).unwrap(),
+                "/Users/matthias/Library/Application Support/Unproxy/proxy.pac"
+            );
+            assert_eq!(
+                pac_source_to_copy(&values, 1).unwrap(),
+                "https://example.test/proxy.pac"
+            );
+            assert!(pac_source_to_copy(&values, -1).is_err());
+            assert!(pac_source_to_copy(&values, 2).is_err());
         }
 
         #[test]
