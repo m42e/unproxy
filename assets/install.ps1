@@ -1,5 +1,88 @@
-param([switch]$DisableLoginStartup)
+param([switch]$DisableLoginStartup, [switch]$AsService)
 $ErrorActionPreference = 'Stop'
+
+if ($AsService) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '" -AsService'
+        $elevated = Start-Process powershell.exe -Verb RunAs -ArgumentList $arguments -Wait -PassThru
+        exit $elevated.ExitCode
+    }
+
+    $serviceRoot = Join-Path $env:ProgramFiles 'Unproxy'
+    $serviceData = Join-Path $env:ProgramData 'Unproxy'
+    $serviceExecutable = Join-Path $serviceRoot 'unproxy.exe'
+    $serviceRegister = Join-Path $serviceRoot 'unproxy-register.exe'
+    $servicePac = Join-Path $serviceData 'proxy.pac'
+    $serviceLog = Join-Path $serviceData 'unproxy.log'
+    $serviceConfig = Join-Path $serviceData 'unproxyrc'
+    New-Item -ItemType Directory -Path $serviceRoot, $serviceData -Force | Out-Null
+
+    $trayExecutable = Join-Path $env:LOCALAPPDATA 'Unproxy\bin\UnproxyTray.exe'
+    $tray = Get-CimInstance Win32_Process -Filter "Name='UnproxyTray.exe'" |
+        Where-Object { $_.ExecutablePath -eq $trayExecutable }
+    if ($tray) {
+        try {
+            $event = [Threading.EventWaitHandle]::OpenExisting('Local\UnproxyTrayExit')
+            $event.Set() | Out-Null
+            $event.Dispose()
+        } catch { }
+        $deadline = (Get-Date).AddSeconds(10)
+        do {
+            $tray = Get-CimInstance Win32_Process -Filter "Name='UnproxyTray.exe'" |
+                Where-Object { $_.ExecutablePath -eq $trayExecutable }
+            if (-not $tray) { break }
+            Start-Sleep -Milliseconds 200
+        } while ((Get-Date) -lt $deadline)
+        if ($tray) {
+            throw 'Close the Unproxy tray app before installing the Windows service.'
+        }
+    }
+
+    $existing = Get-Service -Name 'Unproxy' -ErrorAction SilentlyContinue
+    if ($existing -and $existing.Status -ne 'Stopped') {
+        Stop-Service -Name 'Unproxy'
+        $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(45))
+    }
+    if ($existing) { $existing.Dispose() }
+
+    Copy-Item (Join-Path $PSScriptRoot 'unproxy.exe') $serviceExecutable -Force
+    Copy-Item (Join-Path $PSScriptRoot 'unproxy-register.exe') $serviceRegister -Force
+    Copy-Item (Join-Path $PSScriptRoot 'unproxyctl.exe') (Join-Path $serviceRoot 'unproxyctl.exe') -Force
+    $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
+    & $icacls $serviceData /grant '*S-1-5-20:(OI)(CI)M' /T /C | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not grant the Unproxy service access to its data folder.' }
+    if (-not (Test-Path -LiteralPath $servicePac)) {
+        Copy-Item (Join-Path $PSScriptRoot 'proxy.pac.sample') $servicePac
+    }
+    if (-not (Test-Path -LiteralPath $serviceConfig)) {
+        $metadata = Get-Content (Join-Path $PSScriptRoot 'metadata.json') -Raw | ConvertFrom-Json
+        $authHint = if ($metadata.negotiate) {
+            '# Add --negotiate on its own line to use Windows Negotiate authentication.'
+        } else {
+            '# This build was packaged without Windows Negotiate authentication.'
+        }
+        @(
+            ('--pac-file "' + $servicePac + '"')
+            ('--logfile "' + $serviceLog + '"')
+            $authHint
+        ) | Set-Content -Encoding UTF8 $serviceConfig
+    }
+
+    & $serviceRegister install
+    if ($LASTEXITCODE -ne 0) { throw 'Could not install and start the Unproxy service.' }
+    $service = Get-Service -Name 'Unproxy'
+    $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
+    $service.Dispose()
+
+    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    Remove-ItemProperty $runKey -Name Unproxy -ErrorAction SilentlyContinue
+    Write-Host "Installed and started the Unproxy Windows service. Configuration and logs are in $serviceData."
+    Write-Host 'The service starts automatically at boot and runs as NetworkService.'
+    return
+}
+
 $root = Join-Path $env:LOCALAPPDATA 'Unproxy'
 $destination = Join-Path $root 'bin'
 New-Item -ItemType Directory -Path $destination -Force | Out-Null

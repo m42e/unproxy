@@ -21,6 +21,33 @@ the macOS package for your Mac.
    the proxy and edit the PAC file. The installer adds Unproxy to your Start
    menu and starts it when you sign in.
 
+To install Unproxy as a Windows service instead, run this from the extracted
+folder:
+
+    .\install.ps1 -AsService
+
+Windows asks for administrator approval. The service starts at boot and runs
+without the tray app. It installs its executable under C:\Program Files\Unproxy
+and keeps its settings, PAC file, and log under C:\ProgramData\Unproxy.
+Edit unproxyrc and proxy.pac there to configure it. If the package includes
+Negotiate support, add --negotiate to unproxyrc to use Windows authentication.
+The service runs as NetworkService, so Negotiate uses the computer account on
+a domain. You can change the service logon account in Windows Services if your
+organization requires a different identity; grant that account Modify access
+to C:\ProgramData\Unproxy so it can read its configuration and write logs.
+
+Use PowerShell to manage the service:
+
+    & "$env:ProgramFiles\Unproxy\unproxyctl.exe" status
+    & "$env:ProgramFiles\Unproxy\unproxyctl.exe" start
+    & "$env:ProgramFiles\Unproxy\unproxyctl.exe" restart
+    & "$env:ProgramFiles\Unproxy\unproxyctl.exe" stop
+    & "$env:ProgramFiles\Unproxy\unproxyctl.exe" enable
+    & "$env:ProgramFiles\Unproxy\unproxyctl.exe" disable
+
+The service starts automatically at boot. Use the enable and disable commands
+to change that setting.
+
 To remove Unproxy, open the extracted ZIP folder in PowerShell and run:
 
 ```powershell
@@ -100,6 +127,9 @@ company PAC file at that path separately. The profile seeds new preferences
 only, so an existing user's choices are preserved when the app is updated.
 
 ## Remove Unproxy
+
+On Windows, the RemoveUserData option also removes service configuration, PAC
+files, and logs.
 
 - **Windows:** Run `uninstall.ps1` from the extracted Windows ZIP. Add
   `-RemoveUserData` if you also want to delete preferences and logs.

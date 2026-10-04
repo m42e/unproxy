@@ -8,6 +8,9 @@ local proxy running on your computer.
 Download the package for your operating system from the project's Releases
 page, then follow [the installation steps](docs/installation.md).
 
+On Windows, the install script also supports service installation with
+install.ps1 -AsService.
+
 ## Use it
 
 1. Start Unproxy. Windows and macOS desktop apps have a tray or menu bar

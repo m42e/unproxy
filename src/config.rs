@@ -16,16 +16,41 @@ pub fn token_file(path: &Path) -> Vec<String> {
         .ok()
         .map(|s| {
             s.lines()
-                .map(str::trim)
+                .map(|line| line.trim().trim_start_matches('\u{feff}').trim())
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .flat_map(|l| {
-                    l.split_ascii_whitespace()
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>()
-                })
+                .flat_map(setting_tokens)
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn setting_tokens(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quoted = false;
+    let mut active = false;
+    for character in line.chars() {
+        match character {
+            '"' => {
+                quoted = !quoted;
+                active = true;
+            }
+            c if c.is_ascii_whitespace() && !quoted => {
+                if active {
+                    tokens.push(std::mem::take(&mut token));
+                    active = false;
+                }
+            }
+            c => {
+                token.push(c);
+                active = true;
+            }
+        }
+    }
+    if active {
+        tokens.push(token);
+    }
+    tokens
 }
 pub fn first_readable(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
     paths.into_iter().find(|p| fs::read(p).is_ok())

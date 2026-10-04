@@ -3,6 +3,10 @@ use anyhow::{Context, Result, bail};
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::net::TcpListener;
 
+#[cfg(windows)]
+#[path = "platform/windows_service.rs"]
+mod windows_service;
+
 /// Query the routing table without transmitting application data.
 pub fn default_interface_ipv4() -> IpAddr {
     let discover = || -> std::io::Result<IpAddr> {
@@ -139,12 +143,12 @@ fn activation_descriptors(
         .collect())
 }
 
-/// Run the launchd service command in the current user's GUI domain.
+/// Run the current platform's service control command.
 pub fn service_control(command: &str, registration: bool) -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         let _ = (command, registration);
-        bail!("launchd service controls require macOS");
+        bail!("service controls are unsupported on this platform");
     }
     #[cfg(target_os = "macos")]
     {
@@ -163,6 +167,15 @@ pub fn service_control(command: &str, registration: bool) -> Result<()> {
             },
         )
     }
+    #[cfg(windows)]
+    {
+        windows_service::service_control(command, registration)
+    }
+}
+
+#[cfg(windows)]
+pub fn dispatch_service() -> Result<bool> {
+    windows_service::dispatch_service()
 }
 
 #[cfg(target_os = "macos")]
