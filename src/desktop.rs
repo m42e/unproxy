@@ -483,6 +483,11 @@ mod native {
     // The menu is rebuilt whenever the native status item opens. Child process
     // and preference updates stay in Rust; Cocoa only owns presentation/events.
     static STATE: Mutex<Option<Arc<Mutex<State>>>> = Mutex::new(None);
+    static EDITOR_LISTENERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static EDITOR_PAC_FILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static EDITOR_PREFS: Mutex<Option<Preferences>> = Mutex::new(None);
+    static LISTENER_TABLE: Mutex<usize> = Mutex::new(0);
+    static PAC_FILE_TABLE: Mutex<usize> = Mutex::new(0);
     #[derive(Clone, Default)]
     struct TrayStatus {
         pac_loaded: Option<bool>,
@@ -508,6 +513,23 @@ mod native {
     }
     unsafe extern "C-unwind" fn action(_this: *mut AnyObject, _cmd: Sel, sender: *mut AnyObject) {
         let tag: i64 = unsafe { msg_send![sender, tag] };
+        if tag == 12 {
+            let shared = STATE.lock().unwrap().as_ref().cloned();
+            if let Some(shared) = shared {
+                shared.lock().unwrap().notice = None;
+                if let Err(error) = show_settings(&shared) {
+                    let message = format!("Could not apply Unproxy settings: {error:#}");
+                    shared.lock().unwrap().notice = Some(message.clone());
+                    show_message("Could not apply Unproxy settings", &message);
+                }
+                let mut state = shared.lock().unwrap();
+                let running = state.child.is_running();
+                state.last_running = running;
+                refresh_runtime_status(&mut state, running);
+                update_status_button(&mut state, running);
+            }
+            return;
+        }
         let mut terminate = false;
         if let Some(shared) = STATE.lock().unwrap().as_ref() {
             let mut s = shared.lock().unwrap();
@@ -527,13 +549,6 @@ mod native {
                         let message = format!("Could not copy the proxy address: {error:#}");
                         notice = Some(message.clone());
                         show_message("Could not copy the proxy address", &message);
-                    }
-                }
-                12 => {
-                    if let Err(error) = show_settings(&mut s) {
-                        let message = format!("Could not save Unproxy settings: {error:#}");
-                        notice = Some(message.clone());
-                        show_message("Could not save Unproxy settings", &message);
                     }
                 }
                 _ => {
@@ -1050,6 +1065,42 @@ mod native {
                 action as unsafe extern "C-unwind" fn(_, _, _),
             );
             cb.add_method(
+                sel!(listEditorAction:),
+                list_editor_action as unsafe extern "C-unwind" fn(_, _, _),
+            );
+            cb.add_method(
+                sel!(windowWillClose:),
+                list_editor_window_will_close as unsafe extern "C-unwind" fn(_, _, _),
+            );
+            cb.add_method(
+                sel!(numberOfRowsInTableView:),
+                list_row_count
+                    as unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject) -> isize,
+            );
+            cb.add_method(
+                sel!(tableView:objectValueForTableColumn:row:),
+                list_object_value
+                    as unsafe extern "C-unwind" fn(
+                        *mut AnyObject,
+                        Sel,
+                        *mut AnyObject,
+                        *mut AnyObject,
+                        isize,
+                    ) -> *mut AnyObject,
+            );
+            cb.add_method(
+                sel!(tableView:setObjectValue:forTableColumn:row:),
+                list_set_object_value
+                    as unsafe extern "C-unwind" fn(
+                        *mut AnyObject,
+                        Sel,
+                        *mut AnyObject,
+                        *mut AnyObject,
+                        *mut AnyObject,
+                        isize,
+                    ),
+            );
+            cb.add_method(
                 sel!(menuNeedsUpdate:),
                 rebuild_menu as unsafe extern "C-unwind" fn(_, _, _),
             );
@@ -1080,6 +1131,8 @@ mod native {
         let cls = action_class();
         for selector in [
             sel!(clicked:),
+            sel!(listEditorAction:),
+            sel!(windowWillClose:),
             sel!(menuNeedsUpdate:),
             sel!(pollChild:),
             sel!(networkAvailable:),
@@ -1111,6 +1164,70 @@ mod native {
                 )
             }
         }
+        let row_count = cls
+            .instance_method(sel!(numberOfRowsInTableView:))
+            .context("NSTableView row-count callback missing")?;
+        anyhow::ensure!(
+            row_count.arguments_count() == 3
+                && row_count.return_type().to_str()? == "q"
+                && row_count
+                    .argument_type(2)
+                    .context("NSTableView row-count callback is missing its table argument")?
+                    .to_str()?
+                    == "@",
+            "invalid NSTableView row-count callback ABI"
+        );
+        let row_value = cls
+            .instance_method(sel!(tableView:objectValueForTableColumn:row:))
+            .context("NSTableView value callback missing")?;
+        anyhow::ensure!(
+            row_value.arguments_count() == 5
+                && row_value.return_type().to_str()? == "@"
+                && row_value
+                    .argument_type(2)
+                    .context("NSTableView value callback is missing its table argument")?
+                    .to_str()?
+                    == "@"
+                && row_value
+                    .argument_type(3)
+                    .context("NSTableView value callback is missing its column argument")?
+                    .to_str()?
+                    == "@"
+                && row_value
+                    .argument_type(4)
+                    .context("NSTableView value callback is missing its row argument")?
+                    .to_str()?
+                    == "q",
+            "invalid NSTableView value callback ABI"
+        );
+        let set_row_value = cls
+            .instance_method(sel!(tableView:setObjectValue:forTableColumn:row:))
+            .context("NSTableView edit callback missing")?;
+        anyhow::ensure!(
+            set_row_value.arguments_count() == 6
+                && set_row_value.return_type().to_str()? == "v"
+                && set_row_value
+                    .argument_type(2)
+                    .context("missing table argument")?
+                    .to_str()?
+                    == "@"
+                && set_row_value
+                    .argument_type(3)
+                    .context("missing object value argument")?
+                    .to_str()?
+                    == "@"
+                && set_row_value
+                    .argument_type(4)
+                    .context("missing column argument")?
+                    .to_str()?
+                    == "@"
+                && set_row_value
+                    .argument_type(5)
+                    .context("missing row argument")?
+                    .to_str()?
+                    == "q",
+            "invalid NSTableView edit callback ABI"
+        );
         let defaults = AnyClass::get(c"NSUserDefaults").context("NSUserDefaults class missing")?;
         for sel in [
             sel!(standardUserDefaults),
@@ -1158,6 +1275,17 @@ mod native {
         let c = CString::new(s).unwrap();
         let cls = objc2::class!(NSString);
         unsafe { msg_send![cls, stringWithUTF8String:c.as_ptr()] }
+    }
+    fn cocoa_text(value: *mut AnyObject) -> Option<String> {
+        if value.is_null() {
+            return None;
+        }
+        let bytes: *const std::ffi::c_char = unsafe { msg_send![value, UTF8String] };
+        (!bytes.is_null()).then(|| {
+            unsafe { std::ffi::CStr::from_ptr(bytes) }
+                .to_string_lossy()
+                .into_owned()
+        })
     }
     fn prompt(message: &str, default: &str) -> Option<String> {
         prompt_with(message, default, |script| {
@@ -1215,360 +1343,609 @@ mod native {
             size: Size { width, height },
         }
     }
-    fn settings_text_field(value: &str, placeholder: &str, y: f64) -> *mut AnyObject {
-        let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSTextField), alloc] };
-        let field: *mut AnyObject =
-            unsafe { msg_send![allocated, initWithFrame:rect(0.0, y, 440.0, 26.0)] };
-        let _: () = unsafe { msg_send![field, setStringValue:cocoa_string(value)] };
-        let _: () = unsafe { msg_send![field, setPlaceholderString:cocoa_string(placeholder)] };
-        field
-    }
-    fn settings_label(accessory: *mut AnyObject, title: &str, y: f64) {
+    fn settings_label(
+        parent: *mut AnyObject,
+        title: &str,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        emphasized: bool,
+    ) {
         let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSTextField), alloc] };
         let label: *mut AnyObject =
-            unsafe { msg_send![allocated, initWithFrame:rect(0.0, y, 440.0, 18.0)] };
+            unsafe { msg_send![allocated, initWithFrame:rect(x, y, width, height)] };
         let _: () = unsafe { msg_send![label, setStringValue:cocoa_string(title)] };
         let _: () = unsafe { msg_send![label, setEditable:objc2::runtime::Bool::NO] };
         let _: () = unsafe { msg_send![label, setBordered:objc2::runtime::Bool::NO] };
         let _: () = unsafe { msg_send![label, setDrawsBackground:objc2::runtime::Bool::NO] };
-        let _: () = unsafe { msg_send![accessory, addSubview:label] };
+        let _: () = unsafe { msg_send![label, setAlignment:0isize] };
+        let _: () = unsafe { msg_send![label, setUsesSingleLineMode:objc2::runtime::Bool::NO] };
+        let _: () = unsafe { msg_send![label, setLineBreakMode:0isize] };
+        if emphasized {
+            let font: *mut AnyObject =
+                unsafe { msg_send![objc2::class!(NSFont), boldSystemFontOfSize:15.0f64] };
+            let _: () = unsafe { msg_send![label, setFont:font] };
+        }
+        let _: () = unsafe { msg_send![parent, addSubview:label] };
     }
-    fn settings_checkbox(
-        accessory: *mut AnyObject,
+    fn settings_button(
+        parent: *mut AnyObject,
+        target: *mut AnyObject,
         title: &str,
-        enabled: bool,
+        tooltip: &str,
+        tag: isize,
+        x: f64,
         y: f64,
+        width: f64,
+        height: f64,
+        key_equivalent: Option<&str>,
     ) -> *mut AnyObject {
         let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSButton), alloc] };
         let button: *mut AnyObject =
-            unsafe { msg_send![allocated, initWithFrame:rect(0.0, y, 440.0, 22.0)] };
+            unsafe { msg_send![allocated, initWithFrame:rect(x, y, width, height)] };
+        let _: () = unsafe { msg_send![button, setTitle:cocoa_string(title)] };
+        if !tooltip.is_empty() {
+            let _: () = unsafe { msg_send![button, setToolTip:cocoa_string(tooltip)] };
+        }
+        let _: () = unsafe { msg_send![button, setTag:tag] };
+        let _: () = unsafe { msg_send![button, setTarget:target] };
+        let _: () = unsafe { msg_send![button, setAction:sel!(listEditorAction:)] };
+        if let Some(key) = key_equivalent {
+            let _: () = unsafe { msg_send![button, setKeyEquivalent:cocoa_string(key)] };
+        }
+        let _: () = unsafe { msg_send![parent, addSubview:button] };
+        button
+    }
+    fn settings_checkbox(
+        parent: *mut AnyObject,
+        target: *mut AnyObject,
+        title: &str,
+        enabled: bool,
+        tag: isize,
+        x: f64,
+        width: f64,
+    ) -> *mut AnyObject {
+        let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSButton), alloc] };
+        let button: *mut AnyObject =
+            unsafe { msg_send![allocated, initWithFrame:rect(x, 82.0, width, 24.0)] };
         let _: () = unsafe { msg_send![button, setButtonType:3isize] };
         let _: () = unsafe { msg_send![button, setTitle:cocoa_string(title)] };
         let _: () = unsafe { msg_send![button, setState:if enabled {1isize}else{0isize}] };
-        let _: () = unsafe { msg_send![accessory, addSubview:button] };
+        let _: () = unsafe { msg_send![button, setTag:tag] };
+        let _: () = unsafe { msg_send![button, setTarget:target] };
+        let _: () = unsafe { msg_send![button, setAction:sel!(listEditorAction:)] };
+        let _: () = unsafe { msg_send![parent, addSubview:button] };
         button
     }
-    fn read_text_field(field: *mut AnyObject) -> Result<String> {
-        let value: *mut AnyObject = unsafe { msg_send![field, stringValue] };
-        let bytes: *const std::ffi::c_char = unsafe { msg_send![value, UTF8String] };
-        anyhow::ensure!(!bytes.is_null(), "settings field did not contain text");
-        Ok(unsafe { std::ffi::CStr::from_ptr(bytes) }
-            .to_string_lossy()
-            .into_owned())
-    }
-    fn listener_settings_page(
-        prefs: &Preferences,
-        listeners: &[String],
-        pac_files: &[PathBuf],
-    ) -> Result<(isize, Vec<String>, Vec<PathBuf>, Preferences)> {
-        let alert: *mut AnyObject = unsafe { msg_send![objc2::class!(NSAlert), new] };
-        let _: () = unsafe { msg_send![alert, setMessageText:cocoa_string("Unproxy Settings")] };
-        let _: () = unsafe {
-            msg_send![alert, setInformativeText:cocoa_string("Configure listeners, ordered PAC files, and proxy behavior.")]
-        };
-        let _: *mut AnyObject =
-            unsafe { msg_send![alert, addButtonWithTitle:cocoa_string("Cancel")] };
-        let _: *mut AnyObject =
-            unsafe { msg_send![alert, addButtonWithTitle:cocoa_string("Edit Lists…")] };
-        let _: *mut AnyObject =
-            unsafe { msg_send![alert, addButtonWithTitle:cocoa_string("Save")] };
+    fn settings_list_table(
+        content: *mut AnyObject,
+        target: *mut AnyObject,
+        tag: isize,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    ) -> *mut AnyObject {
+        let scroll_allocated: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSScrollView), alloc] };
+        let scroll: *mut AnyObject =
+            unsafe { msg_send![scroll_allocated, initWithFrame:rect(x, y, width, height)] };
+        let _: () = unsafe { msg_send![scroll, setBorderType:2isize] };
+        let _: () = unsafe { msg_send![scroll, setHasVerticalScroller:objc2::runtime::Bool::YES] };
 
-        let accessory: *mut AnyObject = unsafe { msg_send![objc2::class!(NSView), alloc] };
-        let height = 220.0 + (listeners.len() + pac_files.len()) as f64 * 32.0;
-        let accessory: *mut AnyObject =
-            unsafe { msg_send![accessory, initWithFrame:rect(0.0, 0.0, 460.0, height)] };
-        settings_label(
-            accessory,
-            "Listeners (numeric IP address and port; IPv6 in brackets)",
-            height - 19.0,
-        );
-        let mut listener_fields = Vec::with_capacity(listeners.len());
-        for (index, listener) in listeners.iter().enumerate() {
-            let y = height - 53.0 - index as f64 * 32.0;
-            let field = settings_text_field(listener, "e.g. 127.0.0.1:3128", y);
-            let _: () = unsafe { msg_send![accessory, addSubview:field] };
-            listener_fields.push(field);
+        let table_allocated: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSTableView), alloc] };
+        let table: *mut AnyObject = unsafe {
+            msg_send![table_allocated, initWithFrame:rect(0.0, 0.0, width - 2.0, height - 2.0)]
+        };
+        let column_allocated: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSTableColumn), alloc] };
+        let column: *mut AnyObject =
+            unsafe { msg_send![column_allocated, initWithIdentifier:cocoa_string("value")] };
+        let _: () = unsafe { msg_send![column, setWidth:width - 2.0] };
+        let cell: *mut AnyObject = unsafe { msg_send![column, dataCell] };
+        let _: () = unsafe { msg_send![cell, setEditable:objc2::runtime::Bool::YES] };
+        let _: () = unsafe { msg_send![table, addTableColumn:column] };
+        let _: () = unsafe { msg_send![table, setHeaderView:ptr::null_mut::<AnyObject>()] };
+        let _: () = unsafe { msg_send![table, setRowHeight:32.0f64] };
+        let _: () = unsafe { msg_send![table, setTag:tag] };
+        let _: () = unsafe { msg_send![table, setDataSource:target] };
+        let _: () = unsafe { msg_send![scroll, setDocumentView:table] };
+        let _: () = unsafe { msg_send![table, reloadData] };
+        let _: () = unsafe { msg_send![content, addSubview:scroll] };
+        let count = if tag == 1 {
+            EDITOR_LISTENERS.lock().unwrap().len()
+        } else {
+            EDITOR_PAC_FILES.lock().unwrap().len()
+        };
+        if count > 0 {
+            let _: () = unsafe {
+                msg_send![table, selectRowIndexes:index_set(0), byExtendingSelection:objc2::runtime::Bool::NO]
+            };
         }
-        settings_label(
-            accessory,
-            "PAC files (top to bottom; first non-DIRECT result wins)",
-            171.0 + pac_files.len() as f64 * 32.0,
-        );
-        let mut pac_fields = Vec::with_capacity(pac_files.len());
-        for (index, pac_file) in pac_files.iter().enumerate() {
-            let y = 141.0 + pac_files.len() as f64 * 32.0 - index as f64 * 32.0;
-            let field = settings_text_field(
-                &pac_file.to_string_lossy(),
-                "Absolute path to a PAC file",
-                y,
+        table
+    }
+    fn settings_toolbar(content: *mut AnyObject, target: *mut AnyObject, tag_base: isize, x: f64) {
+        for (label, tooltip, action, offset) in [
+            ("+", "Add an item", 2isize, 0.0),
+            ("−", "Remove the selected item", 3isize, 30.0),
+            ("↑", "Move the selected item up", 4isize, 60.0),
+            ("↓", "Move the selected item down", 5isize, 90.0),
+        ] {
+            settings_button(
+                content,
+                target,
+                label,
+                tooltip,
+                tag_base + action,
+                x + offset,
+                168.0,
+                28.0,
+                26.0,
+                None,
             );
-            let _: () = unsafe { msg_send![accessory, addSubview:field] };
-            pac_fields.push(field);
         }
-        let tunnel = settings_checkbox(accessory, "Always use CONNECT", prefs.proxytunnel, 70.0);
-        let direct = settings_checkbox(accessory, "DIRECT fallback", prefs.direct_fallback, 47.0);
-        #[cfg(feature = "negotiate")]
-        let negotiate = settings_checkbox(accessory, "Negotiate", prefs.negotiate, 24.0);
-        #[cfg(not(feature = "negotiate"))]
-        let negotiate: *mut AnyObject = ptr::null_mut();
-        let _: () = unsafe { msg_send![alert, setAccessoryView:accessory] };
-        let response: isize = unsafe { msg_send![alert, runModal] };
-        let edited_listeners = listener_fields
-            .into_iter()
-            .map(read_text_field)
-            .collect::<Result<Vec<_>>>()?;
-        let edited_pac_files = pac_fields
-            .into_iter()
-            .map(read_text_field)
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .map(PathBuf::from)
-            .collect();
-        let mut updated = prefs.clone();
-        let tunnel_state: isize = unsafe { msg_send![tunnel, state] };
-        let direct_state: isize = unsafe { msg_send![direct, state] };
-        updated.proxytunnel = tunnel_state != 0;
-        updated.direct_fallback = direct_state != 0;
-        #[cfg(feature = "negotiate")]
-        {
-            let negotiate_state: isize = unsafe { msg_send![negotiate, state] };
-            updated.negotiate = negotiate_state != 0;
-        }
-        #[cfg(not(feature = "negotiate"))]
-        let _ = negotiate;
-        Ok((response, edited_listeners, edited_pac_files, updated))
     }
-    fn choose_list_item(values: &[String], prompt: &str) -> Option<usize> {
-        let escape = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
-        let items = values
-            .iter()
-            .map(|listener| format!("\"{}\"", escape(listener)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let script = format!(
-            "choose from list {{{items}}} with prompt \"{}\"",
-            escape(prompt)
-        );
-        let output = Command::new("osascript")
-            .args(["-e", &script])
-            .output()
-            .ok()?;
-        if !output.status.success() {
+    fn index_set(index: usize) -> *mut AnyObject {
+        unsafe { msg_send![objc2::class!(NSIndexSet), indexSetWithIndex:index] }
+    }
+    fn choose_pac_file() -> Option<String> {
+        let panel: *mut AnyObject = unsafe { msg_send![objc2::class!(NSOpenPanel), openPanel] };
+        let _: () = unsafe { msg_send![panel, setTitle:cocoa_string("Choose a PAC file")] };
+        let _: () = unsafe { msg_send![panel, setPrompt:cocoa_string("Add")] };
+        let _: () = unsafe { msg_send![panel, setCanChooseFiles:objc2::runtime::Bool::YES] };
+        let _: () = unsafe { msg_send![panel, setCanChooseDirectories:objc2::runtime::Bool::NO] };
+        let _: () =
+            unsafe { msg_send![panel, setAllowsMultipleSelection:objc2::runtime::Bool::NO] };
+        let response: isize = unsafe { msg_send![panel, runModal] };
+        if response != 1 {
             return None;
         }
-        let selected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        values.iter().position(|value| value == &selected)
+        let url: *mut AnyObject = unsafe { msg_send![panel, URL] };
+        let path: *mut AnyObject = unsafe { msg_send![url, path] };
+        cocoa_text(path)
     }
-    fn choose_list_action() -> Option<&'static str> {
-        let script = "choose from list {\"Add listener\", \"Remove listener\", \"Add PAC file\", \"Remove PAC file\", \"Move PAC file up\", \"Move PAC file down\"} with prompt \"Choose a list action\"";
-        let output = Command::new("osascript")
-            .args(["-e", script])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let selected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        match selected.as_str() {
-            "Add listener" => Some("add_listener"),
-            "Remove listener" => Some("remove_listener"),
-            "Add PAC file" => Some("add_pac"),
-            "Remove PAC file" => Some("remove_pac"),
-            "Move PAC file up" => Some("move_pac_up"),
-            "Move PAC file down" => Some("move_pac_down"),
-            _ => None,
+    unsafe extern "C-unwind" fn list_row_count(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        table: *mut AnyObject,
+    ) -> isize {
+        let tag: isize = unsafe { msg_send![table, tag] };
+        if tag == 1 {
+            EDITOR_LISTENERS.lock().unwrap().len() as isize
+        } else {
+            EDITOR_PAC_FILES.lock().unwrap().len() as isize
         }
     }
-    fn choose_pac_file() -> Option<PathBuf> {
-        let output = Command::new("osascript")
-            .args([
-                "-e",
-                "POSIX path of (choose file with prompt \"Choose a PAC file\")",
-            ])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
+    unsafe extern "C-unwind" fn list_object_value(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        table: *mut AnyObject,
+        _column: *mut AnyObject,
+        row: isize,
+    ) -> *mut AnyObject {
+        if row < 0 {
+            return ptr::null_mut();
         }
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        (!path.is_empty()).then(|| PathBuf::from(path))
+        let tag: isize = unsafe { msg_send![table, tag] };
+        if tag == 1 {
+            EDITOR_LISTENERS
+                .lock()
+                .unwrap()
+                .get(row as usize)
+                .map(|value| cocoa_string(value))
+                .unwrap_or(ptr::null_mut())
+        } else {
+            EDITOR_PAC_FILES
+                .lock()
+                .unwrap()
+                .get(row as usize)
+                .map(|value| cocoa_string(value))
+                .unwrap_or(ptr::null_mut())
+        }
     }
-    fn settings_dialog(prefs: &Preferences) -> Result<Option<Preferences>> {
-        let mut updated = prefs.clone();
-        let mut listeners = prefs.effective_listeners();
-        let mut pac_files = prefs.effective_pac_files();
-        loop {
-            let (response, edited_listeners, edited_pac_files, edited_prefs) =
-                listener_settings_page(&updated, &listeners, &pac_files)?;
-            listeners = edited_listeners;
-            pac_files = edited_pac_files;
-            updated = edited_prefs;
-            match response {
-                1000 => return Ok(None),
-                1001 => match choose_list_action() {
-                    Some("add_listener") => {
-                        if let Some(listener) = prompt(
-                            "Listener address and port (use brackets for IPv6)",
-                            "127.0.0.1:8080",
-                        ) {
-                            listeners.push(listener);
-                        }
-                    }
-                    Some("remove_listener") if listeners.len() > 1 => {
-                        if let Some(index) =
-                            choose_list_item(&listeners, "Choose a listener to remove")
-                        {
-                            listeners.remove(index);
-                        }
-                    }
-                    Some("remove_listener") => {
-                        show_message("Unproxy Settings", "At least one listener is required.")
-                    }
-                    Some("add_pac") => {
-                        if let Some(pac_file) = choose_pac_file() {
-                            pac_files.push(pac_file);
-                        }
-                    }
-                    Some("remove_pac") if pac_files.len() > 1 => {
-                        let choices = pac_files
-                            .iter()
-                            .map(|pac_file| pac_file.to_string_lossy().into_owned())
-                            .collect::<Vec<_>>();
-                        if let Some(index) =
-                            choose_list_item(&choices, "Choose a PAC file to remove")
-                        {
-                            pac_files.remove(index);
-                        }
-                    }
-                    Some("remove_pac") => {
-                        show_message("Unproxy Settings", "At least one PAC file is required.")
-                    }
-                    Some("move_pac_up") if pac_files.len() > 1 => {
-                        let choices = pac_files
-                            .iter()
-                            .map(|pac_file| pac_file.to_string_lossy().into_owned())
-                            .collect::<Vec<_>>();
-                        if let Some(index) = choose_list_item(&choices, "Choose a PAC file to move")
-                        {
-                            if index > 0 {
-                                pac_files.swap(index, index - 1);
-                            }
-                        }
-                    }
-                    Some("move_pac_down") if pac_files.len() > 1 => {
-                        let choices = pac_files
-                            .iter()
-                            .map(|pac_file| pac_file.to_string_lossy().into_owned())
-                            .collect::<Vec<_>>();
-                        if let Some(index) = choose_list_item(&choices, "Choose a PAC file to move")
-                        {
-                            if index + 1 < pac_files.len() {
-                                pac_files.swap(index, index + 1);
-                            }
-                        }
-                    }
-                    None => {}
-                    _ => {}
-                },
-                1002 => {
-                    let parsed = listeners
-                        .iter()
-                        .map(|listener| parse_listener(listener))
-                        .collect::<Result<Vec<_>>>();
-                    let parsed = match parsed {
-                        Ok(parsed) if !parsed.is_empty() => parsed,
-                        Ok(_) => {
-                            show_message("Unproxy Settings", "At least one listener is required.");
-                            continue;
-                        }
-                        Err(error) => {
-                            show_message("Invalid listener", &format!("{error:#}"));
-                            continue;
-                        }
-                    };
-                    let mut unique = std::collections::HashSet::new();
-                    if parsed.iter().any(|address| !unique.insert(*address)) {
-                        show_message("Invalid listener", "Listener addresses must be unique.");
-                        continue;
-                    }
-                    if pac_files.is_empty() {
-                        show_message("Invalid PAC files", "At least one PAC file is required.");
-                        continue;
-                    }
-                    let mut unique_pac_files = std::collections::HashSet::new();
-                    let mut pac_error = None;
-                    for pac_file in &pac_files {
-                        if !pac_file.is_absolute() {
-                            pac_error =
-                                Some(format!("PAC path must be absolute: {}", pac_file.display()));
-                            break;
-                        }
-                        if !pac_file.is_file() {
-                            pac_error =
-                                Some(format!("PAC file is missing: {}", pac_file.display()));
-                            break;
-                        }
-                        if !unique_pac_files.insert(pac_file.clone()) {
-                            pac_error = Some(format!(
-                                "PAC file is listed more than once: {}",
-                                pac_file.display()
-                            ));
-                            break;
-                        }
-                        if let Err(error) = std::fs::File::open(pac_file) {
-                            pac_error = Some(format!(
-                                "Could not read PAC file {}: {error}",
-                                pac_file.display()
-                            ));
-                            break;
-                        }
-                    }
-                    if let Some(error) = pac_error {
-                        show_message("Invalid PAC files", &error);
-                        continue;
-                    }
-                    updated.port = u32::from(parsed[0].port());
-                    updated.listeners = Some(parsed.iter().map(ToString::to_string).collect());
-                    updated.pac_file = pac_files[0].clone();
-                    updated.pac_files = Some(pac_files);
-                    return Ok(Some(updated));
+    unsafe extern "C-unwind" fn list_set_object_value(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        table: *mut AnyObject,
+        value: *mut AnyObject,
+        _column: *mut AnyObject,
+        row: isize,
+    ) {
+        if row < 0 {
+            return;
+        }
+        let Some(value) = cocoa_text(value) else {
+            return;
+        };
+        let tag: isize = unsafe { msg_send![table, tag] };
+        let updated = if tag == 1 {
+            EDITOR_LISTENERS
+                .lock()
+                .unwrap()
+                .get_mut(row as usize)
+                .map(|slot| *slot = value)
+                .is_some()
+        } else {
+            EDITOR_PAC_FILES
+                .lock()
+                .unwrap()
+                .get_mut(row as usize)
+                .map(|slot| *slot = value)
+                .is_some()
+        };
+        if updated && let Err(error) = commit_editor_preferences() {
+            show_message("Could not apply this change", &format!("{error:#}"));
+        }
+    }
+    unsafe extern "C-unwind" fn list_editor_action(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        sender: *mut AnyObject,
+    ) {
+        let action: isize = unsafe { msg_send![sender, tag] };
+        if action == 1000 {
+            let app: *mut AnyObject =
+                unsafe { msg_send![objc2::class!(NSApplication), sharedApplication] };
+            let _: () = unsafe { msg_send![app, stopModalWithCode:1000isize] };
+            return;
+        }
+        if (3001..=3003).contains(&action) {
+            change_editor_checkbox(sender, action);
+            return;
+        }
+        let (is_pac_files, operation, table) = match action {
+            1102..=1105 => (
+                false,
+                action - 1100,
+                *LISTENER_TABLE.lock().unwrap() as *mut AnyObject,
+            ),
+            1202..=1205 => (
+                true,
+                action - 1200,
+                *PAC_FILE_TABLE.lock().unwrap() as *mut AnyObject,
+            ),
+            _ => return,
+        };
+        if table.is_null() {
+            return;
+        }
+
+        let selected_row: isize = unsafe { msg_send![table, selectedRow] };
+        let selected = (selected_row >= 0).then_some(selected_row as usize);
+        let mut edit_new_row = false;
+        let mut new_selection = selected;
+        if operation == 2 {
+            if is_pac_files {
+                if let Some(path) = choose_pac_file() {
+                    let mut values = EDITOR_PAC_FILES.lock().unwrap();
+                    values.push(path);
+                    new_selection = Some(values.len() - 1);
                 }
-                _ => return Ok(None),
+            } else {
+                edit_new_row = true;
+                let mut values = EDITOR_LISTENERS.lock().unwrap();
+                values.push(String::new());
+                new_selection = Some(values.len() - 1);
+            }
+        } else {
+            let mut values = if is_pac_files {
+                EDITOR_PAC_FILES.lock().unwrap()
+            } else {
+                EDITOR_LISTENERS.lock().unwrap()
+            };
+            match operation {
+                3 => {
+                    if let Some(index) = selected {
+                        if values.len() <= 1 {
+                            drop(values);
+                            show_message("Unproxy Settings", "At least one item is required.");
+                            return;
+                        }
+                        if index < values.len() {
+                            values.remove(index);
+                            new_selection = Some(index.min(values.len() - 1));
+                        }
+                    }
+                }
+                4 => {
+                    if let Some(index) = selected.filter(|index| *index > 0) {
+                        values.swap(index, index - 1);
+                        new_selection = Some(index - 1);
+                    }
+                }
+                5 => {
+                    if let Some(index) = selected
+                        && index + 1 < values.len()
+                    {
+                        values.swap(index, index + 1);
+                        new_selection = Some(index + 1);
+                    }
+                }
+                _ => return,
+            }
+        }
+        let _: () = unsafe { msg_send![table, reloadData] };
+        if let Some(index) = new_selection {
+            let _: () = unsafe {
+                msg_send![table, selectRowIndexes:index_set(index), byExtendingSelection:objc2::runtime::Bool::NO]
+            };
+            let _: () = unsafe { msg_send![table, scrollRowToVisible:index as isize] };
+            if edit_new_row {
+                let _: () = unsafe {
+                    msg_send![table, editColumn:0isize, row:index as isize, withEvent:ptr::null_mut::<AnyObject>(), select:objc2::runtime::Bool::YES]
+                };
+            }
+        }
+        if !edit_new_row {
+            if let Err(error) = commit_editor_preferences() {
+                show_message("Could not apply this change", &format!("{error:#}"));
             }
         }
     }
-    fn show_settings(state: &mut State) -> Result<()> {
-        let Some(updated) = settings_dialog(&state.prefs)? else {
+    unsafe extern "C-unwind" fn list_editor_window_will_close(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        _notification: *mut AnyObject,
+    ) {
+        let app: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSApplication), sharedApplication] };
+        let _: () = unsafe { msg_send![app, stopModalWithCode:1000isize] };
+    }
+    fn change_editor_checkbox(sender: *mut AnyObject, tag: isize) {
+        let enabled: isize = unsafe { msg_send![sender, state] };
+        let enabled = enabled != 0;
+        {
+            let mut current = EDITOR_PREFS.lock().unwrap();
+            if let Some(prefs) = current.as_mut() {
+                match tag {
+                    3001 => prefs.proxytunnel = enabled,
+                    3002 => prefs.direct_fallback = enabled,
+                    3003 => prefs.negotiate = enabled,
+                    _ => return,
+                }
+            }
+        }
+        if let Err(error) = commit_editor_preferences() {
+            let current = STATE
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|state| state.lock().unwrap().prefs.clone());
+            if let Some(current) = current {
+                let applied = match tag {
+                    3001 => current.proxytunnel,
+                    3002 => current.direct_fallback,
+                    3003 => current.negotiate,
+                    _ => enabled,
+                };
+                if applied != enabled {
+                    let mut draft = EDITOR_PREFS.lock().unwrap();
+                    if let Some(prefs) = draft.as_mut() {
+                        match tag {
+                            3001 => prefs.proxytunnel = applied,
+                            3002 => prefs.direct_fallback = applied,
+                            3003 => prefs.negotiate = applied,
+                            _ => {}
+                        }
+                    }
+                    let _: () =
+                        unsafe { msg_send![sender, setState:if applied {1isize}else{0isize}] };
+                }
+            }
+            show_message("Could not apply this change", &format!("{error:#}"));
+        }
+    }
+    fn validated_editor_preferences() -> Result<Preferences> {
+        let listeners = EDITOR_LISTENERS.lock().unwrap().clone();
+        let parsed = listeners
+            .iter()
+            .map(|listener| parse_listener(listener))
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(!parsed.is_empty(), "at least one listener is required");
+        let mut unique_listeners = std::collections::HashSet::new();
+        anyhow::ensure!(
+            parsed
+                .iter()
+                .all(|address| unique_listeners.insert(*address)),
+            "listener addresses must be unique"
+        );
+
+        let pac_values = EDITOR_PAC_FILES.lock().unwrap().clone();
+        anyhow::ensure!(!pac_values.is_empty(), "at least one PAC file is required");
+        let mut pac_files = Vec::with_capacity(pac_values.len());
+        let mut unique_pac_files = std::collections::HashSet::new();
+        for value in pac_values {
+            let path = PathBuf::from(value);
+            anyhow::ensure!(
+                path.is_absolute(),
+                "PAC path must be absolute: {}",
+                path.display()
+            );
+            anyhow::ensure!(path.is_file(), "PAC file is missing: {}", path.display());
+            anyhow::ensure!(
+                unique_pac_files.insert(path.clone()),
+                "PAC file is listed more than once: {}",
+                path.display()
+            );
+            std::fs::File::open(&path)
+                .with_context(|| format!("could not read PAC file {}", path.display()))?;
+            pac_files.push(path);
+        }
+
+        let mut updated = EDITOR_PREFS
+            .lock()
+            .unwrap()
+            .clone()
+            .context("settings editor is not active")?;
+        updated.port = u32::from(parsed[0].port());
+        updated.listeners = Some(parsed.iter().map(ToString::to_string).collect());
+        updated.pac_file = pac_files[0].clone();
+        updated.pac_files = Some(pac_files);
+        Ok(updated)
+    }
+    fn commit_editor_preferences() -> Result<()> {
+        let updated = validated_editor_preferences()?;
+        let shared = STATE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .context("Unproxy state is unavailable")?;
+        let mut state = shared.lock().unwrap();
+        if state.prefs == updated {
             return Ok(());
-        };
+        }
         let restart_required = updated.effective_listeners() != state.prefs.effective_listeners()
             || updated.effective_pac_files() != state.prefs.effective_pac_files()
             || updated.negotiate != state.prefs.negotiate
             || updated.proxytunnel != state.prefs.proxytunnel
             || updated.direct_fallback != state.prefs.direct_fallback;
-        if updated == state.prefs {
-            return Ok(());
-        }
         let running = state.child.is_running();
         save_native_preferences(
             &updated,
             &state.prefs_path,
             state.defaults as *mut AnyObject,
         )?;
-        state.prefs = updated;
+        state.prefs = updated.clone();
+        *EDITOR_PREFS.lock().unwrap() = Some(updated.clone());
         if running && restart_required {
             let exe = state.child_exe.clone();
-            let prefs = state.prefs.clone();
-            if let Err(error) = state.child.restart(&exe, &prefs) {
-                state.start_failed = true;
-                state.last_running = false;
-                return Err(error);
+            match state.child.restart(&exe, &updated) {
+                Ok(()) => {
+                    state.start_failed = false;
+                    reset_runtime_status(&mut state);
+                }
+                Err(error) => {
+                    state.start_failed = true;
+                    state.last_running = false;
+                    return Err(error);
+                }
             }
-            state.start_failed = false;
-            reset_runtime_status(state);
         }
         state.last_running = state.child.is_running();
         Ok(())
+    }
+    fn settings_window(prefs: &Preferences) -> Result<()> {
+        *EDITOR_LISTENERS.lock().unwrap() = prefs.effective_listeners();
+        *EDITOR_PAC_FILES.lock().unwrap() = prefs
+            .effective_pac_files()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        *EDITOR_PREFS.lock().unwrap() = Some(prefs.clone());
+
+        let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSWindow), alloc] };
+        let window: *mut AnyObject = unsafe {
+            msg_send![allocated, initWithContentRect:rect(0.0, 0.0, 960.0, 660.0), styleMask:3isize, backing:2isize, defer:objc2::runtime::Bool::NO]
+        };
+        anyhow::ensure!(!window.is_null(), "could not create the settings window");
+        let _: () = unsafe { msg_send![window, setReleasedWhenClosed:objc2::runtime::Bool::NO] };
+        let _: () = unsafe { msg_send![window, setTitle:cocoa_string("Unproxy Settings")] };
+        let _: () = unsafe { msg_send![window, center] };
+        let content: *mut AnyObject = unsafe { msg_send![window, contentView] };
+        let target: *mut AnyObject = unsafe { msg_send![action_class(), new] };
+        let _: () = unsafe { msg_send![window, setDelegate:target] };
+
+        settings_label(
+            content,
+            "Changes are applied immediately as you edit.",
+            24.0,
+            612.0,
+            912.0,
+            24.0,
+            false,
+        );
+        settings_label(content, "Listeners", 24.0, 570.0, 440.0, 24.0, true);
+        settings_label(
+            content,
+            "Numeric IP and port; put IPv6 addresses in brackets.",
+            24.0,
+            542.0,
+            440.0,
+            22.0,
+            false,
+        );
+        settings_label(content, "PAC files", 490.0, 570.0, 446.0, 24.0, true);
+        settings_label(
+            content,
+            "Evaluated top to bottom; the first non-DIRECT result wins.",
+            490.0,
+            542.0,
+            446.0,
+            22.0,
+            false,
+        );
+        let listener_table = settings_list_table(content, target, 1, 24.0, 204.0, 440.0, 320.0);
+        let pac_table = settings_list_table(content, target, 2, 490.0, 204.0, 446.0, 320.0);
+        *LISTENER_TABLE.lock().unwrap() = listener_table as usize;
+        *PAC_FILE_TABLE.lock().unwrap() = pac_table as usize;
+        settings_toolbar(content, target, 1100, 24.0);
+        settings_toolbar(content, target, 1200, 490.0);
+
+        settings_label(
+            content,
+            "Connection behavior",
+            24.0,
+            125.0,
+            440.0,
+            24.0,
+            true,
+        );
+        settings_checkbox(
+            content,
+            target,
+            "Always use CONNECT",
+            prefs.proxytunnel,
+            3001,
+            24.0,
+            250.0,
+        );
+        settings_checkbox(
+            content,
+            target,
+            "DIRECT fallback",
+            prefs.direct_fallback,
+            3002,
+            300.0,
+            210.0,
+        );
+        #[cfg(feature = "negotiate")]
+        settings_checkbox(
+            content,
+            target,
+            "Negotiate",
+            prefs.negotiate,
+            3003,
+            540.0,
+            170.0,
+        );
+        settings_button(
+            content,
+            target,
+            "Close",
+            "Close settings",
+            1000,
+            842.0,
+            22.0,
+            94.0,
+            30.0,
+            Some("\r"),
+        );
+
+        let app: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSApplication), sharedApplication] };
+        let _: () = unsafe { msg_send![window, makeKeyAndOrderFront:ptr::null_mut::<AnyObject>()] };
+        let _: isize = unsafe { msg_send![app, runModalForWindow:window] };
+        let _: () = unsafe { msg_send![window, orderOut:ptr::null_mut::<AnyObject>()] };
+        *LISTENER_TABLE.lock().unwrap() = 0;
+        *PAC_FILE_TABLE.lock().unwrap() = 0;
+        Ok(())
+    }
+    fn show_settings(shared: &Arc<Mutex<State>>) -> Result<()> {
+        let prefs = shared.lock().unwrap().prefs.clone();
+        settings_window(&prefs)
     }
     fn open_path(path: &Path) -> Result<()> {
         let status = Command::new("open")

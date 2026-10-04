@@ -82,10 +82,14 @@ result lets evaluation continue to the next file.
 On Windows, put PAC files anywhere accessible and choose **Settings…** in the
 tray menu. Use **Add PAC File…**, each row's **Remove**, and **Up**/**Down** to
 edit the ordered list. On macOS, choose **Settings…** from the Unproxy menu bar
-menu, then **Edit Lists…** to add, remove, or move PAC files. Add a listener for
-each numeric IP address and port; write IPv6 addresses in brackets, such as
+menu to see listeners and PAC files together. Select a row and use **+** or **−**
+to add or remove entries; the arrows change their order. PAC file **+** opens a
+file chooser, and listener **+** adds a row you can edit in place. Double-click
+an existing row to change its value. Valid changes, including connection
+behavior checkboxes, are saved and applied immediately. Add a listener for each
+numeric IP address and port; write IPv6 addresses in brackets, such as
 `[::1]:3128`. Both desktop apps start with IPv4 and IPv6 loopback listeners on
-port 3128. Use the listener controls in Settings to add or remove entries.
+port 3128.
 **Copy Proxy Address** copies the first listener. On Linux, create
 `~/.config/unproxy/unproxyrc` and put this in it:
 
