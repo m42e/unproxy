@@ -152,10 +152,42 @@ async fn local_errors_and_self_loop_are_rejected() {
     }
     let root = get(
         addr,
-        format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        format!(
+            "GET / HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: curl/8.0\r\nConnection: close\r\n\r\n"
+        ),
     )
     .await;
     assert!(root.starts_with("HTTP/1.1 200"));
+    assert!(
+        root.to_ascii_lowercase()
+            .contains("content-type: text/plain; charset=utf-8")
+    );
+    assert!(root.contains("Unproxy status\n"));
+    assert!(root.contains("HTML status page: /index.html"));
+    let html = get(
+        addr,
+        format!("GET /index.html HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert!(html.starts_with("HTTP/1.1 200"));
+    assert!(
+        html.to_ascii_lowercase()
+            .contains("content-type: text/html; charset=utf-8")
+    );
+    assert!(html.contains("<title>Unproxy status</title>"));
+    let browser_root = get(
+        addr,
+        format!(
+            "GET / HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await;
+    assert!(browser_root.starts_with("HTTP/1.1 200"));
+    assert!(
+        browser_root
+            .to_ascii_lowercase()
+            .contains("content-type: text/html; charset=utf-8")
+    );
     let miss = get(
         addr,
         format!("GET /missing?q=1 HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
