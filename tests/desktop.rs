@@ -185,7 +185,13 @@ fn main() {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(!child.is_running());
-    assert!(child.last_exit.as_deref().unwrap().contains("status"));
+    assert!(
+        child
+            .last_exit
+            .as_deref()
+            .unwrap()
+            .contains("Proxy exited unexpectedly")
+    );
     assert!(
         std::fs::read_to_string(support.join("unproxy.log"))
             .unwrap()
