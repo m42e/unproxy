@@ -419,11 +419,33 @@ fn package(
         match format {
             Format::Native => unreachable!("native is expanded before packaging"),
             Format::Portable | Format::Windows => {
-                let bins = if matches!(format, Format::Windows) {
+                let windows_package = matches!(format, Format::Windows);
+                let mut bins = if windows_package {
                     vec!["unproxy", "unproxy-tray"]
                 } else {
                     vec!["unproxy", "paceval", "undns"]
                 };
+                let mut windows_components = vec![
+                    "unproxy.exe",
+                    "UnproxyTray.exe",
+                    "unproxy-tray.ps1",
+                    "tray-icons",
+                    "install.ps1",
+                    "uninstall.ps1",
+                    "metadata.json",
+                ];
+                if windows_package {
+                    for name in ["unproxy-register", "unproxyctl"] {
+                        if source_bin(name).is_file() {
+                            bins.push(name);
+                            windows_components.push(if name == "unproxy-register" {
+                                "unproxy-register.exe"
+                            } else {
+                                "unproxyctl.exe"
+                            });
+                        }
+                    }
+                }
                 for name in bins {
                     let output_name = if name == "unproxy-tray" {
                         "UnproxyTray"
@@ -457,8 +479,8 @@ fn package(
                     "version": unproxy::VERSION,
                     "target": target_name,
                     "negotiate": !no_negotiate,
-                    "components": if matches!(format, Format::Windows) {
-                        vec!["unproxy.exe", "UnproxyTray.exe", "unproxy-tray.ps1", "tray-icons", "install.ps1", "uninstall.ps1", "metadata.json"]
+                    "components": if windows_package {
+                        windows_components
                     } else {
                         vec!["unproxy", "paceval", "undns"]
                     },

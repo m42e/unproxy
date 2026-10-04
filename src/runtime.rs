@@ -11,6 +11,36 @@ use std::{ffi::OsString, fs, sync::Arc, time::Duration};
 
 /// Run the primary proxy process with already parsed settings.
 pub async fn run(a: MainArgs) -> Result<()> {
+    run_until(a, std::future::pending(), || {}).await
+}
+
+#[cfg(windows)]
+pub async fn run_windows_service(
+    a: MainArgs,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ready: tokio::sync::oneshot::Sender<()>,
+) -> Result<()> {
+    run_until(
+        a,
+        async move {
+            while !*shutdown.borrow() {
+                if shutdown.changed().await.is_err() {
+                    break;
+                }
+            }
+        },
+        move || {
+            let _ = ready.send(());
+        },
+    )
+    .await
+}
+
+async fn run_until(
+    a: MainArgs,
+    shutdown: impl std::future::Future<Output = ()>,
+    on_ready: impl FnOnce(),
+) -> Result<()> {
     let filter = std::env::var("UNPROXY_LOG")
         .ok()
         .and_then(|s| tracing_subscriber::EnvFilter::try_new(s).ok())
@@ -104,6 +134,7 @@ pub async fn run(a: MainArgs) -> Result<()> {
         }
     }
     let context = builder.bind().await?;
+    on_ready();
     for addr in context.local_addrs() {
         tracing::info!(%addr,"proxy listening")
     }
@@ -123,37 +154,45 @@ pub async fn run(a: MainArgs) -> Result<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut native_state = crate::network_notifications::TransitionState::new();
     #[cfg(unix)]
-    let listener_failed = loop {
-        tokio::select! {
-            _=tokio::signal::ctrl_c()=>break false,
-            _=term.recv()=>break false,
-            _=context.shutdown_notified()=>break true,
-            _=next_network_tick(&mut notification_ticks)=>{
-                pump_network_events(&mut notifications);
-            },
-            Some(event)=next_network_event(&mut notifications)=>{
-                if let Err(error) = handle_network_event(&context, &mut native_state, event).await {
-                    tracing::error!(sources=?sources, error=%format!("{error:#}"), "native policy update failed; retaining previous policy");
-                }
-            },
-            _=hup.recv()=>{
-                let result = context.reload_pac().await;
-                if let Err(error) = result {
-                    tracing::error!(sources=?sources, %error, "PAC reload failed; retaining previous policy");
-                }
-            },
-            _=direct.recv()=>{
-                if let Err(error) = policy.set_script(None).await {
-                    tracing::error!(%error, "direct mode failed; retaining previous policy");
+    let listener_failed = {
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                _= &mut shutdown => break false,
+                _=tokio::signal::ctrl_c()=>break false,
+                _=term.recv()=>break false,
+                _=context.shutdown_notified()=>break true,
+                _=next_network_tick(&mut notification_ticks)=>{
+                    pump_network_events(&mut notifications);
+                },
+                Some(event)=next_network_event(&mut notifications)=>{
+                    if let Err(error) = handle_network_event(&context, &mut native_state, event).await {
+                        tracing::error!(sources=?sources, error=%format!("{error:#}"), "native policy update failed; retaining previous policy");
+                    }
+                },
+                _=hup.recv()=>{
+                    let result = context.reload_pac().await;
+                    if let Err(error) = result {
+                        tracing::error!(sources=?sources, %error, "PAC reload failed; retaining previous policy");
+                    }
+                },
+                _=direct.recv()=>{
+                    if let Err(error) = policy.set_script(None).await {
+                        tracing::error!(%error, "direct mode failed; retaining previous policy");
+                    }
                 }
             }
         }
     };
     #[cfg(not(unix))]
-    let listener_failed = loop {
-        tokio::select! {
-            _=tokio::signal::ctrl_c()=>break false,
-            _=context.shutdown_notified()=>break true,
+    let listener_failed = {
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                _= &mut shutdown => break false,
+                _=tokio::signal::ctrl_c()=>break false,
+                _=context.shutdown_notified()=>break true,
+            }
         }
     };
     if !drain(context, Duration::from_secs(a.graceful_shutdown_timeout)).await {
