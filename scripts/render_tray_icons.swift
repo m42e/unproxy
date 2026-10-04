@@ -85,13 +85,17 @@ for states in combinations(palettes.map { Array($0.1.keys).sorted() }) {
     for (index, center) in centers.enumerated() {
         NSColor(hex: 0xEAF4FF).setStroke()
         let badge = NSBezierPath(
-            ovalIn: NSRect(x: center - 6.5, y: statusY - 8.9, width: 13, height: 17.8)
+            roundedRect: NSRect(x: center - 6.9, y: statusY - 6.9, width: 13.8, height: 13.8),
+            xRadius: 2.5,
+            yRadius: 2.5
         )
         badge.lineWidth = 0.8
         badge.stroke()
         palettes[index].1[states[index]]!.setFill()
         NSBezierPath(
-            ovalIn: NSRect(x: center - 6.3, y: statusY - 8.5, width: 12.6, height: 17)
+            roundedRect: NSRect(x: center - 6.5, y: statusY - 6.5, width: 13, height: 13),
+            xRadius: 1.8,
+            yRadius: 1.8
         ).fill()
     }
 
