@@ -220,6 +220,7 @@ impl Preferences {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn parse_listener(value: &str) -> Result<std::net::SocketAddr> {
     let address = value
         .trim()
@@ -260,7 +261,7 @@ impl ChildLifecycle {
             .unwrap_or_else(log_path)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn for_test(support_dir: PathBuf, stop_timeout: std::time::Duration) -> Self {
         Self {
             child: None,

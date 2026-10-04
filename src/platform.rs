@@ -296,7 +296,7 @@ mod tests {
         assert!(activation_descriptors("web", "2", "web:metrics", None).is_err());
         assert_eq!(
             activation_descriptors("missing", "2", "web:metrics", None).unwrap(),
-            []
+            Vec::<i32>::new()
         );
     }
 

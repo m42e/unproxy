@@ -187,12 +187,10 @@ async fn run_until(
     #[cfg(not(unix))]
     let listener_failed = {
         tokio::pin!(shutdown);
-        loop {
-            tokio::select! {
-                _= &mut shutdown => break false,
-                _=tokio::signal::ctrl_c()=>break false,
-                _=context.shutdown_notified()=>break true,
-            }
+        tokio::select! {
+            _ = &mut shutdown => false,
+            _ = tokio::signal::ctrl_c() => false,
+            _ = context.shutdown_notified() => true,
         }
     };
     if !drain(context, Duration::from_secs(a.graceful_shutdown_timeout)).await {
