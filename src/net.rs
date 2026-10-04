@@ -467,9 +467,11 @@ async fn read_pac_body(io: &mut BoxedIo, header: &str) -> Result<Vec<u8>> {
             k.eq_ignore_ascii_case(name).then(|| v.trim())
         })
     };
-    if let Some(length) = value("content-length")
-        && length.parse::<usize>().context("invalid Content-Length")? > MAX_PAC_BYTES
-    {
+    let content_length = value("content-length")
+        .map(|length| length.parse::<usize>())
+        .transpose()
+        .context("invalid Content-Length")?;
+    if content_length.is_some_and(|length| length > MAX_PAC_BYTES) {
         bail!("PAC response exceeds 8 MiB")
     }
     if value("transfer-encoding").is_some_and(|v| {
@@ -504,11 +506,7 @@ async fn read_pac_body(io: &mut BoxedIo, header: &str) -> Result<Vec<u8>> {
             }
         }
     }
-    if let Some(length) = value("content-length") {
-        let length = length.parse::<usize>().context("invalid Content-Length")?;
-        if length > MAX_PAC_BYTES {
-            bail!("PAC response exceeds 8 MiB")
-        };
+    if let Some(length) = content_length {
         let mut body = vec![0; length];
         io.read_exact(&mut body).await?;
         return Ok(body);
@@ -683,6 +681,29 @@ mod pac_body_tests {
     }
 
     #[tokio::test]
+    async fn pac_body_without_framing_reads_until_clean_eof() {
+        let mut io = input(b"function FindProxyForURL(){return 'DIRECT';}").await;
+        assert_eq!(
+            read_pac_body(&mut io, "HTTP/1.1 200 OK\r\n\r\n")
+                .await
+                .unwrap(),
+            b"function FindProxyForURL(){return 'DIRECT';}"
+        );
+
+        let mut io = input(b"").await;
+        assert!(
+            read_pac_body(
+                &mut io,
+                "HTTP/1.1 200 OK\r\nContent-Length: 8388609\r\nTransfer-Encoding: chunked\r\n\r\n"
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("8 MiB")
+        );
+    }
+
+    #[tokio::test]
     async fn pac_body_content_length_is_validated_before_reading() {
         let mut io = input(b"").await;
         assert!(
@@ -782,6 +803,64 @@ mod pac_body_tests {
         ) -> Poll<std::io::Result<()>> {
             Poll::Ready(Ok(()))
         }
+    }
+
+    #[test]
+    fn scripted_relay_streams_model_partial_io_and_flushes() {
+        let mut context = TaskContext::from_waker(std::task::Waker::noop());
+        let mut source = OneRead { sent: false };
+        let mut source_bytes = [0; 5];
+        let mut source_read = ReadBuf::new(&mut source_bytes);
+        assert!(matches!(
+            Pin::new(&mut source).poll_read(&mut context, &mut source_read),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(source_read.filled(), b"hello");
+        let mut eof_bytes = [];
+        let mut eof = ReadBuf::new(&mut eof_bytes);
+        assert!(matches!(
+            Pin::new(&mut source).poll_read(&mut context, &mut eof),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(eof.filled().is_empty());
+        assert!(matches!(
+            Pin::new(&mut source).poll_write(&mut context, b"ignored"),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            Pin::new(&mut source).poll_flush(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(matches!(
+            Pin::new(&mut source).poll_shutdown(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+
+        let mut destination = PartialWrite { written: 0 };
+        let mut unused_bytes = [];
+        let mut unused = ReadBuf::new(&mut unused_bytes);
+        assert!(matches!(
+            Pin::new(&mut destination).poll_read(&mut context, &mut unused),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            Pin::new(&mut destination).poll_write(&mut context, b"hello"),
+            Poll::Ready(Ok(2))
+        ));
+        assert_eq!(destination.written, 2);
+        let error = match Pin::new(&mut destination).poll_write(&mut context, b"llo") {
+            Poll::Ready(Err(error)) => error,
+            result => panic!("expected the scripted destination failure, got {result:?}"),
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(matches!(
+            Pin::new(&mut destination).poll_flush(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(matches!(
+            Pin::new(&mut destination).poll_shutdown(&mut context),
+            Poll::Ready(Ok(()))
+        ));
     }
 
     #[tokio::test]

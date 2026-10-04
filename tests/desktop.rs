@@ -86,6 +86,102 @@ fn embedded_child_gets_no_rc_environment_without_suppressing_cli_arguments() {
     child.stop().unwrap();
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_child_lifecycle_captures_arguments_and_reaps_children() {
+    use std::{
+        path::Path,
+        process::Command,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    fn compile_child_fixture(directory: &Path, marker: &Path) -> std::path::PathBuf {
+        let source = directory.join("child-fixture.rs");
+        let executable = directory.join("child-fixture.exe");
+        let source_text = r#"
+use std::{fs, io::Write, thread, time::Duration};
+
+fn main() {
+    let args = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+    fs::write(@MARKER@, format!("{}|{}", std::env::var("UNPROXY_NORC").unwrap(), args)).unwrap();
+    println!("fixture stdout");
+    eprintln!("fixture stderr");
+    std::io::stdout().flush().unwrap();
+    std::io::stderr().flush().unwrap();
+    if std::env::current_exe().unwrap().file_stem().unwrap() == "child-exit" {
+        std::process::exit(7);
+    }
+    thread::sleep(Duration::from_secs(30));
+}
+"#
+        .replace("@MARKER@", &format!("{:?}", marker.to_string_lossy()));
+        std::fs::write(&source, source_text).unwrap();
+        let output = Command::new("rustc")
+            .arg(source)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "rustc stdout: {}\nrustc stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        executable
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("child-arguments.txt");
+    let sleeper = compile_child_fixture(temp.path(), &marker);
+    let pac = temp.path().join("proxy.pac");
+    std::fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+    let prefs = Preferences {
+        port: 4321,
+        pac_file: pac,
+        ..Preferences::default()
+    };
+    let support = temp.path().join("support");
+    let mut child = ChildLifecycle::with_support_dir(support.clone());
+    child.start(&sleeper, &prefs).unwrap();
+    assert!(child.is_running());
+    child.start(&sleeper, &prefs).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.is_file() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let captured = std::fs::read_to_string(&marker).expect("child did not capture its arguments");
+    assert!(
+        captured.starts_with("1|--listen 127.0.0.1:4321"),
+        "{captured}"
+    );
+    assert!(captured.contains("--graceful-shutdown-timeout 0"));
+    assert!(captured.contains("--pac-file"));
+
+    child.stop().unwrap();
+    assert!(!child.is_running());
+    let log = std::fs::read_to_string(support.join("unproxy.log")).unwrap();
+    assert!(log.contains("fixture stdout"));
+    assert!(log.contains("fixture stderr"));
+
+    let exits = temp.path().join("child-exit.exe");
+    std::fs::copy(&sleeper, &exits).unwrap();
+    child.start(&exits, &prefs).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.is_running() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!child.is_running());
+    assert!(child.last_exit.as_deref().unwrap().contains("status"));
+    assert!(
+        std::fs::read_to_string(support.join("unproxy.log"))
+            .unwrap()
+            .contains("Proxy exited unexpectedly")
+    );
+}
+
 #[test]
 fn preferences_roundtrip_and_child_lifecycle_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();

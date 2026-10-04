@@ -56,8 +56,15 @@ pub fn first_readable(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBu
     paths.into_iter().find(|p| fs::read(p).is_ok())
 }
 pub fn settings_path() -> Option<PathBuf> {
+    first_readable(settings_candidates(
+        user_config_dir(),
+        env::current_exe().ok(),
+    ))
+}
+
+fn settings_candidates(user_config: Option<PathBuf>, executable: Option<PathBuf>) -> Vec<PathBuf> {
     let mut p = vec![];
-    if let Some(d) = user_config_dir() {
+    if let Some(d) = user_config {
         p.push(d.join("unproxy/unproxyrc"))
     }
     #[cfg(unix)]
@@ -68,17 +75,23 @@ pub fn settings_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     p.push("/opt/unproxy/etc/unproxyrc".into());
     #[cfg(windows)]
-    if let Ok(e) = env::current_exe()
-        && let Some(d) = e.parent()
-    {
+    if let Some(d) = executable.as_deref().and_then(Path::parent) {
         p.push(d.join("unproxyrc"));
         p.push(d.join("unproxyrc.txt"));
     }
-    first_readable(p)
+    #[cfg(not(windows))]
+    let _ = executable;
+    p
 }
 pub fn pac_path() -> Option<PathBuf> {
+    pac_candidates(user_config_dir(), env::current_exe().ok())
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
+fn pac_candidates(user_config: Option<PathBuf>, executable: Option<PathBuf>) -> Vec<PathBuf> {
     let mut p = vec![];
-    if let Some(d) = user_config_dir() {
+    if let Some(d) = user_config {
         p.push(d.join("unproxy/proxy.pac"))
     }
     #[cfg(unix)]
@@ -89,12 +102,12 @@ pub fn pac_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     p.push("/opt/unproxy/etc/proxy.pac".into());
     #[cfg(windows)]
-    if let Ok(e) = env::current_exe()
-        && let Some(d) = e.parent()
-    {
+    if let Some(d) = executable.as_deref().and_then(Path::parent) {
         p.push(d.join("proxy.pac"))
     }
-    p.into_iter().find(|p| p.is_file())
+    #[cfg(not(windows))]
+    let _ = executable;
+    p
 }
 pub fn netrc_default() -> Option<PathBuf> {
     dirs::home_dir().map(|p| p.join(".netrc"))
@@ -284,6 +297,65 @@ mod tests {
         assert_eq!(
             netrc_default(),
             dirs::home_dir().map(|home| home.join(".netrc"))
+        );
+    }
+
+    #[test]
+    fn settings_tokens_keep_quoted_whitespace_and_empty_values() {
+        assert_eq!(
+            setting_tokens("--pac-file \"proxy scripts/site.pac\" --verbose"),
+            ["--pac-file", "proxy scripts/site.pac", "--verbose"]
+        );
+        assert_eq!(setting_tokens("\"\""), [""]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_settings_and_pac_candidates_prefer_config_then_executable_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        let executable_dir = temp.path().join("bin");
+        std::fs::create_dir_all(config.join("unproxy")).unwrap();
+        std::fs::create_dir_all(&executable_dir).unwrap();
+        let executable = executable_dir.join("unproxy.exe");
+        std::fs::write(&executable, b"fixture").unwrap();
+
+        let config_settings = config.join("unproxy/unproxyrc");
+        let adjacent_settings = executable_dir.join("unproxyrc");
+        std::fs::write(&config_settings, "--verbose").unwrap();
+        std::fs::write(&adjacent_settings, "--quiet").unwrap();
+        assert_eq!(
+            first_readable(settings_candidates(
+                Some(config.clone()),
+                Some(executable.clone())
+            )),
+            Some(config_settings.clone())
+        );
+        std::fs::remove_file(&config_settings).unwrap();
+        assert_eq!(
+            first_readable(settings_candidates(
+                Some(config.clone()),
+                Some(executable.clone())
+            )),
+            Some(adjacent_settings)
+        );
+
+        let config_pac = config.join("unproxy/proxy.pac");
+        let adjacent_pac = executable_dir.join("proxy.pac");
+        std::fs::write(&config_pac, "DIRECT").unwrap();
+        std::fs::write(&adjacent_pac, "PROXY proxy.example:8080").unwrap();
+        assert_eq!(
+            pac_candidates(Some(config.clone()), Some(executable.clone()))
+                .into_iter()
+                .find(|path| path.is_file()),
+            Some(config_pac.clone())
+        );
+        std::fs::remove_file(config_pac).unwrap();
+        assert_eq!(
+            pac_candidates(Some(config), Some(executable))
+                .into_iter()
+                .find(|path| path.is_file()),
+            Some(adjacent_pac)
         );
     }
 

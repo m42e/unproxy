@@ -434,6 +434,26 @@ mod tests {
         assert!(context.wait_timeout(Duration::from_secs(1)).await);
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_service_signals_ready_and_drains_on_shutdown() {
+        let args = MainArgs::try_parse_from(["unproxy", "--listen", "127.0.0.1:0"]).unwrap();
+        let (shutdown, receiver) = tokio::sync::watch::channel(false);
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(run_windows_service(args, receiver, ready));
+
+        tokio::time::timeout(Duration::from_secs(5), started)
+            .await
+            .expect("service did not report readiness")
+            .expect("service dropped its readiness signal");
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("service did not stop after the shutdown signal")
+            .expect("service task panicked")
+            .unwrap();
+    }
+
     #[test]
     fn explicit_netrc_path_errors_for_missing_and_malformed_files() {
         let temp = tempfile::tempdir().unwrap();

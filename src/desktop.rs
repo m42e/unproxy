@@ -140,6 +140,7 @@ fn parse_remote_pac_uri(source: &str) -> Result<Option<http::Uri>> {
     Ok(Some(uri))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn resolve_pac_source(path: PathBuf) -> Result<PathBuf> {
     let source = path.to_string_lossy();
     if let Some(uri) = parse_remote_pac_uri(&source)? {
@@ -459,6 +460,23 @@ pub fn run_app() -> Result<()> {
 pub fn run_tray() -> Result<()> {
     use std::os::windows::process::CommandExt;
     let exe = std::env::current_exe()?;
+    run_tray_with(&exe, |program, args, flags| {
+        Command::new(program)
+            .args(args)
+            .creation_flags(flags)
+            .status()
+    })
+}
+
+#[cfg(windows)]
+fn run_tray_with(
+    exe: &Path,
+    execute: impl FnOnce(
+        &std::ffi::OsStr,
+        &[std::ffi::OsString],
+        u32,
+    ) -> std::io::Result<std::process::ExitStatus>,
+) -> Result<()> {
     let script = exe
         .parent()
         .context("tray executable has no parent directory")?
@@ -468,21 +486,22 @@ pub fn run_tray() -> Result<()> {
         "tray controller script is missing: {}",
         script.display()
     );
-    let status = Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-STA",
-            "-WindowStyle",
-            "Hidden",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ])
-        .arg(script)
-        .creation_flags(0x08000000)
-        .status()?;
+    let args = [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-STA",
+        "-WindowStyle",
+        "Hidden",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]
+    .into_iter()
+    .map(std::ffi::OsString::from)
+    .chain(std::iter::once(script.into_os_string()))
+    .collect::<Vec<_>>();
+    let status = execute(std::ffi::OsStr::new("powershell.exe"), &args, 0x08000000)?;
     anyhow::ensure!(status.success(), "tray controller exited with {status}");
     Ok(())
 }
@@ -3554,6 +3573,31 @@ mod tests {
     }
 
     #[test]
+    fn desktop_defaults_override_only_the_specified_preferences() {
+        let mut preferences = Preferences::default();
+        DesktopDefaults {
+            port: Some(4321),
+            pac_file: Some(PathBuf::from("custom/proxy.pac")),
+            negotiate: Some(true),
+            proxytunnel: Some(true),
+            direct_fallback: Some(true),
+            autostart: Some(false),
+        }
+        .apply(&mut preferences);
+
+        assert_eq!(preferences.port, 4321);
+        assert_eq!(preferences.pac_file, support_dir().join("custom/proxy.pac"));
+        assert!(preferences.negotiate);
+        assert!(preferences.proxytunnel);
+        assert!(preferences.direct_fallback);
+        assert!(!preferences.autostart);
+
+        let original = preferences.clone();
+        DesktopDefaults::default().apply(&mut preferences);
+        assert_eq!(preferences, original);
+    }
+
+    #[test]
     fn bundle_paths_require_a_macos_contents_executable_and_find_children() {
         let paths = BundlePaths::from_main_executable(Path::new(
             "/Applications/Unproxy.app/Contents/MacOS/unproxy-app",
@@ -3587,6 +3631,56 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("only on macOS")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tray_command_uses_hidden_sta_powershell_and_reports_failures() {
+        use std::os::windows::process::ExitStatusExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("Unproxy Tray.exe");
+        let script = temp.path().join("unproxy-tray.ps1");
+        std::fs::write(&script, "fixture").unwrap();
+        let mut called = false;
+        run_tray_with(&exe, |program, args, flags| {
+            called = true;
+            assert_eq!(program, "powershell.exe");
+            assert_eq!(
+                args.iter()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+                [
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-STA",
+                    "-WindowStyle",
+                    "Hidden",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    script.to_string_lossy().as_ref(),
+                ]
+            );
+            assert_eq!(flags, 0x08000000);
+            Ok(std::process::ExitStatus::from_raw(0))
+        })
+        .unwrap();
+        assert!(called);
+
+        let failure =
+            run_tray_with(&exe, |_, _, _| Ok(std::process::ExitStatus::from_raw(1))).unwrap_err();
+        assert!(failure.to_string().contains("tray controller exited"));
+
+        std::fs::remove_file(script).unwrap();
+        let missing =
+            run_tray_with(&exe, |_, _, _| panic!("missing script must not launch")).unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("tray controller script is missing")
         );
     }
 

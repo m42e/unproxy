@@ -88,3 +88,30 @@ fn release_notes_reject_a_changelog_without_a_release_section() {
         String::from_utf8_lossy(&output.stderr).contains("changelog contains no release section")
     );
 }
+
+#[test]
+fn docs_command_generates_pages_landing_page_and_source_archive() {
+    let temp = tempfile::tempdir().unwrap();
+    let output_dir = temp.path().join("generated docs");
+    let output = xtask(&[
+        "docs",
+        "--output",
+        output_dir.to_str().unwrap(),
+        "--repository",
+        "m42e/unproxy",
+    ]);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let guide = std::fs::read_to_string(output_dir.join("docs/user-guide.html")).unwrap();
+    assert!(guide.contains("<nav>"));
+    assert!(output_dir.join("docs/index.html").is_file());
+    assert!(output_dir.join("source.zip").is_file());
+    let landing = std::fs::read_to_string(output_dir.join("index.html")).unwrap();
+    assert!(landing.contains("m42e/unproxy"));
+    assert!(!landing.contains("@VERSION@"));
+}
