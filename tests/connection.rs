@@ -170,7 +170,7 @@ async fn forward_proxy_send_reports_missing_credentials_before_http_exchange() {
 async fn direct_tls_and_https_proxy_constructors_keep_their_transport_identity() {
     let options = tls_options();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let address = listener.local_addr().unwrap();
     let direct_server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = tls_acceptor().accept(stream).await.unwrap();
@@ -180,8 +180,8 @@ async fn direct_tls_and_https_proxy_constructors_keep_their_transport_identity()
     });
     let connection = Connection::direct_tls(
         &Endpoint {
-            host: "localhost".into(),
-            port,
+            host: address.ip().to_string(),
+            port: address.port(),
         },
         &options,
         Duration::from_secs(2),
@@ -201,7 +201,7 @@ async fn direct_tls_and_https_proxy_constructors_keep_their_transport_identity()
     assert!(head.contains("connection: close"));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let address = listener.local_addr().unwrap();
     let proxy_server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut stream = tls_acceptor().accept(stream).await.unwrap();
@@ -211,8 +211,8 @@ async fn direct_tls_and_https_proxy_constructors_keep_their_transport_identity()
     });
     let connection = Connection::proxy(
         Endpoint {
-            host: "localhost".into(),
-            port,
+            host: address.ip().to_string(),
+            port: address.port(),
         },
         true,
         &options,
@@ -223,8 +223,8 @@ async fn direct_tls_and_https_proxy_constructors_keep_their_transport_identity()
     assert_eq!(
         connection.route(),
         &Route::Https(Endpoint {
-            host: "localhost".into(),
-            port
+            host: address.ip().to_string(),
+            port: address.port(),
         })
     );
     assert_eq!(connection.transport(), Transport::ForwardProxy);
