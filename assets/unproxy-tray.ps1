@@ -1,7 +1,6 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-Add-Type -AssemblyName Microsoft.VisualBasic
 
 $root = Join-Path $env:LOCALAPPDATA 'Unproxy'
 $bin = Join-Path $root 'bin'
@@ -41,6 +40,9 @@ $script:p = if ($hasPreferences) {
         negotiate = $false
         autostart = $true
     }
+}
+if (-not ($script:p.PSObject.Properties.Name -contains 'listeners')) {
+    $script:p | Add-Member -NotePropertyName listeners -NotePropertyValue @()
 }
 if (-not $script:p.pacFile) { $script:p.pacFile = Join-Path $root 'proxy.pac' }
 if (-not [IO.Path]::IsPathRooted([string]$script:p.pacFile)) {
@@ -143,15 +145,22 @@ function Update-TrayIcon {
 
 function Read-RuntimeStatus {
     if (-not $script:child) { return }
-    $port = if (Test-PortValid) { [long]$script:p.port } else { 3128 }
-    $client = [Net.Sockets.TcpClient]::new()
+    $listeners = @(Get-ListenerAddresses)
+    $listener = if ($listeners.Count -gt 0) { Parse-ListenerAddress ([string]$listeners[0]) } else { $null }
+    if (-not $listener) { return }
+    $hostHeader = if ($listener.IPAddress.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6) {
+        "[$($listener.IPAddress.ToString())]:$($listener.Port)"
+    } else { "$($listener.IPAddress.ToString()):$($listener.Port)" }
+    $client = if ($listener.IPAddress.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6) {
+        [Net.Sockets.TcpClient]::new([Net.Sockets.AddressFamily]::InterNetworkV6)
+    } else { [Net.Sockets.TcpClient]::new() }
     try {
         $client.ReceiveTimeout = 250
         $client.SendTimeout = 250
-        $client.Connect('127.0.0.1', $port)
+        $client.Connect($listener.IPAddress, [int]$listener.Port)
         $stream = $client.GetStream()
         $request = [Text.Encoding]::ASCII.GetBytes(
-            "GET /status.json HTTP/1.1`r`nHost: 127.0.0.1:$port`r`nConnection: close`r`n`r`n")
+            "GET /status.json HTTP/1.1`r`nHost: $hostHeader`r`nConnection: close`r`n`r`n")
         $stream.Write($request, 0, $request.Length)
         $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8)
         $response = $reader.ReadToEnd()
@@ -180,7 +189,8 @@ function Refresh-State {
     }
     if ($script:child) {
         Read-RuntimeStatus
-        $script:icon.Text = "Unproxy running on 127.0.0.1:$(if(Test-PortValid){$script:p.port}else{3128})"
+        $listeners = @(Get-ListenerAddresses)
+        if ($listeners.Count -gt 0) { $script:icon.Text = "Unproxy running on $($listeners[0])" }
     }
     Update-TrayIcon
 }
@@ -208,12 +218,65 @@ function Test-PortValid {
     return [long]::TryParse([string]$script:p.port, [ref]$value) -and $value -ge 1024 -and $value -le 65534
 }
 
+function Parse-ListenerAddress([string]$value) {
+    $text = $value.Trim()
+    if ($text -match '^\[(?<address>[^\]]+)\]:(?<port>\d+)$') {
+        $addressText = $Matches.address
+        $portText = $Matches.port
+    } elseif ($text -match '^(?<address>[^:]+):(?<port>\d+)$') {
+        $addressText = $Matches.address
+        $portText = $Matches.port
+    } else {
+        return $null
+    }
+    $port = [long]0
+    $address = $null
+    if (-not [long]::TryParse($portText, [ref]$port) -or
+        $port -lt 1024 -or $port -gt 65534 -or
+        -not [Net.IPAddress]::TryParse($addressText, [ref]$address)) {
+        return $null
+    }
+    if ($address.Equals([Net.IPAddress]::Any) -or
+        $address.Equals([Net.IPAddress]::IPv6Any)) {
+        return $null
+    }
+    $normalizedAddress = if ($address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetworkV6) {
+        "[$($address.ToString())]:$port"
+    } else { "$($address.ToString()):$port" }
+    return [pscustomobject]@{
+        Address = $normalizedAddress
+        Port = $port
+        IPAddress = $address
+    }
+}
+
+function Get-ListenerAddresses {
+    if ($script:p.listeners -and @($script:p.listeners).Count -gt 0) {
+        return @($script:p.listeners | ForEach-Object { [string]$_ })
+    }
+    $port = if (Test-PortValid) { [long]$script:p.port } else { 3128 }
+    return @("127.0.0.1:$port", "[::1]:$port")
+}
+
 function Start-Proxy {
     Refresh-State
     if ($script:child) { return }
     $script:lastExitCode = $null
     $script:runtimeStatus = $null
-    $listenerPort = if (Test-PortValid) { [long]$script:p.port } else { 3128 }
+    $listenerAddresses = @(Get-ListenerAddresses)
+    if ($listenerAddresses.Count -eq 0) {
+        [Windows.Forms.MessageBox]::Show(
+            'At least one listener is required. Choose Settings… to add one.', 'Unproxy') | Out-Null
+        return
+    }
+    foreach ($listener in $listenerAddresses) {
+        if (-not (Parse-ListenerAddress ([string]$listener))) {
+            [Windows.Forms.MessageBox]::Show(
+                "Invalid listener address: $listener`nUse a numeric IP address and a port from 1024 through 65534.",
+                'Unproxy') | Out-Null
+            return
+        }
+    }
     if (-not [IO.Path]::IsPathRooted([string]$script:p.pacFile)) {
         [Windows.Forms.MessageBox]::Show('PAC path must be absolute.', 'Unproxy') | Out-Null
         return
@@ -225,9 +288,11 @@ function Start-Proxy {
     }
 
     $exe = Join-Path $bin 'unproxy.exe'
-    $arguments = @(
-        '--listen', "127.0.0.1:$listenerPort",
-        '--listen', "[::1]:$listenerPort",
+    $arguments = @()
+    foreach ($listener in $listenerAddresses) {
+        $arguments += @('--listen', [string]$listener)
+    }
+    $arguments += @(
         '--pac-file', $script:p.pacFile,
         '--graceful-shutdown-timeout', '0'
     )
@@ -272,35 +337,227 @@ function Start-Proxy {
     Refresh-State
 }
 
-function Edit-Setting([string]$name, [string]$label, [string]$value) {
-    $newValue = [Microsoft.VisualBasic.Interaction]::InputBox(
-        $label, 'Unproxy Settings', $value)
-    if ($newValue -eq '') { return }
-    if ($name -eq 'port') {
-        $port = [long]0
-        if (-not [long]::TryParse($newValue, [ref]$port) -or
-            $port -lt 1024 -or $port -gt 65534) {
-            [Windows.Forms.MessageBox]::Show(
-                'Port must be an integer from 1024 through 65534.', 'Unproxy') | Out-Null
-            return
-        }
-        $script:p.port = $port
-    } else {
-        if (-not [IO.Path]::IsPathRooted($newValue)) {
-            [Windows.Forms.MessageBox]::Show(
-                'PAC path must be absolute.', 'Unproxy') | Out-Null
-            return
-        }
-        $script:p.pacFile = $newValue
-    }
-    Save-Prefs
-    if ($script:child) { Stop-Proxy; Start-Proxy }
-}
+function Show-Settings {
+    $form = [Windows.Forms.Form]::new()
+    $form.Text = 'Unproxy Settings'
+    $form.StartPosition = [Windows.Forms.FormStartPosition]::CenterScreen
+    $form.FormBorderStyle = [Windows.Forms.FormBorderStyle]::FixedDialog
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+    $form.ShowInTaskbar = $false
+    $form.ClientSize = [Drawing.Size]::new(700, 525)
 
-function Toggle-Setting([string]$key) {
-    $script:p.$key = -not $script:p.$key
-    Save-Prefs
-    if ($script:child) { Stop-Proxy; Start-Proxy }
+    $listenersLabel = [Windows.Forms.Label]::new()
+    $listenersLabel.Text = 'Listeners (numeric IP address and port; IPv6 in brackets)'
+    $listenersLabel.Location = [Drawing.Point]::new(20, 18)
+    $listenersLabel.AutoSize = $true
+    [void]$form.Controls.Add($listenersLabel)
+
+    $listenersPanel = [Windows.Forms.Panel]::new()
+    $listenersPanel.Location = [Drawing.Point]::new(20, 42)
+    $listenersPanel.Size = [Drawing.Size]::new(660, 180)
+    $listenersPanel.AutoScroll = $true
+    $listenersPanel.BorderStyle = [Windows.Forms.BorderStyle]::FixedSingle
+    [void]$form.Controls.Add($listenersPanel)
+    $listenerRows = [Collections.ArrayList]::new()
+    $renderListenerRows = ({
+        $listenersPanel.Controls.Clear()
+        for ($index = 0; $index -lt $listenerRows.Count; $index++) {
+            $entry = $listenerRows[$index]
+            $entry.Panel.Location = [Drawing.Point]::new(0, $index * 34)
+            [void]$listenersPanel.Controls.Add($entry.Panel)
+        }
+        $listenersPanel.AutoScrollMinSize = [Drawing.Size]::new(0, $listenerRows.Count * 34)
+    }).GetNewClosure()
+    $addListenerRow = ({
+        param([string]$value)
+        $row = [Windows.Forms.Panel]::new()
+        $row.Size = [Drawing.Size]::new(635, 32)
+        $addressBox = [Windows.Forms.TextBox]::new()
+        $addressBox.Location = [Drawing.Point]::new(5, 4)
+        $addressBox.Size = [Drawing.Size]::new(555, 24)
+        $addressBox.Text = $value
+        [void]$row.Controls.Add($addressBox)
+        $remove = [Windows.Forms.Button]::new()
+        $remove.Text = 'Remove'
+        $remove.Location = [Drawing.Point]::new(570, 2)
+        $remove.Size = [Drawing.Size]::new(58, 27)
+        [void]$row.Controls.Add($remove)
+        $entry = [pscustomobject]@{ Panel = $row; Address = $addressBox }
+        $remove.add_Click(({
+            [void]$listenerRows.Remove($entry)
+            & $renderListenerRows
+        }).GetNewClosure())
+        [void]$listenerRows.Add($entry)
+        & $renderListenerRows
+    }).GetNewClosure()
+    foreach ($listener in @(Get-ListenerAddresses)) { & $addListenerRow ([string]$listener) }
+
+    $addListenerButton = [Windows.Forms.Button]::new()
+    $addListenerButton.Text = 'Add Listener'
+    $addListenerButton.Location = [Drawing.Point]::new(20, 229)
+    $addListenerButton.Size = [Drawing.Size]::new(120, 30)
+    [void]$form.Controls.Add($addListenerButton)
+    $addListenerButton.add_Click(({
+        & $addListenerRow '127.0.0.1:8080'
+    }).GetNewClosure())
+
+    $pacLabel = [Windows.Forms.Label]::new()
+    $pacLabel.Text = 'PAC file path'
+    $pacLabel.Location = [Drawing.Point]::new(20, 278)
+    $pacLabel.AutoSize = $true
+    [void]$form.Controls.Add($pacLabel)
+
+    $pacBox = [Windows.Forms.TextBox]::new()
+    $pacBox.Location = [Drawing.Point]::new(205, 273)
+    $pacBox.Size = [Drawing.Size]::new(410, 24)
+    $pacBox.Text = [string]$script:p.pacFile
+    [void]$form.Controls.Add($pacBox)
+
+    $browseButton = [Windows.Forms.Button]::new()
+    $browseButton.Text = 'Browse…'
+    $browseButton.Location = [Drawing.Point]::new(625, 271)
+    $browseButton.Size = [Drawing.Size]::new(55, 27)
+    [void]$form.Controls.Add($browseButton)
+    $browseButton.add_Click(({
+        $picker = [Windows.Forms.OpenFileDialog]::new()
+        $picker.Title = 'Choose a PAC file'
+        $picker.Filter = 'PAC files (*.pac)|*.pac|All files (*.*)|*.*'
+        $picker.FileName = $pacBox.Text
+        if ($picker.ShowDialog($form) -eq [Windows.Forms.DialogResult]::OK) {
+            $pacBox.Text = $picker.FileName
+        }
+        $picker.Dispose()
+    }).GetNewClosure())
+
+    $tunnel = [Windows.Forms.CheckBox]::new()
+    $tunnel.Text = 'Always use CONNECT'
+    $tunnel.Location = [Drawing.Point]::new(205, 315)
+    $tunnel.AutoSize = $true
+    $tunnel.Checked = [bool]$script:p.proxytunnel
+    [void]$form.Controls.Add($tunnel)
+
+    $direct = [Windows.Forms.CheckBox]::new()
+    $direct.Text = 'DIRECT fallback'
+    $direct.Location = [Drawing.Point]::new(205, 345)
+    $direct.AutoSize = $true
+    $direct.Checked = [bool]$script:p.directFallback
+    [void]$form.Controls.Add($direct)
+
+    $negotiate = [Windows.Forms.CheckBox]::new()
+    $negotiate.Text = 'Negotiate'
+    $negotiate.Location = [Drawing.Point]::new(205, 375)
+    $negotiate.AutoSize = $true
+    $negotiate.Checked = [bool]$script:p.negotiate
+    $negotiate.Enabled = [bool]$script:negotiateAvailable
+    [void]$form.Controls.Add($negotiate)
+
+    $autostart = [Windows.Forms.CheckBox]::new()
+    $autostart.Text = 'Start Unproxy when I sign in'
+    $autostart.Location = [Drawing.Point]::new(205, 405)
+    $autostart.AutoSize = $true
+    $autostart.Checked = [bool]$script:p.autostart
+    [void]$form.Controls.Add($autostart)
+
+    $saveButton = [Windows.Forms.Button]::new()
+    $saveButton.Text = 'Save'
+    $saveButton.Location = [Drawing.Point]::new(500, 470)
+    $saveButton.Size = [Drawing.Size]::new(80, 30)
+    $saveButton.DialogResult = [Windows.Forms.DialogResult]::None
+    [void]$form.Controls.Add($saveButton)
+
+    $cancelButton = [Windows.Forms.Button]::new()
+    $cancelButton.Text = 'Cancel'
+    $cancelButton.Location = [Drawing.Point]::new(590, 470)
+    $cancelButton.Size = [Drawing.Size]::new(80, 30)
+    $cancelButton.DialogResult = [Windows.Forms.DialogResult]::Cancel
+    [void]$form.Controls.Add($cancelButton)
+    $form.AcceptButton = $saveButton
+    $form.CancelButton = $cancelButton
+
+    $saveButton.add_Click(({
+        if (-not [IO.Path]::IsPathRooted($pacBox.Text)) {
+            [Windows.Forms.MessageBox]::Show(
+                'PAC path must be absolute.', 'Unproxy Settings') | Out-Null
+            return
+        }
+
+        $listenerAddresses = @()
+        foreach ($entry in $listenerRows) {
+            $parsed = Parse-ListenerAddress $entry.Address.Text
+            if (-not $parsed) {
+                [Windows.Forms.MessageBox]::Show(
+                    "Invalid listener address: $($entry.Address.Text)`nUse a numeric IP address and a port from 1024 through 65534.",
+                    'Unproxy Settings') | Out-Null
+                return
+            }
+            if ($listenerAddresses -contains $parsed.Address) {
+                [Windows.Forms.MessageBox]::Show(
+                    'Listener addresses must be unique.', 'Unproxy Settings') | Out-Null
+                return
+            }
+            $listenerAddresses += $parsed.Address
+        }
+        if ($listenerAddresses.Count -eq 0) {
+            [Windows.Forms.MessageBox]::Show(
+                'At least one listener is required.', 'Unproxy Settings') | Out-Null
+            return
+        }
+
+        $wasRunning = $null -ne $script:child
+        $previousAutostart = [bool]$script:p.autostart
+        $previousListeners = @(Get-ListenerAddresses)
+        $restartRequired = (($previousListeners -join "`n") -cne ($listenerAddresses -join "`n")) -or
+            ([string]$script:p.pacFile -cne [string]$pacBox.Text) -or
+            ([bool]$script:p.proxytunnel -ne [bool]$tunnel.Checked) -or
+            ([bool]$script:p.directFallback -ne [bool]$direct.Checked) -or
+            ([bool]$script:negotiateAvailable -and
+                ([bool]$script:p.negotiate -ne [bool]$negotiate.Checked))
+        $firstListener = Parse-ListenerAddress ([string]$listenerAddresses[0])
+        $previous = [pscustomobject]@{
+            port = $script:p.port
+            listeners = @($script:p.listeners)
+            pacFile = $script:p.pacFile
+            proxytunnel = $script:p.proxytunnel
+            directFallback = $script:p.directFallback
+            negotiate = $script:p.negotiate
+        }
+        $script:p.listeners = $listenerAddresses
+        $script:p.port = [long]$firstListener.Port
+        $script:p.pacFile = $pacBox.Text
+        $script:p.proxytunnel = [bool]$tunnel.Checked
+        $script:p.directFallback = [bool]$direct.Checked
+        if ($script:negotiateAvailable) {
+            $script:p.negotiate = [bool]$negotiate.Checked
+        }
+        try {
+            Save-Prefs
+            if ([bool]$autostart.Checked -ne $previousAutostart) {
+                Set-Login ([bool]$autostart.Checked)
+            }
+        } catch {
+            if ([bool]$autostart.Checked -ne $previousAutostart) {
+                try { Set-Login $previousAutostart } catch { }
+            }
+            $script:p.port = $previous.port
+            $script:p.listeners = $previous.listeners
+            $script:p.pacFile = $previous.pacFile
+            $script:p.proxytunnel = $previous.proxytunnel
+            $script:p.directFallback = $previous.directFallback
+            $script:p.negotiate = $previous.negotiate
+            try { Save-Prefs } catch { }
+            [Windows.Forms.MessageBox]::Show(
+                "Could not save Unproxy settings: $_", 'Unproxy Settings') | Out-Null
+            return
+        }
+
+        $form.DialogResult = [Windows.Forms.DialogResult]::OK
+        $form.Close()
+        if ($wasRunning -and $restartRequired) { Stop-Proxy; Start-Proxy }
+    }).GetNewClosure())
+
+    [void]$form.ShowDialog()
+    $form.Dispose()
 }
 
 function Set-Login([bool]$enabled) {
@@ -324,79 +581,24 @@ function Build-Menu {
         'failed' { "Stopped unexpectedly (exit $($script:lastExitCode))" }
         default { 'Stopped' }
     }
-    $pacLabel = switch ($states[1]) {
-        'loaded' { 'Loaded' }
-        'unloaded' { 'Not loaded' }
-        default { 'Unknown' }
-    }
-    $upstreamLabel = switch ($states[2]) {
-        'ok' { 'Last proxy request succeeded' }
-        'error' { 'Last proxy request failed' }
-        default { 'No recent proxy request' }
-    }
-    $authLabel = switch ($states[3]) {
-        'authenticated' { 'Accepted on last request' }
-        'rejected' { 'Rejected by upstream (407)' }
-        'configured' { 'Configured; not verified yet' }
-        default { 'Not configured' }
-    }
-    foreach ($line in @(
-        "Proxy: $processLabel",
-        "PAC: $pacLabel",
-        "Upstream: $upstreamLabel",
-        "Authentication: $authLabel"
-    )) { [void]$menu.Items.Add($line) }
-    [void]$menu.Items.Add('-')
-    $startLabel = if ($script:child) { 'Stop' } else { 'Start' }
-    $startItem = $menu.Items.Add($startLabel)
-    $startItem.add_Click({
+    $statusAction = if ($script:child) { 'click to stop' } else { 'click to start' }
+    $statusItem = $menu.Items.Add("Proxy: $processLabel ($statusAction)")
+    $statusItem.add_Click({
         if ($script:child) { Stop-Proxy } else { Start-Proxy }
     })
-    if ($script:child) {
-        [void]$menu.Items.Add("Listener: 127.0.0.1:$(if(Test-PortValid){$script:p.port}else{3128})")
-        [void]$menu.Items.Add("PAC: $($script:p.pacFile)")
-    }
-    [void]$menu.Items.Add('-')
-
-    $portLabel = if (-not (Test-PortValid)) {
-        'Listener port (invalid saved value)'
-    } else { 'Listener port' }
-    foreach ($entry in @(
-        @($portLabel, 'port', [string]$script:p.port),
-        @('PAC file', 'pacFile', [string]$script:p.pacFile)
-    )) {
-        $item = $menu.Items.Add("Edit $($entry[0])…")
-        $name = [string]$entry[1]
-        $label = [string]$entry[0]
-        $value = [string]$entry[2]
-        $item.add_Click(({ Edit-Setting $name $label $value }).GetNewClosure())
-    }
-
-    foreach ($entry in @(
-        @('Always tunnel HTTP through CONNECT', 'proxytunnel'),
-        @('DIRECT fallback', 'directFallback'),
-        @('Negotiate', 'negotiate')
-    )) {
-        $item = $menu.Items.Add([string]$entry[0])
-        $key = [string]$entry[1]
-        $item.CheckOnClick = $true
-        $item.Checked = [bool]$script:p.$key
-        if ($key -eq 'negotiate' -and -not $script:negotiateAvailable) {
-            $item.Text = 'Negotiate (unavailable)'
-            $item.Enabled = $false
-        } else {
-            $item.add_Click(({ Toggle-Setting $key }).GetNewClosure())
-        }
-    }
-
-    $loginItem = $menu.Items.Add('Start at login')
-    $loginItem.CheckOnClick = $true
-    $loginItem.Checked = [bool]$script:p.autostart
-    $loginItem.add_Click(({ Set-Login $loginItem.Checked }).GetNewClosure())
-    $logItem = $menu.Items.Add('Open log')
+    $logItem = $menu.Items.Add('Open Log')
     $logItem.add_Click({ Start-Process notepad.exe $logFile })
     [void]$menu.Items.Add('-')
-    $exitItem = $menu.Items.Add('Exit Unproxy')
+    $configuredListeners = @(Get-ListenerAddresses)
+    $copyAddress = if ($configuredListeners.Count -gt 0) {
+        [string]$configuredListeners[0]
+    } else { '127.0.0.1:3128' }
+    $copyItem = $menu.Items.Add('Copy Proxy Address')
+    $copyItem.add_Click(({ [Windows.Forms.Clipboard]::SetText($copyAddress) }).GetNewClosure())
+    $settingsItem = $menu.Items.Add('Settings…')
+    $settingsItem.add_Click({ Show-Settings })
+    [void]$menu.Items.Add('-')
+    $exitItem = $menu.Items.Add('Quit Unproxy')
     $exitItem.add_Click({
         Stop-Proxy
         $script:icon.Visible = $false

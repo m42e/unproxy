@@ -75,9 +75,13 @@ or:
 unproxy --pac-file https://proxy.example.org/company.pac
 ```
 
-On Windows, put the PAC file at `%LOCALAPPDATA%\Unproxy\proxy.pac` and use the
-tray app's PAC setting. On macOS, choose **Edit PAC File…** from the Unproxy
-menu bar menu. On Linux, create `~/.config/unproxy/unproxyrc` and put this in it:
+On Windows, put the PAC file at `%LOCALAPPDATA%\Unproxy\proxy.pac` and choose
+**Settings…** in the tray menu. On macOS, choose **Settings…** from the Unproxy
+menu bar menu. Add a listener for each numeric IP address and port; write IPv6
+addresses in brackets, such as `[::1]:3128`. Both desktop apps start with IPv4
+and IPv6 loopback listeners on port 3128. Use the listener controls in Settings
+to add or remove entries. **Copy Proxy Address** copies the first listener. On
+Linux, create `~/.config/unproxy/unproxyrc` and put this in it:
 
 ```text
 --pac-file /path/to/company.pac
@@ -123,6 +127,6 @@ doesn't load, check these in order:
    enable Negotiate.
 
 On the same computer, open `http://127.0.0.1:3128/access.html` to see recent
-requests. To stop Unproxy, use **Stop** in the Windows tray or macOS menu, stop
-the Linux service with `systemctl --user stop unproxy`, or press Ctrl+C if you
-started it in a terminal.
+requests. To stop Unproxy, click its status row in the Windows tray or macOS
+menu, stop the Linux service with `systemctl --user stop unproxy`, or press
+Ctrl+C if you started it in a terminal.

@@ -17,9 +17,10 @@ the macOS package for your Mac.
    .\install.ps1
    ```
 
-5. The Unproxy tray icon appears near the clock. Use its menu to start or stop
-   the proxy and edit the PAC file. The installer adds Unproxy to your Start
-   menu and starts it when you sign in.
+5. The Unproxy tray icon appears near the clock. Click its status row to start
+   or stop the proxy. Choose **Settings…** to edit listeners, the PAC file, and
+   proxy behavior. The installer adds Unproxy to your Start menu and starts it
+   when you sign in; you can change that in Settings.
 
 To remove Unproxy, open the extracted ZIP folder in PowerShell and run:
 
@@ -33,11 +34,12 @@ Add `-RemoveUserData` to also delete Unproxy preferences and logs.
 
 1. Download the macOS app installer (`*-app.pkg`) and open it.
 2. Follow the installer prompts, then open **Unproxy** from Applications.
-3. Click the Unproxy icon in the menu bar and choose **Start**.
+3. Click the Unproxy icon in the menu bar. Its status row starts or stops the
+   proxy.
 
-Use **Edit PAC File…** in the menu to select your organization's PAC file. Use
-**Start at Login** in the same menu to control whether the app opens when you
-sign in.
+Choose **Settings…** to set listeners, the PAC file, and proxy behavior. Use
+**Start with Login** to control whether the app opens when you sign in. The menu
+also has actions to open the log and copy the proxy address.
 
 ## Debian or Ubuntu
 
@@ -103,6 +105,6 @@ only, so an existing user's choices are preserved when the app is updated.
 
 - **Windows:** Run `uninstall.ps1` from the extracted Windows ZIP. Add
   `-RemoveUserData` if you also want to delete preferences and logs.
-- **macOS:** For the menu bar app, turn off **Start at Login**, quit Unproxy,
+- **macOS:** For the menu bar app, turn off **Start with Login**, quit Unproxy,
   then move it from Applications to the Trash.
 - **Debian/Ubuntu:** Run `sudo apt remove unproxy`.

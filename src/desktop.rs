@@ -18,6 +18,8 @@ pub const INTERNAL_UNAVAILABLE_NOTIFICATION: &str =
 #[serde(default)]
 pub struct Preferences {
     pub port: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listeners: Option<Vec<String>>,
     pub pac_file: PathBuf,
     pub negotiate: bool,
     pub proxytunnel: bool,
@@ -71,6 +73,7 @@ impl Default for Preferences {
     fn default() -> Self {
         let mut preferences = Self {
             port: 3128,
+            listeners: None,
             pac_file: default_pac_path(),
             negotiate: false,
             proxytunnel: false,
@@ -128,24 +131,51 @@ impl BundlePaths {
     }
 }
 impl Preferences {
-    pub fn effective_port(&self) -> u16 {
+    fn legacy_port(&self) -> u16 {
         if (1024..=65534).contains(&self.port) {
             self.port as u16
         } else {
             3128
         }
     }
+    pub fn effective_port(&self) -> u16 {
+        self.listeners
+            .as_ref()
+            .and_then(|listeners| listeners.first())
+            .and_then(|listener| listener.parse::<std::net::SocketAddr>().ok())
+            .map(|listener| listener.port())
+            .filter(|port| (1024..=65534).contains(port))
+            .unwrap_or_else(|| self.legacy_port())
+    }
+    pub fn effective_listeners(&self) -> Vec<String> {
+        if let Some(listeners) = self
+            .listeners
+            .as_ref()
+            .filter(|listeners| !listeners.is_empty())
+        {
+            return listeners.clone();
+        }
+        let port = self.legacy_port();
+        vec![format!("127.0.0.1:{port}"), format!("[::1]:{port}")]
+    }
+    pub fn primary_listener(&self) -> String {
+        self.effective_listeners()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| format!("127.0.0.1:{}", self.legacy_port()))
+    }
     pub fn child_args(&self) -> Vec<String> {
-        let mut a = vec![
-            "--listen".into(),
-            format!("127.0.0.1:{}", self.effective_port()),
-            "--listen".into(),
-            format!("[::1]:{}", self.effective_port()),
+        let mut a = Vec::new();
+        for listener in self.effective_listeners() {
+            a.push("--listen".into());
+            a.push(listener);
+        }
+        a.extend([
             "--graceful-shutdown-timeout".into(),
             "0".into(),
             "--pac-file".into(),
             self.pac_file.to_string_lossy().into_owned(),
-        ];
+        ]);
         if self.proxytunnel {
             a.push("--proxytunnel".into())
         }
@@ -180,6 +210,22 @@ impl Preferences {
         std::fs::write(path, serde_json::to_vec_pretty(self)?)?;
         Ok(())
     }
+}
+
+fn parse_listener(value: &str) -> Result<std::net::SocketAddr> {
+    let address = value
+        .trim()
+        .parse::<std::net::SocketAddr>()
+        .with_context(|| format!("invalid numeric listener address {value:?}"))?;
+    anyhow::ensure!(
+        !address.ip().is_unspecified(),
+        "listener address must not be unspecified: {address}"
+    );
+    anyhow::ensure!(
+        (1024..=65534).contains(&address.port()),
+        "listener port must be from 1024 through 65534: {address}"
+    );
+    Ok(address)
 }
 
 pub struct ChildLifecycle {
@@ -455,17 +501,45 @@ mod native {
         let mut terminate = false;
         if let Some(shared) = STATE.lock().unwrap().as_ref() {
             let mut s = shared.lock().unwrap();
+            s.notice = None;
             let mut notice = None;
-            {
-                let mut services = ActionServices {
-                    prompt,
-                    alert: |message: &str| notice = Some(message.to_owned()),
-                    save: |prefs: &Preferences, path: &Path, defaults: usize| {
-                        save_native_preferences(prefs, path, defaults as *mut AnyObject)
-                    },
-                    login_item: set_login_item,
-                };
-                terminate = handle_action(&mut s, tag, &mut services);
+            match tag {
+                10 => {
+                    if let Err(error) = open_path(&log_path()) {
+                        let message = format!("Could not open the Unproxy log: {error:#}");
+                        notice = Some(message.clone());
+                        show_message("Could not open the Unproxy log", &message);
+                    }
+                }
+                11 => {
+                    let address = s.prefs.primary_listener();
+                    if let Err(error) = copy_to_clipboard(&address) {
+                        let message = format!("Could not copy the proxy address: {error:#}");
+                        notice = Some(message.clone());
+                        show_message("Could not copy the proxy address", &message);
+                    }
+                }
+                12 => {
+                    if let Err(error) = show_settings(&mut s) {
+                        let message = format!("Could not save Unproxy settings: {error:#}");
+                        notice = Some(message.clone());
+                        show_message("Could not save Unproxy settings", &message);
+                    }
+                }
+                _ => {
+                    let mut services = ActionServices {
+                        prompt,
+                        alert: |message: &str| {
+                            notice = Some(message.to_owned());
+                            show_message("Unproxy", message);
+                        },
+                        save: |prefs: &Preferences, path: &Path, defaults: usize| {
+                            save_native_preferences(prefs, path, defaults as *mut AnyObject)
+                        },
+                        login_item: set_login_item,
+                    };
+                    terminate = handle_action(&mut s, tag, &mut services);
+                }
             }
             if notice.is_some() {
                 s.notice = notice;
@@ -628,13 +702,12 @@ mod native {
             netrc
         }
     }
-    fn probe_runtime_status(port: u16) -> Option<TrayStatus> {
+    fn probe_runtime_status(address: std::net::SocketAddr) -> Option<TrayStatus> {
         use std::{
             io::{Read, Write},
-            net::{Ipv4Addr, SocketAddr, TcpStream},
+            net::TcpStream,
             time::Duration,
         };
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(180)).ok()?;
         stream
             .set_read_timeout(Some(Duration::from_millis(180)))
@@ -644,7 +717,7 @@ mod native {
             .ok()?;
         write!(
             stream,
-            "GET /status.json HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            "GET /status.json HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
         )
         .ok()?;
         let mut response = Vec::new();
@@ -676,7 +749,13 @@ mod native {
     }
     fn refresh_runtime_status(state: &mut State, running: bool) {
         if running {
-            if let Some(status) = probe_runtime_status(state.prefs.effective_port()) {
+            let status = state
+                .prefs
+                .effective_listeners()
+                .iter()
+                .filter_map(|listener| listener.parse::<std::net::SocketAddr>().ok())
+                .find_map(probe_runtime_status);
+            if let Some(status) = status {
                 state.tray_status = status;
             } else {
                 state.tray_status.pac_loaded = None;
@@ -828,8 +907,26 @@ mod native {
             }
         }
         let (process, pac, upstream, authentication) = status_labels(state, running);
+        #[cfg(feature = "negotiate")]
+        let network = if state.prefs.negotiate {
+            let status = match state.network_available {
+                Some(true) => "available",
+                Some(false) => "unavailable",
+                None => "unknown",
+            };
+            format!(" · Internal network: {status}")
+        } else {
+            String::new()
+        };
+        #[cfg(not(feature = "negotiate"))]
+        let network = String::new();
         let tooltip = format!(
-            "Unproxy {process} · PAC {pac} · Upstream: {upstream} · Auth: {authentication}"
+            "Unproxy {process} · PAC {pac} · Upstream: {upstream} · Auth: {authentication}{network}{}",
+            state
+                .notice
+                .as_ref()
+                .map(|message| format!(" · {message}"))
+                .unwrap_or_default()
         );
         let _: () = unsafe { msg_send![button, setTitle:cocoa_string("")] };
         let _: () = unsafe { msg_send![button, setToolTip:cocoa_string(&tooltip)] };
@@ -872,101 +969,18 @@ mod native {
             refresh_runtime_status(&mut s, running);
             update_status_button(&mut s, running);
             let target: *mut AnyObject = unsafe { msg_send![menu, delegate] };
-            let (process, pac, upstream, authentication) = status_labels(&s, running);
-            for line in [
-                format!("Proxy: {process}"),
-                format!("PAC: {pac}"),
-                format!("Upstream: {upstream}"),
-                format!("Authentication: {authentication}"),
-            ] {
-                menu_item(menu, &line, 0, false, false, target);
-            }
-            if let Some(notice) = &s.notice {
-                menu_item(menu, &format!("Notice: {notice}"), 0, false, false, target);
-            }
-            if running {
-                menu_item(menu, "Stop", 2, false, true, target);
-                menu_item(
-                    menu,
-                    &format!("Port {}", s.prefs.effective_port()),
-                    0,
-                    false,
-                    false,
-                    target,
-                );
-                menu_item(
-                    menu,
-                    &format!("PAC {}", s.prefs.pac_file.display()),
-                    0,
-                    false,
-                    false,
-                    target,
-                );
+            let (process, _, _, _) = status_labels(&s, running);
+            let status_action = if running { 2 } else { 1 };
+            let status_line = if running {
+                format!("Proxy: {process} (click to stop)")
             } else {
-                menu_item(menu, "Start", 1, false, true, target);
-                if let Some(exit) = &s.child.last_exit {
-                    menu_item(menu, exit, 0, false, false, target);
-                }
-            }
-            menu_item(
-                menu,
-                if (1024..=65534).contains(&s.prefs.port) {
-                    "Edit Listener Port…"
-                } else {
-                    "Edit Listener Port… (invalid saved value)"
-                },
-                7,
-                false,
-                true,
-                target,
-            );
-            menu_item(menu, "Edit PAC File…", 8, false, true, target);
-            menu_item(
-                menu,
-                "Always use CONNECT",
-                3,
-                s.prefs.proxytunnel,
-                true,
-                target,
-            );
-            menu_item(
-                menu,
-                "DIRECT fallback",
-                4,
-                s.prefs.direct_fallback,
-                true,
-                target,
-            );
-            #[cfg(feature = "negotiate")]
-            {
-                menu_item(menu, "Negotiate", 5, s.prefs.negotiate, true, target);
-                if s.prefs.negotiate {
-                    menu_item(
-                        menu,
-                        &format!(
-                            "Internal network: {}",
-                            match s.network_available {
-                                Some(true) => "available",
-                                Some(false) => "unavailable",
-                                None => "unknown",
-                            }
-                        ),
-                        0,
-                        false,
-                        false,
-                        target,
-                    );
-                }
-            }
-            menu_item(menu, "Start at Login", 9, s.prefs.autostart, true, target);
-            menu_item(
-                menu,
-                &format!("Log: {}", log_path().display()),
-                0,
-                false,
-                false,
-                target,
-            );
+                format!("Proxy: {process} (click to start)")
+            };
+            menu_item(menu, &status_line, status_action, false, true, target);
+            menu_item(menu, "Open Log", 10, false, true, target);
+            menu_item(menu, "Start with Login", 9, s.prefs.autostart, true, target);
+            menu_item(menu, "Copy Proxy Address", 11, false, true, target);
+            menu_item(menu, "Settings…", 12, false, true, target);
             menu_item(menu, "Quit Unproxy", 6, false, true, target);
         }
     }
@@ -1094,6 +1108,7 @@ mod native {
             sel!(setObject:forKey:),
             sel!(setBool:forKey:),
             sel!(setInteger:forKey:),
+            sel!(removeObjectForKey:),
             sel!(synchronize),
         ] {
             let method = if sel.name().to_bytes() == b"standardUserDefaults" {
@@ -1103,6 +1118,24 @@ mod native {
             };
             if method.is_none() {
                 anyhow::bail!("missing NSUserDefaults selector {:?}", sel.name())
+            }
+        }
+        let array = AnyClass::get(c"NSArray").context("NSArray class missing")?;
+        for selector in [sel!(count), sel!(objectAtIndex:)] {
+            if array.instance_method(selector).is_none() {
+                anyhow::bail!("missing NSArray selector {:?}", selector.name())
+            }
+        }
+        let mutable_array =
+            AnyClass::get(c"NSMutableArray").context("NSMutableArray class missing")?;
+        for selector in [sel!(new), sel!(addObject:)] {
+            let method = if selector.name().to_bytes() == b"new" {
+                mutable_array.class_method(selector)
+            } else {
+                mutable_array.instance_method(selector)
+            };
+            if method.is_none() {
+                anyhow::bail!("missing NSMutableArray selector {:?}", selector.name())
             }
         }
         // ServiceManagement exposes a C Boolean (one byte), not ObjC BOOL.
@@ -1138,6 +1171,300 @@ mod native {
         }
         let text = String::from_utf8_lossy(&out.stdout);
         Some(text.split_once("text returned:")?.1.trim().to_owned())
+    }
+    #[repr(C)]
+    struct Point {
+        x: f64,
+        y: f64,
+    }
+    unsafe impl objc2::encode::Encode for Point {
+        const ENCODING: objc2::encode::Encoding =
+            objc2::encode::Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
+    }
+    #[repr(C)]
+    struct Size {
+        width: f64,
+        height: f64,
+    }
+    unsafe impl objc2::encode::Encode for Size {
+        const ENCODING: objc2::encode::Encoding =
+            objc2::encode::Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
+    }
+    #[repr(C)]
+    struct Rect {
+        origin: Point,
+        size: Size,
+    }
+    unsafe impl objc2::encode::Encode for Rect {
+        const ENCODING: objc2::encode::Encoding =
+            objc2::encode::Encoding::Struct("CGRect", &[Point::ENCODING, Size::ENCODING]);
+    }
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
+        Rect {
+            origin: Point { x, y },
+            size: Size { width, height },
+        }
+    }
+    fn settings_text_field(value: &str, placeholder: &str, y: f64) -> *mut AnyObject {
+        let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSTextField), alloc] };
+        let field: *mut AnyObject =
+            unsafe { msg_send![allocated, initWithFrame:rect(0.0, y, 440.0, 26.0)] };
+        let _: () = unsafe { msg_send![field, setStringValue:cocoa_string(value)] };
+        let _: () = unsafe { msg_send![field, setPlaceholderString:cocoa_string(placeholder)] };
+        field
+    }
+    fn settings_label(accessory: *mut AnyObject, title: &str, y: f64) {
+        let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSTextField), alloc] };
+        let label: *mut AnyObject =
+            unsafe { msg_send![allocated, initWithFrame:rect(0.0, y, 440.0, 18.0)] };
+        let _: () = unsafe { msg_send![label, setStringValue:cocoa_string(title)] };
+        let _: () = unsafe { msg_send![label, setEditable:objc2::runtime::Bool::NO] };
+        let _: () = unsafe { msg_send![label, setBordered:objc2::runtime::Bool::NO] };
+        let _: () = unsafe { msg_send![label, setDrawsBackground:objc2::runtime::Bool::NO] };
+        let _: () = unsafe { msg_send![accessory, addSubview:label] };
+    }
+    fn settings_checkbox(
+        accessory: *mut AnyObject,
+        title: &str,
+        enabled: bool,
+        y: f64,
+    ) -> *mut AnyObject {
+        let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSButton), alloc] };
+        let button: *mut AnyObject =
+            unsafe { msg_send![allocated, initWithFrame:rect(0.0, y, 440.0, 22.0)] };
+        let _: () = unsafe { msg_send![button, setButtonType:3isize] };
+        let _: () = unsafe { msg_send![button, setTitle:cocoa_string(title)] };
+        let _: () = unsafe { msg_send![button, setState:if enabled {1isize}else{0isize}] };
+        let _: () = unsafe { msg_send![accessory, addSubview:button] };
+        button
+    }
+    fn read_text_field(field: *mut AnyObject) -> Result<String> {
+        let value: *mut AnyObject = unsafe { msg_send![field, stringValue] };
+        let bytes: *const std::ffi::c_char = unsafe { msg_send![value, UTF8String] };
+        anyhow::ensure!(!bytes.is_null(), "settings field did not contain text");
+        Ok(unsafe { std::ffi::CStr::from_ptr(bytes) }
+            .to_string_lossy()
+            .into_owned())
+    }
+    fn listener_settings_page(
+        prefs: &Preferences,
+        listeners: &[String],
+    ) -> Result<(isize, Vec<String>, Preferences)> {
+        let alert: *mut AnyObject = unsafe { msg_send![objc2::class!(NSAlert), new] };
+        let _: () = unsafe { msg_send![alert, setMessageText:cocoa_string("Unproxy Settings")] };
+        let _: () = unsafe {
+            msg_send![alert, setInformativeText:cocoa_string("Configure listeners, PAC routing, and proxy behavior.")]
+        };
+        let _: *mut AnyObject =
+            unsafe { msg_send![alert, addButtonWithTitle:cocoa_string("Cancel")] };
+        let _: *mut AnyObject =
+            unsafe { msg_send![alert, addButtonWithTitle:cocoa_string("Add/Remove Listener…")] };
+        let _: *mut AnyObject =
+            unsafe { msg_send![alert, addButtonWithTitle:cocoa_string("Save")] };
+
+        let accessory: *mut AnyObject = unsafe { msg_send![objc2::class!(NSView), alloc] };
+        let height = 210.0 + listeners.len() as f64 * 32.0;
+        let accessory: *mut AnyObject =
+            unsafe { msg_send![accessory, initWithFrame:rect(0.0, 0.0, 460.0, height)] };
+        settings_label(
+            accessory,
+            "Listeners (numeric IP address and port; IPv6 in brackets)",
+            height - 19.0,
+        );
+        let mut listener_fields = Vec::with_capacity(listeners.len());
+        for (index, listener) in listeners.iter().enumerate() {
+            let y = height - 53.0 - index as f64 * 32.0;
+            let field = settings_text_field(listener, "e.g. 127.0.0.1:3128", y);
+            let _: () = unsafe { msg_send![accessory, addSubview:field] };
+            listener_fields.push(field);
+        }
+        settings_label(accessory, "PAC file path", 130.0);
+        let pac = settings_text_field(&prefs.pac_file.to_string_lossy(), "Absolute path", 101.0);
+        let _: () = unsafe { msg_send![accessory, addSubview:pac] };
+        let tunnel = settings_checkbox(accessory, "Always use CONNECT", prefs.proxytunnel, 70.0);
+        let direct = settings_checkbox(accessory, "DIRECT fallback", prefs.direct_fallback, 47.0);
+        #[cfg(feature = "negotiate")]
+        let negotiate = settings_checkbox(accessory, "Negotiate", prefs.negotiate, 24.0);
+        #[cfg(not(feature = "negotiate"))]
+        let negotiate: *mut AnyObject = ptr::null_mut();
+        let _: () = unsafe { msg_send![alert, setAccessoryView:accessory] };
+        let response: isize = unsafe { msg_send![alert, runModal] };
+        let edited_listeners = listener_fields
+            .into_iter()
+            .map(read_text_field)
+            .collect::<Result<Vec<_>>>()?;
+        let mut updated = prefs.clone();
+        updated.pac_file = PathBuf::from(read_text_field(pac)?);
+        let tunnel_state: isize = unsafe { msg_send![tunnel, state] };
+        let direct_state: isize = unsafe { msg_send![direct, state] };
+        updated.proxytunnel = tunnel_state != 0;
+        updated.direct_fallback = direct_state != 0;
+        #[cfg(feature = "negotiate")]
+        {
+            let negotiate_state: isize = unsafe { msg_send![negotiate, state] };
+            updated.negotiate = negotiate_state != 0;
+        }
+        #[cfg(not(feature = "negotiate"))]
+        let _ = negotiate;
+        Ok((response, edited_listeners, updated))
+    }
+    fn choose_listener_to_remove(listeners: &[String]) -> Option<usize> {
+        let escape = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
+        let items = listeners
+            .iter()
+            .map(|listener| format!("\"{}\"", escape(listener)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let script =
+            format!("choose from list {{{items}}} with prompt \"Choose a listener to remove\"");
+        let output = Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let selected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        listeners.iter().position(|listener| listener == &selected)
+    }
+    fn choose_listener_action() -> Option<bool> {
+        let script = "choose from list {\"Add listener\", \"Remove listener\"} with prompt \"Choose an action\"";
+        let output = Command::new("osascript")
+            .args(["-e", script])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let selected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        match selected.as_str() {
+            "Add listener" => Some(true),
+            "Remove listener" => Some(false),
+            _ => None,
+        }
+    }
+    fn settings_dialog(prefs: &Preferences) -> Result<Option<Preferences>> {
+        let mut updated = prefs.clone();
+        let mut listeners = prefs.effective_listeners();
+        loop {
+            let (response, edited_listeners, edited_prefs) =
+                listener_settings_page(&updated, &listeners)?;
+            listeners = edited_listeners;
+            updated = edited_prefs;
+            match response {
+                1000 => return Ok(None),
+                1001 => match choose_listener_action() {
+                    Some(true) => {
+                        if let Some(listener) = prompt(
+                            "Listener address and port (use brackets for IPv6)",
+                            "127.0.0.1:8080",
+                        ) {
+                            listeners.push(listener);
+                        }
+                    }
+                    Some(false) if listeners.len() > 1 => {
+                        if let Some(index) = choose_listener_to_remove(&listeners) {
+                            listeners.remove(index);
+                        }
+                    }
+                    Some(false) => {
+                        show_message("Unproxy Settings", "At least one listener is required.")
+                    }
+                    None => {}
+                },
+                1002 => {
+                    let parsed = listeners
+                        .iter()
+                        .map(|listener| parse_listener(listener))
+                        .collect::<Result<Vec<_>>>();
+                    let parsed = match parsed {
+                        Ok(parsed) if !parsed.is_empty() => parsed,
+                        Ok(_) => {
+                            show_message("Unproxy Settings", "At least one listener is required.");
+                            continue;
+                        }
+                        Err(error) => {
+                            show_message("Invalid listener", &format!("{error:#}"));
+                            continue;
+                        }
+                    };
+                    let mut unique = std::collections::HashSet::new();
+                    if parsed.iter().any(|address| !unique.insert(*address)) {
+                        show_message("Invalid listener", "Listener addresses must be unique.");
+                        continue;
+                    }
+                    if !updated.pac_file.is_absolute() {
+                        show_message("Invalid PAC file", "PAC file path must be absolute.");
+                        continue;
+                    }
+                    updated.port = u32::from(parsed[0].port());
+                    updated.listeners = Some(parsed.iter().map(ToString::to_string).collect());
+                    return Ok(Some(updated));
+                }
+                _ => return Ok(None),
+            }
+        }
+    }
+    fn show_settings(state: &mut State) -> Result<()> {
+        let Some(updated) = settings_dialog(&state.prefs)? else {
+            return Ok(());
+        };
+        let restart_required = updated.effective_listeners() != state.prefs.effective_listeners()
+            || updated.pac_file != state.prefs.pac_file
+            || updated.negotiate != state.prefs.negotiate
+            || updated.proxytunnel != state.prefs.proxytunnel
+            || updated.direct_fallback != state.prefs.direct_fallback;
+        if updated == state.prefs {
+            return Ok(());
+        }
+        let running = state.child.is_running();
+        save_native_preferences(
+            &updated,
+            &state.prefs_path,
+            state.defaults as *mut AnyObject,
+        )?;
+        state.prefs = updated;
+        if running && restart_required {
+            let exe = state.child_exe.clone();
+            let prefs = state.prefs.clone();
+            if let Err(error) = state.child.restart(&exe, &prefs) {
+                state.start_failed = true;
+                state.last_running = false;
+                return Err(error);
+            }
+            state.start_failed = false;
+            reset_runtime_status(state);
+        }
+        state.last_running = state.child.is_running();
+        Ok(())
+    }
+    fn open_path(path: &Path) -> Result<()> {
+        let status = Command::new("open")
+            .arg(path)
+            .status()
+            .with_context(|| format!("launch the default app for {}", path.display()))?;
+        anyhow::ensure!(status.success(), "open command exited with {status}");
+        Ok(())
+    }
+    fn copy_to_clipboard(value: &str) -> Result<()> {
+        let pasteboard: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSPasteboard), generalPasteboard] };
+        let _: isize = unsafe { msg_send![pasteboard, clearContents] };
+        let copied: objc2::runtime::Bool = unsafe {
+            msg_send![pasteboard, setString:cocoa_string(value), forType:cocoa_string("public.utf8-plain-text")]
+        };
+        anyhow::ensure!(
+            copied.as_bool(),
+            "macOS pasteboard rejected the proxy address"
+        );
+        Ok(())
+    }
+    fn show_message(title: &str, message: &str) {
+        let alert: *mut AnyObject = unsafe { msg_send![objc2::class!(NSAlert), new] };
+        let _: () = unsafe { msg_send![alert, setMessageText:cocoa_string(title)] };
+        let _: () = unsafe { msg_send![alert, setInformativeText:cocoa_string(message)] };
+        let _: *mut AnyObject = unsafe { msg_send![alert, addButtonWithTitle:cocoa_string("OK")] };
+        let _: isize = unsafe { msg_send![alert, runModal] };
     }
     fn set_login_item(enabled: bool) -> Result<()> {
         #[link(name = "ServiceManagement", kind = "framework")]
@@ -1177,6 +1504,23 @@ mod native {
         } else {
             let n: isize = unsafe { msg_send![port, integerValue] };
             p.port = n.clamp(0, u32::MAX as isize) as u32;
+        }
+        let listeners = get("listeners");
+        if !listeners.is_null() {
+            let count: usize = unsafe { msg_send![listeners, count] };
+            let mut values = Vec::with_capacity(count);
+            for index in 0..count {
+                let item: *mut AnyObject = unsafe { msg_send![listeners, objectAtIndex:index] };
+                let bytes: *const std::ffi::c_char = unsafe { msg_send![item, UTF8String] };
+                if !bytes.is_null() {
+                    values.push(
+                        unsafe { std::ffi::CStr::from_ptr(bytes) }
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+            p.listeners = Some(values);
         }
         let pac = get("pacFile");
         if pac.is_null() {
@@ -1229,6 +1573,15 @@ mod native {
     fn save_native_preferences(p: &Preferences, path: &Path, d: *mut AnyObject) -> Result<()> {
         p.save(path)?;
         let _: () = unsafe { msg_send![d,setInteger:p.port as isize,forKey:cocoa_string("port")] };
+        if let Some(listeners) = &p.listeners {
+            let array: *mut AnyObject = unsafe { msg_send![objc2::class!(NSMutableArray), new] };
+            for listener in listeners {
+                let _: () = unsafe { msg_send![array, addObject:cocoa_string(listener)] };
+            }
+            let _: () = unsafe { msg_send![d,setObject:array,forKey:cocoa_string("listeners")] };
+        } else {
+            let _: () = unsafe { msg_send![d,removeObjectForKey:cocoa_string("listeners")] };
+        }
         let _: () = unsafe {
             msg_send![d,setObject:cocoa_string(&p.pac_file.to_string_lossy()),forKey:cocoa_string("pacFile")]
         };
@@ -1508,6 +1861,7 @@ mod native {
 
             let mut prefs = Preferences {
                 port: 65535,
+                listeners: None,
                 pac_file: pac_file.to_owned(),
                 negotiate: true,
                 proxytunnel: false,
@@ -1598,9 +1952,13 @@ mod native {
             unsafe { network_available(target, sel!(networkAvailable:), ptr::null_mut()) };
             unsafe { rebuild_menu(target, sel!(menuNeedsUpdate:), menu) };
             anyhow::ensure!(menu_has_tag(menu, 1), "stopped menu lacks Start");
-            anyhow::ensure!(menu_has_tag(menu, 7) && menu_has_tag(menu, 8));
-            #[cfg(feature = "negotiate")]
-            anyhow::ensure!(menu_has_tag(menu, 5));
+            anyhow::ensure!(
+                menu_has_tag(menu, 9)
+                    && menu_has_tag(menu, 10)
+                    && menu_has_tag(menu, 11)
+                    && menu_has_tag(menu, 12),
+                "menu is missing a requested action"
+            );
 
             unsafe { send_action(3) };
             unsafe { send_action(4) };
@@ -1627,6 +1985,7 @@ mod native {
             unsafe { rebuild_menu(target, sel!(menuNeedsUpdate:), menu) };
             anyhow::ensure!(menu_has_tag(menu, 2), "running menu lacks Stop");
             anyhow::ensure!(!menu_has_tag(menu, 1), "running menu still offers Start");
+            anyhow::ensure!(menu_has_tag(menu, 12), "running menu lacks Settings");
             let shared = STATE.lock().unwrap().as_ref().unwrap().clone();
             let guard = shared.lock().unwrap();
             unsafe { poll_child(target, sel!(pollChild:), ptr::null_mut()) };
