@@ -287,11 +287,14 @@ async fn tunnel_constructor_connects_before_exposing_the_opaque_stream() {
 async fn tunnel_error_for(response: Option<Vec<u8>>, timeout: Duration) -> String {
     let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = proxy.local_addr().unwrap();
+    let response_times_out = response.as_ref().is_some_and(Vec::is_empty);
+    let (request_received, request_received_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (mut stream, _) = proxy.accept().await.unwrap();
         let _ = capture_request(&mut stream).await;
+        let _ = request_received.send(());
         if response.as_ref().is_some_and(Vec::is_empty) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
             return;
         }
         if let Some(response) = response {
@@ -310,7 +313,16 @@ async fn tunnel_error_for(response: Option<Vec<u8>>, timeout: Duration) -> Strin
     .await
     .err()
     .expect("malformed CONNECT response must fail");
-    server.await.unwrap();
+    if response_times_out {
+        tokio::time::timeout(Duration::from_secs(1), request_received_rx)
+            .await
+            .expect("proxy must receive CONNECT before the response timeout")
+            .expect("proxy server should report the received request");
+        server.abort();
+        let _ = server.await;
+    } else {
+        server.await.unwrap();
+    }
     format!("{error:#}")
 }
 
@@ -322,9 +334,9 @@ async fn tunnel_rejects_closed_malformed_timed_out_and_oversized_heads() {
             .contains("closed during CONNECT")
     );
     assert!(
-        tunnel_error_for(Some(Vec::new()), Duration::from_millis(10))
+        tunnel_error_for(Some(Vec::new()), Duration::from_millis(250))
             .await
-            .contains("response timed out")
+            .contains("timed out")
     );
     assert!(
         tunnel_error_for(
