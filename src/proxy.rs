@@ -758,11 +758,7 @@ async fn handle(
             ));
         }
         return Ok(match path {
-            "/" => full(
-                StatusCode::OK,
-                "text/html; charset=utf-8",
-                status_html(),
-            ),
+            "/" => full(StatusCode::OK, "text/html; charset=utf-8", status_html()),
             "/proxy.pac" => {
                 let host = req
                     .headers()
@@ -1031,6 +1027,9 @@ fn trusted_management_request(
     if !peer.ip().is_loopback() {
         return false;
     }
+    if req.uri().authority().is_some() {
+        return false;
+    }
     let Some(host) = req
         .headers()
         .get(http::header::HOST)
@@ -1041,15 +1040,6 @@ fn trusted_management_request(
     let Ok(authority) = host.parse::<http::uri::Authority>() else {
         return false;
     };
-    if let Some(target) = req.uri().authority()
-        && (!req
-            .uri()
-            .scheme_str()
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http"))
-            || !target.as_str().eq_ignore_ascii_case(host))
-    {
-        return false;
-    }
     cfg.trusted_management_hosts
         .iter()
         .any(|h| h.eq_ignore_ascii_case(host))
