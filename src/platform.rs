@@ -324,6 +324,11 @@ mod tests {
                 .to_string()
                 .contains("status, start, restart, stop, enable, disable")
         );
+
+        // Exercise the native status adapter. The result depends on whether
+        // this test runner has a launchd registration, so only its dispatch is
+        // relevant here.
+        let _ = service_control("status", false);
     }
 
     #[cfg(target_os = "macos")]
