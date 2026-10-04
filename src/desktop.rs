@@ -1474,7 +1474,7 @@ mod native {
     fn settings_checkbox(
         parent: *mut AnyObject,
         target: *mut AnyObject,
-        title: &str,
+        (title, tooltip): (&str, &str),
         enabled: bool,
         tag: isize,
         x: f64,
@@ -1485,6 +1485,7 @@ mod native {
             unsafe { msg_send![allocated, initWithFrame:rect(x, 82.0, width, 24.0)] };
         let _: () = unsafe { msg_send![button, setButtonType:3isize] };
         let _: () = unsafe { msg_send![button, setTitle:cocoa_string(title)] };
+        let _: () = unsafe { msg_send![button, setToolTip:cocoa_string(tooltip)] };
         let _: () = unsafe { msg_send![button, setState:if enabled {1isize}else{0isize}] };
         let _: () = unsafe { msg_send![button, setTag:tag] };
         let _: () = unsafe { msg_send![button, setTarget:target] };
@@ -2187,7 +2188,10 @@ mod native {
         settings_checkbox(
             content,
             target,
-            "Always use CONNECT",
+            (
+                "Always use CONNECT",
+                "Tunnel proxied HTTP requests with CONNECT, even when the request does not use CONNECT.",
+            ),
             prefs.proxytunnel,
             3001,
             24.0,
@@ -2196,7 +2200,10 @@ mod native {
         settings_checkbox(
             content,
             target,
-            "DIRECT fallback",
+            (
+                "DIRECT fallback",
+                "Add a direct connection after the PAC routes, so requests can bypass the proxy if those routes fail.",
+            ),
             prefs.direct_fallback,
             3002,
             300.0,
@@ -2206,7 +2213,10 @@ mod native {
         settings_checkbox(
             content,
             target,
-            "Negotiate",
+            (
+                "Negotiate",
+                "Use your operating system's integrated Negotiate authentication with the proxy.",
+            ),
             prefs.negotiate,
             3003,
             540.0,

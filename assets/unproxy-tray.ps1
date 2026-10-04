@@ -743,6 +743,8 @@ function Show-Settings {
     $tunnel.AutoSize = $true
     $tunnel.Checked = [bool]$script:p.proxytunnel
     [void]$form.Controls.Add($tunnel)
+    $settingsToolTip = [Windows.Forms.ToolTip]::new()
+    $settingsToolTip.SetToolTip($tunnel, 'Tunnel proxied HTTP requests with CONNECT, even when the request does not use CONNECT.')
 
     $direct = [Windows.Forms.CheckBox]::new()
     $direct.Text = 'DIRECT fallback'
@@ -750,6 +752,7 @@ function Show-Settings {
     $direct.AutoSize = $true
     $direct.Checked = [bool]$script:p.directFallback
     [void]$form.Controls.Add($direct)
+    $settingsToolTip.SetToolTip($direct, 'Add a direct connection after the PAC routes, so requests can bypass the proxy if those routes fail.')
 
     $negotiate = [Windows.Forms.CheckBox]::new()
     $negotiate.Text = 'Negotiate'
@@ -758,6 +761,7 @@ function Show-Settings {
     $negotiate.Checked = [bool]$script:p.negotiate
     $negotiate.Enabled = [bool]$script:negotiateAvailable
     [void]$form.Controls.Add($negotiate)
+    $settingsToolTip.SetToolTip($negotiate, 'Use integrated Negotiate authentication with the proxy, using your operating system credentials.')
 
     $autostart = [Windows.Forms.CheckBox]::new()
     $autostart.Text = 'Start Unproxy when I sign in'
