@@ -14,7 +14,7 @@ Unproxy is a Rust 2024 crate. Shared runtime and platform code lives in `src/`; 
 
 ## Coding Style & Naming Conventions
 
-Follow standard Rust formatting (four-space indentation, `snake_case` modules and functions, `UpperCamelCase` types) and keep changes idiomatic and platform-gated where needed. Run `cargo fmt` before submitting; use Clippy output to catch common mistakes. Keep binary names and source filenames consistent with the existing kebab-case entries in `src/bin/`.
+Follow standard Rust formatting (four-space indentation, `snake_case` modules and functions, `UpperCamelCase` types) and keep changes idiomatic and platform-gated where needed. Keep behavior and supported functionality synchronized across all operating systems; when changing platform-specific code, update the corresponding implementations and tests for the other supported operating systems as needed. Run `cargo fmt` before submitting; use Clippy output to catch common mistakes. Keep binary names and source filenames consistent with the existing kebab-case entries in `src/bin/`.
 
 ## Testing Guidelines
 
