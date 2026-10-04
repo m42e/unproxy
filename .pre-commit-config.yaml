@@ -1,9 +1,21 @@
 repos:
   - repo: local
     hooks:
-      - id: cargo-xtask-check
-        name: cargo xtask check
-        entry: env RUST_TEST_THREADS=1 cargo xtask check
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --locked --all-targets --all-features -- -D warnings
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: cargo-tests
+        name: cargo xtask test
+        entry: env RUST_TEST_THREADS=1 cargo xtask test
         language: system
         pass_filenames: false
         always_run: true

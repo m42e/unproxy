@@ -40,9 +40,9 @@ Run `./target/release/unproxy` (Windows:
 With [pre-commit](https://pre-commit.com/) installed, run `pre-commit install`
 to enable the repository's commit checks. If your environment uses a shared
 Git hook dispatcher, register `pre-commit run --hook-stage pre-commit` with
-that dispatcher instead. The hook runs `cargo xtask check`, which checks
-formatting, runs Clippy with warnings denied, and runs the test suites with all
-features and with default features disabled.
+that dispatcher instead. The hook checks formatting with `cargo fmt`, runs
+Clippy with warnings denied, and runs the test suites with all features and
+with default features disabled through `cargo xtask test`.
 
 
 ## Inspiration

@@ -34,6 +34,7 @@ enum Task {
         defaults: Option<PathBuf>,
     },
     Check,
+    Test,
     Docs {
         #[arg(long, default_value = "dist/site")]
         output: PathBuf,
@@ -90,6 +91,10 @@ fn run(command: &mut Command) -> Result<()> {
     anyhow::ensure!(status.success(), "command {command:?} exited with {status}");
     Ok(())
 }
+fn test() -> Result<()> {
+    run(Command::new("cargo").args(["test", "--locked", "--all-features"]))?;
+    run(Command::new("cargo").args(["test", "--locked", "--no-default-features"]))
+}
 fn run_pkgbuild(command: &mut Command) -> Result<()> {
     let output = command
         .stdout(Stdio::inherit())
@@ -144,9 +149,9 @@ fn main() -> Result<()> {
                 "-D",
                 "warnings",
             ]))?;
-            run(Command::new("cargo").args(["test", "--locked", "--all-features"]))?;
-            run(Command::new("cargo").args(["test", "--locked", "--no-default-features"]))
+            test()
         }
+        Task::Test => test(),
         Task::Docs { output, repository } => docs(&output, repository.as_deref()),
         Task::Package {
             format,
