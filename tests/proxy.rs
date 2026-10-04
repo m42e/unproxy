@@ -1,5 +1,7 @@
 use std::{net::SocketAddr, sync::Arc};
 
+#[cfg(target_os = "linux")]
+use tokio::net::TcpSocket;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -563,20 +565,19 @@ async fn parallel_limit_and_connect_failover_are_enforced() {
 
 #[tokio::test]
 async fn direct_fallback_runs_after_proxy_connection_failure() {
-    let mut bad_proxy = None;
-    for port in [1, 7, 9, 13, 19, 37, 79, 113, 389, 443, 631, 1023] {
-        let candidate = SocketAddr::from(([127, 0, 0, 1], port));
-        if let Ok(Err(_)) = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            TcpStream::connect(candidate),
-        )
-        .await
-        {
-            bad_proxy = Some(candidate);
-            break;
-        }
-    }
-    let bad_proxy = bad_proxy.expect("no refused loopback port is available for the test");
+    #[cfg(target_os = "linux")]
+    let bad_proxy = {
+        let refused_proxy = TcpSocket::new_v4().unwrap();
+        refused_proxy.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        refused_proxy.local_addr().unwrap()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let bad_proxy = {
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = closed.local_addr().unwrap();
+        drop(closed);
+        address
+    };
     let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let target = origin.local_addr().unwrap();
     let origin_task = tokio::spawn(async move {
