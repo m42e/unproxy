@@ -1653,7 +1653,7 @@ mod native {
             let path = PathBuf::from(value);
             anyhow::ensure!(path.is_absolute(), "PAC path must be absolute");
             anyhow::ensure!(path.is_file(), "PAC file is missing: {}", path.display());
-            open_path(&path)
+            open_pac_file(&path)
         }
     }
     unsafe extern "C-unwind" fn list_row_count(
@@ -2175,6 +2175,24 @@ mod native {
             .status()
             .with_context(|| format!("launch the default app for {}", path.display()))?;
         anyhow::ensure!(status.success(), "open command exited with {status}");
+        Ok(())
+    }
+    fn pac_editor_command(path: &Path) -> Command {
+        let mut command = Command::new("/usr/bin/open");
+        command.arg("-e").arg(path);
+        command
+    }
+    fn open_pac_file(path: &Path) -> Result<()> {
+        let output = pac_editor_command(path)
+            .output()
+            .with_context(|| format!("launch TextEdit for {}", path.display()))?;
+        anyhow::ensure!(
+            output.status.success(),
+            "TextEdit could not open {} ({}): {}",
+            path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
         Ok(())
     }
     fn copy_to_clipboard(value: &str) -> Result<()> {
@@ -3438,6 +3456,17 @@ mod native {
     #[cfg(test)]
     mod editor_list_tests {
         use super::*;
+
+        #[test]
+        fn pac_files_open_in_textedit_without_relying_on_file_associations() {
+            let path = Path::new("/tmp/my proxy.pac");
+            let command = pac_editor_command(path);
+            assert_eq!(command.get_program(), "/usr/bin/open");
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                vec![std::ffi::OsStr::new("-e"), path.as_os_str()]
+            );
+        }
 
         #[test]
         fn editor_list_items_can_be_added_moved_and_removed() {
