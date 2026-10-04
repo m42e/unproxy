@@ -35,6 +35,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Cross can restore stale proc-macro artifacts from its target cache.
+          cache-targets: false
       - run: rustup target add ${{ matrix.target }}
       - run: cargo install cross --locked
       # Cross 0.2.5's MinGW sysroot lacks GetHostNameW from newer Rust std.
