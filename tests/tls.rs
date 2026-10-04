@@ -62,12 +62,12 @@ async fn verified_https_proxy_forwards_absolute_target_with_own_auth() {
     });
     let policy = Arc::new(
         Policy::new(Some(format!(
-            "function FindProxyForURL() {{return 'HTTPS localhost:{port}';}}"
+            "function FindProxyForURL() {{return 'HTTPS 127.0.0.1:{port}';}}"
         )))
         .unwrap(),
     );
     let auth = AuthFactory::basic(
-        CredentialStore::parse("machine localhost login alice password fixture").unwrap(),
+        CredentialStore::parse("machine 127.0.0.1 login alice password fixture").unwrap(),
     );
     let local = ContextBuilder::new(policy, tls_options(auth))
         .listen("127.0.0.1:0".parse().unwrap())
@@ -113,11 +113,11 @@ async fn https_proxy_connect_auth_is_only_in_handshake_and_relays_binary_bytes()
         stream.shutdown().await.unwrap();
     });
     let options = tls_options(AuthFactory::basic(
-        CredentialStore::parse("machine localhost login alice password fixture").unwrap(),
+        CredentialStore::parse("machine 127.0.0.1 login alice password fixture").unwrap(),
     ));
     let mut stream = connect(
         &Route::Https(Endpoint {
-            host: "localhost".into(),
+            host: "127.0.0.1".into(),
             port,
         }),
         &Endpoint {
@@ -147,7 +147,7 @@ async fn tls_rejects_a_certificate_without_the_fixture_root() {
     });
     let result = connect(
         &Route::Https(Endpoint {
-            host: "localhost".into(),
+            host: "127.0.0.1".into(),
             port,
         }),
         &Endpoint {
@@ -212,7 +212,7 @@ async fn dns_fallback_posts_original_wire_bytes_inside_verified_nested_tls() {
         endpoint_tls.write_all(&response_copy).await.unwrap();
     });
     let route = Route::Https(Endpoint {
-        host: "localhost".into(),
+        host: "127.0.0.1".into(),
         port: proxy_port,
     });
     let options = tls_options(AuthFactory::no_auth());

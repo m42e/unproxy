@@ -299,7 +299,7 @@ async fn rejects_malformed_and_truncated_http_responses() {
 #[tokio::test]
 async fn https_fetch_uses_default_certificate_verification() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let address = listener.local_addr().unwrap();
     let identity = native_tls::Identity::from_pkcs8(
         include_bytes!("fixtures/localhost.pem"),
         include_bytes!("fixtures/localhost.key"),
@@ -314,7 +314,7 @@ async fn https_fetch_uses_default_certificate_verification() {
             .unwrap();
         let _ = timeout(TEST_DEADLINE, acceptor.accept(stream)).await;
     });
-    let uri = format!("https://localhost:{port}/policy.pac");
+    let uri = format!("https://{address}/policy.pac");
     let error = fetch_error(uri).await;
     assert!(error.to_ascii_lowercase().contains("tls"), "{error}");
     server.await.unwrap();
