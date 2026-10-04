@@ -562,6 +562,7 @@ mod native {
     static EDITOR_PREFS: Mutex<Option<Preferences>> = Mutex::new(None);
     static LISTENER_TABLE: Mutex<usize> = Mutex::new(0);
     static PAC_FILE_TABLE: Mutex<usize> = Mutex::new(0);
+    const SETTINGS_TABLE_ROW_HEIGHT: f64 = 20.0;
     #[derive(Clone, Default)]
     struct TrayStatus {
         pac_loaded: Option<bool>,
@@ -1521,7 +1522,7 @@ mod native {
         let _: () = unsafe { msg_send![cell, setEditable:objc2::runtime::Bool::YES] };
         let _: () = unsafe { msg_send![table, addTableColumn:column] };
         let _: () = unsafe { msg_send![table, setHeaderView:ptr::null_mut::<AnyObject>()] };
-        let _: () = unsafe { msg_send![table, setRowHeight:32.0f64] };
+        let _: () = unsafe { msg_send![table, setRowHeight:SETTINGS_TABLE_ROW_HEIGHT] };
         let _: () = unsafe { msg_send![table, setTag:tag] };
         let _: () = unsafe { msg_send![table, setDataSource:target] };
         let _: () = unsafe { msg_send![scroll, setDocumentView:table] };
@@ -3064,6 +3065,14 @@ mod native {
             anyhow::ensure!(has_add_url, "settings window has no Add URL button");
             anyhow::ensure!(has_copy_path, "settings window has no Copy Path button");
             let original_listeners = prefs.effective_listeners();
+
+            let listener_row_height: f64 = unsafe { msg_send![listener_table, rowHeight] };
+            let pac_row_height: f64 = unsafe { msg_send![pac_table, rowHeight] };
+            anyhow::ensure!(
+                listener_row_height == SETTINGS_TABLE_ROW_HEIGHT
+                    && pac_row_height == SETTINGS_TABLE_ROW_HEIGHT,
+                "settings list rows have unexpected heights: listeners={listener_row_height}, PAC={pac_row_height}"
+            );
 
             let listener_rows: isize =
                 unsafe { msg_send![target, numberOfRowsInTableView:listener_table] };
