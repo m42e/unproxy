@@ -787,7 +787,18 @@ async fn handle(
             ));
         }
         return Ok(match path {
+            "/" if user_agent
+                .as_deref()
+                .is_some_and(|agent| agent.to_ascii_lowercase().contains("curl")) =>
+            {
+                full(
+                    StatusCode::OK,
+                    "text/plain; charset=utf-8",
+                    status_text(&cfg),
+                )
+            }
             "/" => full(StatusCode::OK, "text/html; charset=utf-8", status_html()),
+            "/index.html" => full(StatusCode::OK, "text/html; charset=utf-8", status_html()),
             "/proxy.pac" => {
                 let host = req
                     .headers()
@@ -1379,6 +1390,37 @@ fn status_html() -> String {
 </body>
 </html>"#;
     PAGE.replace("__VERSION__", crate::VERSION)
+}
+
+fn status_text(cfg: &ContextBuilder) -> String {
+    let status = cfg.runtime_status.snapshot();
+    let pac_loaded = cfg.policy.is_loaded();
+    let pac_files = if pac_loaded && !status.pac_files.is_empty() {
+        status.pac_files.join(", ")
+    } else if pac_loaded {
+        "(inline policy)".to_owned()
+    } else {
+        "none".to_owned()
+    };
+    let upstream = match status.upstream_state.as_str() {
+        "ok" => "Last request succeeded",
+        "error" => "Last request failed",
+        _ => "No upstream result yet",
+    };
+    let authentication = match status.authentication_state.as_str() {
+        "authenticated" => "Authenticated",
+        "rejected" => "Rejected by upstream",
+        _ if status.authentication_configured => "Configured, not verified",
+        _ => "Not configured",
+    };
+    format!(
+        "Unproxy status\nVersion: {}\nProxy: Running\nPAC policy: {}\nPAC files: {}\nUpstream: {}\nAuthentication: {}\nHTML status page: /index.html\nJSON status: /status.json\n",
+        crate::VERSION,
+        if pac_loaded { "Loaded" } else { "Not loaded" },
+        pac_files,
+        upstream,
+        authentication,
+    )
 }
 
 #[cfg(test)]
