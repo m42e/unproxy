@@ -25,3 +25,5 @@ Add or update integration tests in `tests/` for user-visible behavior and regres
 Use a short imperative commit subject. The history includes conventional prefixes such as `feat:`, `fix:`, `test:`, and `docs:`; use one when it clarifies the change. Pull requests should explain the behavior changed, link a related issue when available, and report the relevant formatting, lint, and test results. Include screenshots for tray or desktop UI changes.
 
 Always run every configured pre-commit check before committing, and never skip or bypass these checks (including with `--no-verify`, `SKIP`, or equivalent). If a check fails, resolve the failure before committing; do not disable or omit the check to get a commit through.
+
+Always commit your changes if a job is finished. Never tell it is finished unless it has tests included.
