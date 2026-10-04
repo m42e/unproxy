@@ -99,3 +99,31 @@ impl fmt::Display for AccessEntry {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_without_content_length_formats_as_unknown() {
+        let request = http::Request::builder()
+            .method(Method::GET)
+            .uri("http://example.test/resource")
+            .body(())
+            .unwrap();
+        let entry = AccessEntry::for_request(
+            "127.0.0.1:1234".parse().unwrap(),
+            None,
+            &request,
+            Duration::from_millis(12),
+            AccessOutcome::Response {
+                status: StatusCode::NO_CONTENT,
+                content_length: None,
+            },
+        );
+
+        let formatted = entry.to_string();
+        assert!(formatted.contains("GET http://example.test/resource HTTP/1.1"));
+        assert!(formatted.contains("204 -b"));
+    }
+}

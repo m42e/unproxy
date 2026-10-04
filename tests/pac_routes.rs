@@ -42,6 +42,7 @@ fn endpoint_accepts_only_well_formed_bracketed_ipv6() {
         "[not-v6]:8080",
         "[::1]:80 extra",
         "host name:80",
+        ":80",
     ] {
         assert!(Endpoint::from_str(malformed).is_err(), "{malformed}");
     }
@@ -77,6 +78,16 @@ fn uri_destinations_keep_explicit_ports_and_apply_http_scheme_defaults() {
     let destination = Destination::from_uri(&without_scheme).unwrap();
     assert_eq!(destination.scheme, "https");
     assert_eq!(destination.pac_url, "https://example.org:443/");
+
+    let without_scheme_and_https_port = "example.org:80".parse().unwrap();
+    assert_eq!(
+        Destination::from_uri(&without_scheme_and_https_port)
+            .unwrap()
+            .scheme,
+        "http"
+    );
+    assert!(Destination::from_uri(&"http://user@example.org/path".parse().unwrap()).is_err());
+    assert!(Destination::from_uri(&"http://:8080/path".parse().unwrap()).is_err());
 }
 
 #[test]

@@ -23,10 +23,6 @@ PORTABLE_FILES = {
     "runtime.rs",
 }
 NATIVE_FILES = {"auth/native.rs", "network_notifications/macos.rs"}
-# The no-default-features macOS build omits the well-covered GSS implementation;
-# this shifts the aggregate line percentage below 90% even though portable
-# coverage remains above its stricter target.
-TOTAL_LINE_FLOOR = 89.9
 
 
 def source_path(filename: str) -> str:
@@ -75,7 +71,7 @@ def main() -> int:
     ]
     failures = []
     for scope, metrics, line_floor, region_floor in (
-        ("total", totals, TOTAL_LINE_FLOOR, 85.0),
+        ("total", totals, 90.0, 85.0),
         ("portable", None, 95.0, 90.0),
     ):
         for metric, floor in (("lines", line_floor), ("regions", region_floor)):
@@ -85,9 +81,9 @@ def main() -> int:
             else:
                 covered, count = sum_metrics(portable, metric)
             actual = percentage(covered, count)
-            print(f"{scope:8} {metric:7} {actual:6.2f}% ({covered}/{count}), required {floor:g}%")
+            print(f"{scope:8} {metric:7} {actual:6.2f}% ({covered}/{count}), required {floor:.0f}%")
             if actual + 1e-9 < floor:
-                failures.append(f"{scope} {metric} {actual:.2f}% is below {floor:g}%")
+                failures.append(f"{scope} {metric} {actual:.2f}% is below {floor:.0f}%")
 
     for file in native:
         path = source_path(file["filename"])
