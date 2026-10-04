@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{TcpSocket, TcpStream},
 };
 use unproxy::{
     auth::{AuthFactory, CredentialStore},
@@ -563,9 +563,9 @@ async fn parallel_limit_and_connect_failover_are_enforced() {
 
 #[tokio::test]
 async fn direct_fallback_runs_after_proxy_connection_failure() {
-    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let bad_proxy = closed.local_addr().unwrap();
-    drop(closed);
+    let refused_proxy = TcpSocket::new_v4().unwrap();
+    refused_proxy.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let bad_proxy = refused_proxy.local_addr().unwrap();
     let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let target = origin.local_addr().unwrap();
     let origin_task = tokio::spawn(async move {
@@ -600,8 +600,14 @@ async fn direct_fallback_runs_after_proxy_connection_failure() {
     let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
     client.write_all(format!("GET http://{target}/fallback HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
     let mut response = String::new();
-    client.read_to_string(&mut response).await.unwrap();
-    assert!(response.starts_with("HTTP/1.1 200"));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client.read_to_string(&mut response),
+    )
+    .await
+    .expect("proxy response timed out")
+    .unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     assert!(
         origin_task
             .await
