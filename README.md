@@ -35,4 +35,13 @@ Run `./target/release/unproxy` (Windows:
 `target\release\unproxy.exe`) to start it from a terminal. For setup steps, see
 [Install Unproxy](docs/installation.md).
 
+## Before committing
+
+With [pre-commit](https://pre-commit.com/) installed, run `pre-commit install`
+to enable the repository's commit checks. If your environment uses a shared
+Git hook dispatcher, register `pre-commit run --hook-stage pre-commit` with
+that dispatcher instead. The hook runs `cargo xtask check`, which checks
+formatting, runs Clippy with warnings denied, and runs the test suites with all
+features and with default features disabled.
+
 MIT license. Release packages are assembled in CI from tagged versions.

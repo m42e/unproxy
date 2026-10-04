@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-xtask-check
+        name: cargo xtask check
+        entry: env RUST_TEST_THREADS=1 cargo xtask check
+        language: system
+        pass_filenames: false
+        always_run: true
