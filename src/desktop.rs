@@ -1375,15 +1375,11 @@ mod native {
         title: &str,
         tooltip: &str,
         tag: isize,
-        x: f64,
-        y: f64,
-        width: f64,
-        height: f64,
+        frame: Rect,
         key_equivalent: Option<&str>,
     ) -> *mut AnyObject {
         let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSButton), alloc] };
-        let button: *mut AnyObject =
-            unsafe { msg_send![allocated, initWithFrame:rect(x, y, width, height)] };
+        let button: *mut AnyObject = unsafe { msg_send![allocated, initWithFrame:frame] };
         let _: () = unsafe { msg_send![button, setTitle:cocoa_string(title)] };
         if !tooltip.is_empty() {
             let _: () = unsafe { msg_send![button, setToolTip:cocoa_string(tooltip)] };
@@ -1479,10 +1475,7 @@ mod native {
                 label,
                 tooltip,
                 tag_base + action,
-                x + offset,
-                168.0,
-                28.0,
-                26.0,
+                rect(x + offset, 168.0, 28.0, 26.0),
                 None,
             );
         }
@@ -1678,10 +1671,8 @@ mod native {
                 };
             }
         }
-        if !edit_new_row {
-            if let Err(error) = commit_editor_preferences() {
-                show_message("Could not apply this change", &format!("{error:#}"));
-            }
+        if !edit_new_row && let Err(error) = commit_editor_preferences() {
+            show_message("Could not apply this change", &format!("{error:#}"));
         }
     }
     unsafe extern "C-unwind" fn list_editor_window_will_close(
@@ -1927,10 +1918,7 @@ mod native {
             "Close",
             "Close settings",
             1000,
-            842.0,
-            22.0,
-            94.0,
-            30.0,
+            rect(842.0, 22.0, 94.0, 30.0),
             Some("\r"),
         );
 
