@@ -293,7 +293,10 @@ mod tests {
         let other_pid = std::process::id().wrapping_add(1).to_string();
         assert!(activation_descriptors("web", "3", "metrics:web:web", Some(&other_pid)).is_err());
         assert!(activation_descriptors("web", "3", "web:metrics", None).is_err());
-        assert!(activation_descriptors("web", "2", "web:metrics", None).is_err());
+        assert_eq!(
+            activation_descriptors("web", "2", "web:metrics", None).unwrap(),
+            [3]
+        );
         assert_eq!(
             activation_descriptors("missing", "2", "web:metrics", None).unwrap(),
             Vec::<i32>::new()
@@ -543,11 +546,11 @@ mod tests {
         assert_eq!(unsafe { libc::fcntl(duplicate, libc::F_GETFD) }, -1);
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     #[test]
-    fn service_control_reports_launchd_is_unavailable() {
+    fn service_control_reports_unsupported_platform() {
         let error = service_control("status", false).unwrap_err();
-        assert!(error.to_string().contains("require macOS"));
+        assert!(error.to_string().contains("unsupported on this platform"));
     }
 
     #[cfg(not(target_os = "macos"))]

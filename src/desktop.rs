@@ -748,6 +748,9 @@ mod native {
         .ok()?;
         let mut response = Vec::new();
         stream.read_to_end(&mut response).ok()?;
+        parse_runtime_status_response(&response)
+    }
+    fn parse_runtime_status_response(response: &[u8]) -> Option<TrayStatus> {
         let body_start = response.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
         let status: serde_json::Value = serde_json::from_slice(&response[body_start..]).ok()?;
         Some(TrayStatus {
@@ -1573,6 +1576,44 @@ mod native {
             show_message("Could not apply this change", &format!("{error:#}"));
         }
     }
+    fn append_listener_placeholder(values: &mut Vec<String>) -> usize {
+        values.push(String::new());
+        values.len() - 1
+    }
+    fn update_editor_list(
+        values: &mut Vec<String>,
+        operation: isize,
+        selected: Option<usize>,
+    ) -> Result<Option<usize>> {
+        let mut new_selection = selected;
+        match operation {
+            3 => {
+                if let Some(index) = selected {
+                    anyhow::ensure!(values.len() > 1, "at least one item is required");
+                    if index < values.len() {
+                        values.remove(index);
+                        new_selection = Some(index.min(values.len() - 1));
+                    }
+                }
+            }
+            4 => {
+                if let Some(index) = selected.filter(|index| *index > 0 && *index < values.len()) {
+                    values.swap(index, index - 1);
+                    new_selection = Some(index - 1);
+                }
+            }
+            5 => {
+                if let Some(index) = selected
+                    && index + 1 < values.len()
+                {
+                    values.swap(index, index + 1);
+                    new_selection = Some(index + 1);
+                }
+            }
+            _ => anyhow::bail!("unsupported editor operation {operation}"),
+        }
+        Ok(new_selection)
+    }
     unsafe extern "C-unwind" fn list_editor_action(
         _this: *mut AnyObject,
         _cmd: Sel,
@@ -1620,8 +1661,7 @@ mod native {
             } else {
                 edit_new_row = true;
                 let mut values = EDITOR_LISTENERS.lock().unwrap();
-                values.push(String::new());
-                new_selection = Some(values.len() - 1);
+                new_selection = Some(append_listener_placeholder(&mut values));
             }
         } else {
             let mut values = if is_pac_files {
@@ -1629,35 +1669,13 @@ mod native {
             } else {
                 EDITOR_LISTENERS.lock().unwrap()
             };
-            match operation {
-                3 => {
-                    if let Some(index) = selected {
-                        if values.len() <= 1 {
-                            drop(values);
-                            show_message("Unproxy Settings", "At least one item is required.");
-                            return;
-                        }
-                        if index < values.len() {
-                            values.remove(index);
-                            new_selection = Some(index.min(values.len() - 1));
-                        }
-                    }
+            match update_editor_list(&mut values, operation, selected) {
+                Ok(selection) => new_selection = selection,
+                Err(_) => {
+                    drop(values);
+                    show_message("Unproxy Settings", "At least one item is required.");
+                    return;
                 }
-                4 => {
-                    if let Some(index) = selected.filter(|index| *index > 0) {
-                        values.swap(index, index - 1);
-                        new_selection = Some(index - 1);
-                    }
-                }
-                5 => {
-                    if let Some(index) = selected
-                        && index + 1 < values.len()
-                    {
-                        values.swap(index, index + 1);
-                        new_selection = Some(index + 1);
-                    }
-                }
-                _ => return,
             }
         }
         let _: () = unsafe { msg_send![table, reloadData] };
@@ -1686,6 +1704,16 @@ mod native {
         let _: () = unsafe { msg_send![app, stopModalWithCode:1000isize] };
     }
     fn change_editor_checkbox(sender: *mut AnyObject, tag: isize) {
+        change_editor_checkbox_with(sender, tag, commit_editor_preferences, |message| {
+            show_message("Could not apply this change", message)
+        });
+    }
+    fn change_editor_checkbox_with(
+        sender: *mut AnyObject,
+        tag: isize,
+        commit: impl FnOnce() -> Result<()>,
+        alert: impl FnOnce(&str),
+    ) {
         let enabled: isize = unsafe { msg_send![sender, state] };
         let enabled = enabled != 0;
         {
@@ -1699,7 +1727,7 @@ mod native {
                 }
             }
         }
-        if let Err(error) = commit_editor_preferences() {
+        if let Err(error) = commit() {
             let current = STATE
                 .lock()
                 .unwrap()
@@ -1726,7 +1754,7 @@ mod native {
                         unsafe { msg_send![sender, setState:if applied {1isize}else{0isize}] };
                 }
             }
-            show_message("Could not apply this change", &format!("{error:#}"));
+            alert(&format!("{error:#}"));
         }
     }
     fn validated_editor_preferences() -> Result<Preferences> {
@@ -1820,6 +1848,31 @@ mod native {
         Ok(())
     }
     fn settings_window(prefs: &Preferences) -> Result<()> {
+        settings_window_with(prefs, |window, _target| {
+            let app: *mut AnyObject =
+                unsafe { msg_send![objc2::class!(NSApplication), sharedApplication] };
+            let _: () =
+                unsafe { msg_send![window, makeKeyAndOrderFront:ptr::null_mut::<AnyObject>()] };
+            let _: isize = unsafe { msg_send![app, runModalForWindow:window] };
+            Ok(())
+        })
+    }
+
+    fn settings_window_with(
+        prefs: &Preferences,
+        present: impl FnOnce(*mut AnyObject, *mut AnyObject) -> Result<()>,
+    ) -> Result<()> {
+        let (window, target) = build_settings_window(prefs)?;
+        present(window, target)?;
+        unsafe {
+            let _: () = msg_send![window, orderOut:ptr::null_mut::<AnyObject>()];
+        }
+        *LISTENER_TABLE.lock().unwrap() = 0;
+        *PAC_FILE_TABLE.lock().unwrap() = 0;
+        Ok(())
+    }
+
+    fn build_settings_window(prefs: &Preferences) -> Result<(*mut AnyObject, *mut AnyObject)> {
         *EDITOR_LISTENERS.lock().unwrap() = prefs.effective_listeners();
         *EDITOR_PAC_FILES.lock().unwrap() = prefs
             .effective_pac_files()
@@ -1922,15 +1975,7 @@ mod native {
             rect(842.0, 22.0, 94.0, 30.0),
             Some("\r"),
         );
-
-        let app: *mut AnyObject =
-            unsafe { msg_send![objc2::class!(NSApplication), sharedApplication] };
-        let _: () = unsafe { msg_send![window, makeKeyAndOrderFront:ptr::null_mut::<AnyObject>()] };
-        let _: isize = unsafe { msg_send![app, runModalForWindow:window] };
-        let _: () = unsafe { msg_send![window, orderOut:ptr::null_mut::<AnyObject>()] };
-        *LISTENER_TABLE.lock().unwrap() = 0;
-        *PAC_FILE_TABLE.lock().unwrap() = 0;
-        Ok(())
+        Ok((window, target))
     }
     fn show_settings(shared: &Arc<Mutex<State>>) -> Result<()> {
         let prefs = shared.lock().unwrap().prefs.clone();
@@ -2381,9 +2426,31 @@ mod native {
             let _: () = unsafe {
                 msg_send![defaults, setBool:objc2::runtime::Bool::NO, forKey:cocoa_string("autostart")]
             };
+            let native_listeners: *mut AnyObject =
+                unsafe { msg_send![objc2::class!(NSMutableArray), new] };
+            let _: () =
+                unsafe { msg_send![native_listeners, addObject:cocoa_string("127.0.0.1:3128")] };
+            let _: () = unsafe {
+                msg_send![defaults, setObject:native_listeners, forKey:cocoa_string("listeners")]
+            };
+            let native_pac_files: *mut AnyObject =
+                unsafe { msg_send![objc2::class!(NSMutableArray), new] };
+            let _: () =
+                unsafe { msg_send![native_pac_files, addObject:cocoa_string("relative.pac")] };
+            let _: () = unsafe {
+                msg_send![native_pac_files, addObject:cocoa_string(&pac_file.to_string_lossy())]
+            };
+            let _: () = unsafe {
+                msg_send![defaults, setObject:native_pac_files, forKey:cocoa_string("pacFiles")]
+            };
             let loaded = native_preferences_with(defaults, &preferences_path)?;
             anyhow::ensure!(loaded.port == 0 && loaded.effective_port() == 3128);
             anyhow::ensure!(loaded.pac_file == std::env::current_dir()?.join("relative.pac"));
+            anyhow::ensure!(
+                loaded.listeners.as_deref() == Some(&["127.0.0.1:3128".to_owned()][..])
+            );
+            anyhow::ensure!(loaded.effective_pac_files().len() == 2);
+            anyhow::ensure!(loaded.effective_pac_files()[1] == pac_file);
             anyhow::ensure!(loaded.negotiate && loaded.proxytunnel && loaded.direct_fallback);
             anyhow::ensure!(!loaded.autostart);
             let bad_path = support_dir.join("not-a-directory");
@@ -2478,6 +2545,9 @@ mod native {
                 last_icon_key: String::new(),
             }));
             *STATE.lock().unwrap() = Some(state.clone());
+            exercise_runtime_status_probe()?;
+            exercise_tray_status(&state)?;
+            probe_settings_editor(&state, &prefs, support_dir, pac_file)?;
             let actions = action_class();
             let target: *mut AnyObject = unsafe { msg_send![actions, new] };
             let menu: *mut AnyObject = unsafe { msg_send![objc2::class!(NSMenu), new] };
@@ -2659,8 +2729,467 @@ mod native {
             anyhow::ensure!(startup_dir.join("preferences.json").is_file());
             anyhow::ensure!(startup_dir.join("controller.lock").is_file());
             anyhow::ensure!(STATE.lock().unwrap().is_none());
+
+            fn reject_login_item(enabled: bool) -> Result<()> {
+                anyhow::bail!("fixture rejected login item {enabled}")
+            }
+            let failed_startup_dir = support_dir.join("startup-failure-probe");
+            let failed_sample = failed_startup_dir.join("proxy.pac");
+            run_startup(StartupOptions {
+                support_dir: failed_startup_dir.clone(),
+                child_exe: support_dir.join("missing-startup-child"),
+                sample_pac: failed_sample.clone(),
+                defaults: Some(defaults as usize),
+                run_event_loop: false,
+                helper_notification: format!("de.m42e.unproxy.test.{}.failure", std::process::id()),
+                login_item: reject_login_item,
+            })?;
+            anyhow::ensure!(failed_sample.is_file());
+            anyhow::ensure!(STATE.lock().unwrap().is_none());
+
+            use std::os::fd::AsRawFd;
+            let held_lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(failed_startup_dir.join("controller.lock"))?;
+            anyhow::ensure!(unsafe {
+                libc::flock(held_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0
+            });
+            run_startup(StartupOptions {
+                support_dir: failed_startup_dir,
+                child_exe: child_exe.to_owned(),
+                sample_pac: failed_sample,
+                defaults: Some(defaults as usize),
+                run_event_loop: false,
+                helper_notification: format!(
+                    "de.m42e.unproxy.test.{}.already-running",
+                    std::process::id()
+                ),
+                login_item: ignore_login_item,
+            })?;
+            let _ = unsafe { libc::flock(held_lock.as_raw_fd(), libc::LOCK_UN) };
             Ok(())
         })
+    }
+
+    fn probe_settings_editor(
+        state: &Arc<Mutex<State>>,
+        prefs: &Preferences,
+        support_dir: &Path,
+        pac_file: &Path,
+    ) -> Result<()> {
+        settings_window_with(prefs, |_window, target| {
+            let listener_table = *LISTENER_TABLE.lock().unwrap() as *mut AnyObject;
+            let pac_table = *PAC_FILE_TABLE.lock().unwrap() as *mut AnyObject;
+            anyhow::ensure!(!listener_table.is_null() && !pac_table.is_null());
+            let original_listeners = prefs.effective_listeners();
+
+            let listener_rows: isize =
+                unsafe { msg_send![target, numberOfRowsInTableView:listener_table] };
+            anyhow::ensure!(
+                listener_rows == original_listeners.len() as isize,
+                "settings listener table has {listener_rows} rows; expected {}",
+                original_listeners.len()
+            );
+            let first_listener: *mut AnyObject = unsafe {
+                msg_send![target, tableView:listener_table, objectValueForTableColumn:ptr::null_mut::<AnyObject>(), row:0isize]
+            };
+            anyhow::ensure!(
+                cocoa_text(first_listener).as_deref()
+                    == prefs.effective_listeners().first().map(String::as_str),
+                "settings listener table returned the wrong value"
+            );
+            let pac_rows: isize = unsafe { msg_send![target, numberOfRowsInTableView:pac_table] };
+            anyhow::ensure!(pac_rows == 1, "settings PAC table has the wrong row count");
+            let first_pac: *mut AnyObject = unsafe {
+                msg_send![target, tableView:pac_table, objectValueForTableColumn:ptr::null_mut::<AnyObject>(), row:0isize]
+            };
+            anyhow::ensure!(cocoa_text(first_pac).is_some());
+            anyhow::ensure!(
+                unsafe {
+                    list_object_value(
+                        target,
+                        sel!(tableView:objectValueForTableColumn:row:),
+                        listener_table,
+                        ptr::null_mut(),
+                        -1,
+                    )
+                }
+                .is_null()
+            );
+            unsafe {
+                list_set_object_value(
+                    target,
+                    sel!(tableView:setObjectValue:forTableColumn:row:),
+                    listener_table,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    -1,
+                );
+                list_set_object_value(
+                    target,
+                    sel!(tableView:setObjectValue:forTableColumn:row:),
+                    listener_table,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                );
+                list_set_object_value(
+                    target,
+                    sel!(tableView:setObjectValue:forTableColumn:row:),
+                    listener_table,
+                    cocoa_string("127.0.0.2:3128"),
+                    ptr::null_mut(),
+                    10,
+                );
+            }
+            let alternate_port = if prefs.port >= 65534 {
+                prefs.port - 1
+            } else {
+                prefs.port + 1
+            };
+            let alternate_listener = format!("127.0.0.2:{alternate_port}");
+            unsafe {
+                list_set_object_value(
+                    target,
+                    sel!(tableView:setObjectValue:forTableColumn:row:),
+                    listener_table,
+                    cocoa_string(&alternate_listener),
+                    ptr::null_mut(),
+                    0,
+                );
+            }
+            anyhow::ensure!(
+                state.lock().unwrap().prefs.listeners.as_ref().unwrap()[0] == alternate_listener,
+                "editing a listener did not update preferences"
+            );
+            unsafe {
+                list_set_object_value(
+                    target,
+                    sel!(tableView:setObjectValue:forTableColumn:row:),
+                    listener_table,
+                    cocoa_string(&original_listeners[0]),
+                    ptr::null_mut(),
+                    0,
+                );
+            }
+            anyhow::ensure!(
+                state.lock().unwrap().prefs.effective_listeners() == original_listeners,
+                "editing a listener back did not restore preferences"
+            );
+
+            unsafe {
+                let _: () = msg_send![listener_table, selectRowIndexes:index_set(0), byExtendingSelection:objc2::runtime::Bool::NO];
+                send_editor_action(1105, None);
+            }
+            anyhow::ensure!(
+                *EDITOR_LISTENERS.lock().unwrap()
+                    == vec![original_listeners[1].clone(), original_listeners[0].clone()],
+                "moving a listener down did not reorder it"
+            );
+            unsafe { send_editor_action(1104, None) };
+            anyhow::ensure!(*EDITOR_LISTENERS.lock().unwrap() == original_listeners);
+            unsafe { send_editor_action(1103, None) };
+            anyhow::ensure!(
+                *EDITOR_LISTENERS.lock().unwrap() == vec![original_listeners[1].clone()],
+                "removing a listener did not update the table"
+            );
+            *EDITOR_LISTENERS.lock().unwrap() = original_listeners.clone();
+            commit_editor_preferences()?;
+            anyhow::ensure!(
+                state.lock().unwrap().prefs.effective_listeners() == original_listeners
+            );
+
+            use std::os::unix::fs::PermissionsExt;
+            let fixture_child = support_dir.join("settings-probe-child");
+            std::fs::write(&fixture_child, "#!/bin/sh\nexec /bin/sleep 60\n")?;
+            let mut permissions = std::fs::metadata(&fixture_child)?.permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&fixture_child, permissions)?;
+            let original_child = state.lock().unwrap().child_exe.clone();
+            {
+                let mut current = state.lock().unwrap();
+                current.child_exe = fixture_child.clone();
+                let child_prefs = current.prefs.clone();
+                current.child.start(&fixture_child, &child_prefs)?;
+                anyhow::ensure!(current.child.is_running());
+            }
+            EDITOR_LISTENERS.lock().unwrap()[0] = alternate_listener.clone();
+            commit_editor_preferences()?;
+            anyhow::ensure!(state.lock().unwrap().child.is_running());
+            EDITOR_LISTENERS.lock().unwrap()[0] = original_listeners[0].clone();
+            commit_editor_preferences()?;
+            anyhow::ensure!(state.lock().unwrap().child.is_running());
+
+            {
+                state.lock().unwrap().child_exe = support_dir.join("missing-restart-child");
+            }
+            EDITOR_LISTENERS.lock().unwrap()[0] = alternate_listener;
+            anyhow::ensure!(
+                commit_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("start")
+            );
+            {
+                let mut current = state.lock().unwrap();
+                anyhow::ensure!(current.start_failed && !current.child.is_running());
+                current.child_exe = original_child;
+                current.start_failed = false;
+                current.last_running = false;
+            }
+            EDITOR_LISTENERS.lock().unwrap()[0] = original_listeners[0].clone();
+            commit_editor_preferences()?;
+
+            let alternate_pac = support_dir.join("alternate.pac");
+            std::fs::write(
+                &alternate_pac,
+                "function FindProxyForURL(){return 'DIRECT';}\n",
+            )?;
+            unsafe {
+                list_set_object_value(
+                    target,
+                    sel!(tableView:setObjectValue:forTableColumn:row:),
+                    pac_table,
+                    cocoa_string(&alternate_pac.to_string_lossy()),
+                    ptr::null_mut(),
+                    0,
+                );
+            }
+            anyhow::ensure!(
+                state.lock().unwrap().prefs.pac_file == alternate_pac,
+                "editing a PAC path was not applied"
+            );
+            unsafe {
+                list_set_object_value(
+                    target,
+                    sel!(tableView:setObjectValue:forTableColumn:row:),
+                    pac_table,
+                    cocoa_string(&pac_file.to_string_lossy()),
+                    ptr::null_mut(),
+                    0,
+                );
+            }
+            let checkbox: *mut AnyObject = unsafe { msg_send![objc2::class!(NSButton), new] };
+            unsafe {
+                let _: () = msg_send![checkbox, setState:1isize];
+            }
+            let rollback_alert = std::cell::RefCell::new(None::<String>);
+            change_editor_checkbox_with(
+                checkbox,
+                3001,
+                || Err(anyhow::anyhow!("fixture save rejected")),
+                |message| *rollback_alert.borrow_mut() = Some(message.to_owned()),
+            );
+            let checkbox_state: isize = unsafe { msg_send![checkbox, state] };
+            anyhow::ensure!(checkbox_state == 0);
+            anyhow::ensure!(!state.lock().unwrap().prefs.proxytunnel);
+            anyhow::ensure!(!EDITOR_PREFS.lock().unwrap().as_ref().unwrap().proxytunnel);
+            anyhow::ensure!(
+                rollback_alert
+                    .borrow()
+                    .as_deref()
+                    .is_some_and(|message| message.contains("fixture save rejected"))
+            );
+            unsafe {
+                let no_selection: *mut AnyObject = msg_send![objc2::class!(NSIndexSet), indexSet];
+                let _: () = msg_send![listener_table, selectRowIndexes:no_selection, byExtendingSelection:objc2::runtime::Bool::NO];
+                send_editor_action(1103, None);
+                send_editor_action(1104, None);
+                send_editor_action(1105, None);
+                *LISTENER_TABLE.lock().unwrap() = 0;
+                send_editor_action(1102, None);
+                *LISTENER_TABLE.lock().unwrap() = listener_table as usize;
+                send_editor_action(9999, None);
+                send_editor_action(3001, Some(true));
+                send_editor_action(3002, Some(true));
+                #[cfg(feature = "negotiate")]
+                send_editor_action(3003, Some(false));
+                send_editor_action(3002, Some(false));
+                send_editor_action(3001, Some(false));
+                #[cfg(feature = "negotiate")]
+                send_editor_action(3003, Some(true));
+            }
+
+            let valid_listener = prefs.effective_listeners()[0].clone();
+            let valid_pac = pac_file.to_string_lossy().into_owned();
+            *EDITOR_LISTENERS.lock().unwrap() = Vec::new();
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("at least one listener")
+            );
+            *EDITOR_LISTENERS.lock().unwrap() = vec!["invalid listener".into()];
+            anyhow::ensure!(validated_editor_preferences().is_err());
+            *EDITOR_LISTENERS.lock().unwrap() =
+                vec![valid_listener.clone(), valid_listener.clone()];
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unique")
+            );
+            *EDITOR_LISTENERS.lock().unwrap() = vec![valid_listener];
+            *EDITOR_PAC_FILES.lock().unwrap() = Vec::new();
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("at least one PAC file")
+            );
+            *EDITOR_PAC_FILES.lock().unwrap() = vec!["relative.pac".into()];
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must be absolute")
+            );
+            *EDITOR_PAC_FILES.lock().unwrap() = vec![
+                support_dir
+                    .join("missing.pac")
+                    .to_string_lossy()
+                    .into_owned(),
+            ];
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("is missing")
+            );
+            *EDITOR_PAC_FILES.lock().unwrap() = vec![valid_pac.clone(), valid_pac.clone()];
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("more than once")
+            );
+            *EDITOR_PAC_FILES.lock().unwrap() = vec![valid_pac];
+            anyhow::ensure!(validated_editor_preferences().is_ok());
+            *EDITOR_PREFS.lock().unwrap() = None;
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("not active")
+            );
+            let mut current = state.lock().unwrap();
+            let defaults = current.defaults as *mut AnyObject;
+            save_native_preferences(prefs, &current.prefs_path, defaults)?;
+            current.prefs = prefs.clone();
+            current.last_running = current.child.is_running();
+            drop(current);
+            *EDITOR_LISTENERS.lock().unwrap() = prefs.effective_listeners();
+            *EDITOR_PAC_FILES.lock().unwrap() = prefs
+                .effective_pac_files()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            *EDITOR_PREFS.lock().unwrap() = Some(prefs.clone());
+            Ok(())
+        })
+    }
+
+    fn exercise_runtime_status_probe() -> Result<()> {
+        let checked_at = chrono::Utc::now().timestamp();
+        let body = serde_json::json!({
+            "pac_loaded": true,
+            "authentication_configured": true,
+            "upstream_state": "ok",
+            "authentication_state": "authenticated",
+            "upstream_checked_at": checked_at,
+        })
+        .to_string();
+        let response = format!("HTTP/1.1 200 OK\r\n\r\n{body}");
+        let status = parse_runtime_status_response(response.as_bytes())
+            .context("parse populated runtime status")?;
+        anyhow::ensure!(status.pac_loaded == Some(true));
+        anyhow::ensure!(status.authentication_configured);
+        anyhow::ensure!(status.upstream_state == "ok");
+        anyhow::ensure!(status.authentication_state == "authenticated");
+        anyhow::ensure!(status.upstream_checked_at == Some(checked_at));
+
+        let status = parse_runtime_status_response(b"HTTP/1.1 200 OK\r\n\r\n{}")
+            .context("parse empty runtime status")?;
+        anyhow::ensure!(status.pac_loaded.is_none());
+        anyhow::ensure!(!status.authentication_configured);
+        anyhow::ensure!(status.upstream_state == "unknown");
+        anyhow::ensure!(status.authentication_state == "unknown");
+        anyhow::ensure!(status.upstream_checked_at.is_none());
+        anyhow::ensure!(parse_runtime_status_response(b"malformed").is_none());
+        anyhow::ensure!(
+            parse_runtime_status_response(b"HTTP/1.1 200 OK\r\n\r\nnot-json").is_none()
+        );
+
+        Ok(())
+    }
+
+    fn exercise_tray_status(state: &Arc<Mutex<State>>) -> Result<()> {
+        let mut state = state.lock().unwrap();
+        let original_status = state.tray_status.clone();
+        let original_start_failed = state.start_failed;
+        let result = (|| {
+            state.tray_status = TrayStatus::default();
+            state.start_failed = false;
+            anyhow::ensure!(
+                icon_statuses(&state, false) == ("stopped", "unloaded", "unknown", "disabled")
+            );
+            let labels = status_labels(&state, false);
+            anyhow::ensure!(labels.0 == "Stopped" && labels.1 == "Not loaded");
+            anyhow::ensure!(labels.2 == "No recent proxy request");
+            anyhow::ensure!(labels.3 == "Not configured");
+
+            state.start_failed = true;
+            anyhow::ensure!(icon_statuses(&state, false).0 == "failed");
+            anyhow::ensure!(status_labels(&state, false).0 == "Stopped unexpectedly");
+            state.start_failed = false;
+
+            state.tray_status = TrayStatus {
+                pac_loaded: Some(true),
+                authentication_configured: true,
+                upstream_state: "ok".into(),
+                authentication_state: "authenticated".into(),
+                upstream_checked_at: Some(chrono::Utc::now().timestamp()),
+            };
+            anyhow::ensure!(
+                icon_statuses(&state, true) == ("running", "loaded", "ok", "authenticated")
+            );
+            let labels = status_labels(&state, true);
+            anyhow::ensure!(labels.0 == "Running" && labels.1 == "Loaded");
+            anyhow::ensure!(labels.2 == "Last proxy request succeeded");
+            anyhow::ensure!(labels.3 == "Accepted on last request");
+
+            state.tray_status.upstream_state = "error".into();
+            state.tray_status.authentication_state = "rejected".into();
+            anyhow::ensure!(icon_statuses(&state, true).2 == "error");
+            anyhow::ensure!(icon_statuses(&state, true).3 == "rejected");
+            anyhow::ensure!(status_labels(&state, true).2 == "Last proxy request failed");
+            anyhow::ensure!(status_labels(&state, true).3 == "Rejected by upstream (407)");
+
+            state.tray_status.upstream_checked_at =
+                Some(chrono::Utc::now().timestamp().saturating_sub(301));
+            anyhow::ensure!(icon_statuses(&state, true).2 == "unknown");
+            anyhow::ensure!(icon_statuses(&state, true).3 == "configured");
+            anyhow::ensure!(status_labels(&state, true).2 == "No recent proxy request");
+            anyhow::ensure!(status_labels(&state, true).3 == "Configured; not verified yet");
+
+            state.tray_status.upstream_checked_at =
+                Some(chrono::Utc::now().timestamp().saturating_add(1));
+            anyhow::ensure!(!upstream_is_recent(&state.tray_status));
+            Ok(())
+        })();
+        state.tray_status = original_status;
+        state.start_failed = original_start_failed;
+        result
+    }
+
+    unsafe fn send_editor_action(tag: isize, state: Option<bool>) {
+        let sender: *mut AnyObject = unsafe { msg_send![objc2::class!(NSButton), new] };
+        let _: () = unsafe { msg_send![sender, setTag:tag] };
+        if let Some(state) = state {
+            let _: () = unsafe { msg_send![sender, setState:if state {1isize}else{0isize}] };
+        }
+        unsafe { list_editor_action(ptr::null_mut(), sel!(listEditorAction:), sender) };
     }
 
     unsafe fn send_action(tag: i64) {
@@ -2679,6 +3208,58 @@ mod native {
             let tag: i64 = unsafe { msg_send![item, tag] };
             tag == wanted
         })
+    }
+
+    #[cfg(test)]
+    mod editor_list_tests {
+        use super::*;
+
+        #[test]
+        fn editor_list_items_can_be_added_moved_and_removed() {
+            let mut values = vec!["first".to_owned(), "second".to_owned()];
+            assert_eq!(append_listener_placeholder(&mut values), 2);
+            assert_eq!(values, ["first", "second", ""]);
+
+            assert_eq!(
+                update_editor_list(&mut values, 4, Some(2)).unwrap(),
+                Some(1)
+            );
+            assert_eq!(values, ["first", "", "second"]);
+            assert_eq!(
+                update_editor_list(&mut values, 5, Some(1)).unwrap(),
+                Some(2)
+            );
+            assert_eq!(values, ["first", "second", ""]);
+            assert_eq!(
+                update_editor_list(&mut values, 3, Some(2)).unwrap(),
+                Some(1)
+            );
+            assert_eq!(values, ["first", "second"]);
+        }
+
+        #[test]
+        fn editor_list_actions_handle_boundaries_and_reject_removing_last_item() {
+            let mut values = vec!["first".to_owned(), "second".to_owned()];
+            assert_eq!(
+                update_editor_list(&mut values, 4, Some(0)).unwrap(),
+                Some(0)
+            );
+            assert_eq!(
+                update_editor_list(&mut values, 5, Some(1)).unwrap(),
+                Some(1)
+            );
+            assert_eq!(update_editor_list(&mut values, 3, None).unwrap(), None);
+            assert_eq!(values, ["first", "second"]);
+
+            let mut only_item = vec!["only".to_owned()];
+            assert!(
+                update_editor_list(&mut only_item, 3, Some(0))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("at least one item")
+            );
+            assert_eq!(only_item, ["only"]);
+        }
     }
 }
 
