@@ -42,6 +42,7 @@ struct RuntimeStatus(Arc<Mutex<RuntimeStatusData>>);
 
 #[derive(Clone)]
 struct RuntimeStatusData {
+    pac_files: Vec<String>,
     authentication_configured: bool,
     upstream_state: String,
     authentication_state: String,
@@ -51,6 +52,7 @@ struct RuntimeStatusData {
 impl RuntimeStatus {
     fn new(authentication_configured: bool) -> Self {
         Self(Arc::new(Mutex::new(RuntimeStatusData {
+            pac_files: Vec::new(),
             authentication_configured,
             upstream_state: "unknown".into(),
             authentication_state: if authentication_configured {
@@ -94,11 +96,18 @@ impl RuntimeStatus {
             .lock()
             .map(|status| status.clone())
             .unwrap_or_else(|_| RuntimeStatusData {
+                pac_files: Vec::new(),
                 authentication_configured: false,
                 upstream_state: "unknown".into(),
                 authentication_state: "unknown".into(),
                 upstream_checked_at: None,
             })
+    }
+
+    fn set_pac_files(&self, pac_files: Vec<String>) {
+        if let Ok(mut status) = self.0.lock() {
+            status.pac_files = pac_files;
+        }
     }
 }
 
@@ -275,8 +284,11 @@ impl ContextBuilder {
         if !self.pac_sources.is_empty() {
             let scripts = load_pac_sources(&self.pac_sources).await?;
             self.policy.set_scripts(scripts).await?;
+            self.runtime_status
+                .set_pac_files(self.pac_sources.iter().map(ToString::to_string).collect());
         } else if self.initialize_inline {
             self.policy.set_scripts(self.inline_scripts.clone()).await?;
+            self.runtime_status.set_pac_files(Vec::new());
         }
         Ok(())
     }
@@ -337,6 +349,7 @@ impl ContextBuilder {
             policy: self.policy.clone(),
             pac_sources,
             inline_scripts,
+            runtime_status: self.runtime_status.clone(),
             relay_handles: self.relay_handles.clone(),
         })
     }
@@ -353,6 +366,7 @@ impl ContextBuilder {
         let policy = self.policy.clone();
         let pac_sources = self.pac_sources.clone();
         let inline_scripts = self.inline_scripts.clone();
+        let runtime_status = self.runtime_status.clone();
         let shutdown_timeout = self.shutdown_timeout;
         let relay_handles = self.relay_handles.clone();
         let cfg = self;
@@ -371,6 +385,7 @@ impl ContextBuilder {
             policy,
             pac_sources,
             inline_scripts,
+            runtime_status,
             relay_handles,
         })
     }
@@ -391,6 +406,7 @@ impl ContextBuilder {
         let shutdown_timeout = self.shutdown_timeout;
         let sources = self.pac_sources.clone();
         let inline_scripts = self.inline_scripts.clone();
+        let runtime_status = self.runtime_status.clone();
         let relay_handles = self.relay_handles.clone();
         let join = tokio::spawn(async move {
             let mut sessions = tokio::task::JoinSet::new();
@@ -409,6 +425,7 @@ impl ContextBuilder {
             policy,
             pac_sources: sources,
             inline_scripts,
+            runtime_status,
             relay_handles,
         })
     }
@@ -424,6 +441,7 @@ pub struct Context {
     policy: Arc<Policy>,
     pac_sources: Vec<PathOrUri>,
     inline_scripts: Vec<String>,
+    runtime_status: RuntimeStatus,
     relay_handles: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
 }
 
@@ -486,30 +504,41 @@ impl Context {
         self.policy.clone()
     }
     pub async fn set_script(&self, script: Option<String>) -> Result<()> {
-        self.policy.set_script(script).await
+        self.policy.set_script(script).await?;
+        self.runtime_status.set_pac_files(Vec::new());
+        Ok(())
     }
     pub async fn set_ip(&self, ip: std::net::IpAddr) -> Result<()> {
         self.policy.set_ip(ip).await
     }
     pub async fn set_scripts(&self, scripts: Vec<String>) -> Result<()> {
-        self.policy.set_scripts(scripts).await
+        self.policy.set_scripts(scripts).await?;
+        self.runtime_status.set_pac_files(Vec::new());
+        Ok(())
     }
     pub async fn load_pac(&self, source: &PathOrUri) -> Result<()> {
         self.load_pacs(std::slice::from_ref(source)).await
     }
     pub async fn load_pacs(&self, sources: &[PathOrUri]) -> Result<()> {
         let scripts = load_pac_sources(sources).await?;
-        self.policy.set_scripts(scripts).await
+        self.policy.set_scripts(scripts).await?;
+        self.runtime_status
+            .set_pac_files(sources.iter().map(ToString::to_string).collect());
+        Ok(())
     }
     pub async fn reload_pac(&self) -> Result<()> {
         if !self.pac_sources.is_empty() {
             self.load_pacs(&self.pac_sources).await
         } else {
-            self.policy.set_scripts(self.inline_scripts.clone()).await
+            self.policy.set_scripts(self.inline_scripts.clone()).await?;
+            self.runtime_status.set_pac_files(Vec::new());
+            Ok(())
         }
     }
     pub async fn clear_policy(&self) -> Result<()> {
-        self.policy.set_scripts(vec![]).await
+        self.policy.set_scripts(vec![]).await?;
+        self.runtime_status.set_pac_files(Vec::new());
+        Ok(())
     }
     pub async fn wait(mut self) {
         // `wait` observes lifecycle; callers choose when to request shutdown.
@@ -782,11 +811,13 @@ async fn handle(
             ),
             "/status.json" => {
                 let status = cfg.runtime_status.snapshot();
+                let pac_loaded = cfg.policy.is_loaded();
                 full(
                     StatusCode::OK,
                     "application/json; charset=utf-8",
                     serde_json::json!({
-                        "pac_loaded": cfg.policy.is_loaded(),
+                        "pac_loaded": pac_loaded,
+                        "pac_files": if pac_loaded { status.pac_files } else { Vec::new() },
                         "authentication_configured": status.authentication_configured,
                         "upstream_state": status.upstream_state,
                         "authentication_state": status.authentication_state,
@@ -1295,6 +1326,7 @@ fn status_html() -> String {
     article { border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: .75rem; padding: 1rem; }
     h2 { font-size: .9rem; margin: 0 0 .5rem; }
     article p { font-size: 1.15rem; margin: 0 0 .25rem; }
+    #pac-files { margin: .5rem 0 0; padding-left: 1.25rem; font-size: .85rem; overflow-wrap: anywhere; }
     nav { display: flex; flex-wrap: wrap; gap: 1rem; }
   </style>
 </head>
@@ -1303,7 +1335,7 @@ fn status_html() -> String {
   <p class="muted">Local proxy status · version __VERSION__</p>
   <section class="grid" aria-live="polite">
     <article><h2>Proxy</h2><p>Running</p><small>This page is served by the active proxy.</small></article>
-    <article><h2>PAC policy</h2><p id="pac">Loading…</p><small>Whether a PAC policy is currently loaded.</small></article>
+    <article><h2>PAC policy</h2><p id="pac">Loading…</p><small>Whether a PAC policy is currently loaded. Loaded PAC files:</small><ul id="pac-files" aria-label="Loaded PAC files"><li>Loading…</li></ul></article>
     <article><h2>Upstream</h2><p id="upstream">Loading…</p><small id="checked">Checking latest request…</small></article>
     <article><h2>Authentication</h2><p id="auth">Loading…</p><small>State from the latest upstream request.</small></article>
   </section>
@@ -1319,6 +1351,20 @@ fn status_html() -> String {
         if (!response.ok) throw new Error('HTTP ' + response.status);
         const status = await response.json();
         document.querySelector('#pac').textContent = status.pac_loaded ? 'Loaded' : 'Not loaded';
+        const pacFiles = document.querySelector('#pac-files');
+        pacFiles.replaceChildren();
+        const files = Array.isArray(status.pac_files) ? status.pac_files : [];
+        if (files.length) {
+          for (const file of files) {
+            const item = document.createElement('li');
+            item.textContent = file;
+            pacFiles.append(item);
+          }
+        } else {
+          const item = document.createElement('li');
+          item.textContent = status.pac_loaded ? 'No PAC files (inline policy)' : 'None';
+          pacFiles.append(item);
+        }
         const upstream = status.upstream_state;
         document.querySelector('#upstream').textContent = upstream === 'ok' ? 'Last request succeeded'
           : upstream === 'error' ? 'Last request failed' : 'No upstream result yet';
@@ -1331,6 +1377,7 @@ fn status_html() -> String {
           : status.authentication_configured ? 'Configured, not verified' : 'Not configured';
       } catch (_) {
         document.querySelector('#pac').textContent = 'Unavailable';
+        document.querySelector('#pac-files').replaceChildren();
         document.querySelector('#upstream').textContent = 'Status unavailable';
         document.querySelector('#checked').textContent = 'Could not read status.json';
         document.querySelector('#auth').textContent = 'Unavailable';
