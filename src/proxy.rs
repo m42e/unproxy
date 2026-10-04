@@ -47,6 +47,8 @@ struct RuntimeStatusData {
     upstream_state: String,
     authentication_state: String,
     upstream_checked_at: Option<i64>,
+    upstream_route: Option<String>,
+    authentication_sent: bool,
 }
 
 impl RuntimeStatus {
@@ -61,6 +63,8 @@ impl RuntimeStatus {
                 "disabled".into()
             },
             upstream_checked_at: None,
+            upstream_route: None,
+            authentication_sent: false,
         })))
     }
 
@@ -78,6 +82,8 @@ impl RuntimeStatus {
             return;
         };
         status.upstream_state = if success { "ok" } else { "error" }.into();
+        status.upstream_route = Some(route.to_string());
+        status.authentication_sent = authentication_sent;
         status.authentication_state = if error.is_some_and(|e| e.contains("HTTP 407")) {
             "rejected"
         } else if success && authentication_sent {
@@ -101,6 +107,8 @@ impl RuntimeStatus {
                 upstream_state: "unknown".into(),
                 authentication_state: "unknown".into(),
                 upstream_checked_at: None,
+                upstream_route: None,
+                authentication_sent: false,
             })
     }
 
@@ -818,6 +826,8 @@ async fn handle(
                         "upstream_state": status.upstream_state,
                         "authentication_state": status.authentication_state,
                         "upstream_checked_at": status.upstream_checked_at,
+                        "upstream_route": status.upstream_route,
+                        "authentication_sent": status.authentication_sent,
                     })
                     .to_string(),
                 )
@@ -1317,6 +1327,7 @@ fn status_html() -> String {
     h2 { font-size: .9rem; margin: 0 0 .5rem; }
     article p { font-size: 1.15rem; margin: 0 0 .25rem; }
     #pac-files { margin: .5rem 0 0; padding-left: 1.25rem; font-size: .85rem; overflow-wrap: anywhere; }
+    #negotiation-details { margin: .5rem 0 0; padding-left: 1.25rem; font-size: .85rem; overflow-wrap: anywhere; }
     nav { display: flex; flex-wrap: wrap; gap: 1rem; }
   </style>
 </head>
@@ -1327,7 +1338,7 @@ fn status_html() -> String {
     <article><h2>Proxy</h2><p>Running</p><small>This page is served by the active proxy.</small></article>
     <article><h2>PAC policy</h2><p id="pac">Loading…</p><small>Whether a PAC policy is currently loaded. Loaded PAC files:</small><ul id="pac-files" aria-label="Loaded PAC files"><li>Loading…</li></ul></article>
     <article><h2>Upstream</h2><p id="upstream">Loading…</p><small id="checked">Checking latest request…</small></article>
-    <article><h2>Authentication</h2><p id="auth">Loading…</p><small>State from the latest upstream request.</small></article>
+    <article><h2>Authentication negotiation</h2><p id="auth">Loading…</p><small>Negotiate creates an OS-backed token for an eligible upstream proxy. Unproxy sends the initial token with CONNECT; the token itself is never displayed.</small><ul id="negotiation-details"><li>Loading…</li></ul></article>
   </section>
   <nav aria-label="Proxy resources">
     <a href="/access.html">Live access log</a>
@@ -1365,12 +1376,22 @@ fn status_html() -> String {
         document.querySelector('#auth').textContent = auth === 'authenticated' ? 'Authenticated'
           : auth === 'rejected' ? 'Rejected by upstream'
           : status.authentication_configured ? 'Configured, not verified' : 'Not configured';
+        const details = document.querySelector('#negotiation-details');
+        details.replaceChildren();
+        const addDetail = text => { const item = document.createElement('li'); item.textContent = text; details.append(item); };
+        addDetail(status.upstream_route ? 'Route: ' + status.upstream_route : 'No upstream route tried yet');
+        addDetail(status.authentication_sent ? 'Authorization token sent' : 'No authorization token sent');
+        addDetail(auth === 'rejected' ? 'Upstream rejected authentication (HTTP 407)' :
+          auth === 'authenticated' ? 'Upstream accepted the authenticated request' :
+          status.authentication_configured ? 'Authentication is configured; acceptance is not confirmed' :
+          'Authentication is disabled');
       } catch (_) {
         document.querySelector('#pac').textContent = 'Unavailable';
         document.querySelector('#pac-files').replaceChildren();
         document.querySelector('#upstream').textContent = 'Status unavailable';
         document.querySelector('#checked').textContent = 'Could not read status.json';
         document.querySelector('#auth').textContent = 'Unavailable';
+        document.querySelector('#negotiation-details').replaceChildren();
       }
     }
     refreshStatus();

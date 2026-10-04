@@ -103,6 +103,43 @@ async fn access_page_renders_untrusted_event_text_as_text() {
 }
 
 #[tokio::test]
+async fn status_page_explains_upstream_authentication_negotiation() {
+    let proxy = start(Policy::new(None).unwrap()).await;
+    let addr = proxy.local_addrs()[0];
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(
+            format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    assert!(
+        response.contains("Authentication negotiation"),
+        "{response}"
+    );
+    assert!(response.contains("Authorization token sent"), "{response}");
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(
+            format!("GET /status.json HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    let body = response.split_once("\r\n\r\n").unwrap().1;
+    let status: serde_json::Value = serde_json::from_str(body).unwrap();
+    assert_eq!(status["upstream_route"], serde_json::Value::Null);
+    assert_eq!(status["authentication_sent"], false);
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
 async fn local_errors_and_self_loop_are_rejected() {
     let proxy = start(Policy::new(None).unwrap()).await;
     let addr = proxy.local_addrs()[0];
