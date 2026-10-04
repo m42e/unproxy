@@ -84,13 +84,14 @@ local file or **Add PAC URL…** for an HTTP(S) PAC URL. Each source row has an
 **Open** button for local files, which launches the default app, or a **View**
 button for remote URLs, which displays the downloaded text. Use each row's
 **Remove** and **Up**/**Down** buttons to edit the ordered list. On macOS,
-choose **Settings…** from the Unproxy menu bar
-menu to see listeners and PAC files together. Select a row and use **+** or **−**
-to add or remove entries; the arrows change their order. PAC file **+** opens a
-file chooser, and listener **+** adds a row you can edit in place. Double-click
-an existing row to change its value. Valid changes, including connection
-behavior checkboxes, are saved and applied immediately. Add a listener for each
-numeric IP address and port; write IPv6 addresses in brackets, such as
+choose **Settings…** from the Unproxy menu bar menu to see listeners and PAC
+sources together. Select a PAC row and click **Open / View**: local files open
+in their default app, and remote URLs display their downloaded text. PAC file
+**+** opens a local file chooser; **Add URL…** adds a remote HTTP(S) source.
+Listener **+** adds a row you can edit in place. Double-click an existing row
+to change its value. Valid changes, including connection behavior checkboxes,
+are saved and applied immediately. Add a listener for each numeric IP address
+and port; write IPv6 addresses in brackets, such as
 `[::1]:3128`. Both desktop apps start with IPv4 and IPv6 loopback listeners on
 port 3128.
 **Copy Proxy Address** copies the first listener. On Linux, create

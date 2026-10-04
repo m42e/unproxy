@@ -140,6 +140,35 @@ fn child_start_rejects_relative_and_missing_pac_paths_before_launching() {
     assert!(!child.is_running());
 }
 
+#[cfg(unix)]
+#[test]
+fn child_start_accepts_remote_pac_urls_without_treating_them_as_paths() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let program = temp.path().join("child-fixture.sh");
+    std::fs::write(&program, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&program, permissions).unwrap();
+
+    let prefs = Preferences {
+        pac_file: "HTTPS://proxy.example.org/company.pac".into(),
+        ..Preferences::default()
+    };
+    assert!(
+        prefs
+            .child_args()
+            .windows(2)
+            .any(|args| { args == ["--pac-file", "https://proxy.example.org/company.pac"] })
+    );
+
+    let mut child = ChildLifecycle::with_support_dir(temp.path().to_owned());
+    child.start(&program, &prefs).unwrap();
+    assert!(child.is_running());
+    child.stop().unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn native_objc_bindings_validate_without_launching_or_mutating_settings() {

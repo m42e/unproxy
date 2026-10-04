@@ -114,6 +114,44 @@ pub fn support_dir() -> PathBuf {
 pub fn default_pac_path() -> PathBuf {
     support_dir().join("proxy.pac")
 }
+
+fn parse_remote_pac_uri(source: &str) -> Result<Option<http::Uri>> {
+    let source = source.trim();
+    let Some((scheme, remainder)) = source.split_once("://") else {
+        return Ok(None);
+    };
+    let scheme = if scheme.eq_ignore_ascii_case("http") {
+        "http"
+    } else if scheme.eq_ignore_ascii_case("https") {
+        "https"
+    } else {
+        return Ok(None);
+    };
+    let normalized = format!("{scheme}://{remainder}");
+    let uri = normalized
+        .parse::<http::Uri>()
+        .with_context(|| format!("invalid PAC URL {source:?}"))?;
+    anyhow::ensure!(uri.host().is_some(), "PAC URL must include a host");
+    anyhow::ensure!(
+        !uri.authority()
+            .is_some_and(|authority| authority.as_str().contains('@')),
+        "PAC URL must not include embedded credentials"
+    );
+    Ok(Some(uri))
+}
+
+fn resolve_pac_source(path: PathBuf) -> Result<PathBuf> {
+    let source = path.to_string_lossy();
+    if let Some(uri) = parse_remote_pac_uri(&source)? {
+        return Ok(PathBuf::from(uri.to_string()));
+    }
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BundlePaths {
     pub child: PathBuf,
@@ -182,7 +220,13 @@ impl Preferences {
         a.extend(["--graceful-shutdown-timeout".into(), "0".into()]);
         for pac_file in self.effective_pac_files() {
             a.push("--pac-file".into());
-            a.push(pac_file.to_string_lossy().into_owned());
+            let value = pac_file.to_string_lossy();
+            let source = parse_remote_pac_uri(&value)
+                .ok()
+                .flatten()
+                .map(|uri| uri.to_string())
+                .unwrap_or_else(|| value.into_owned());
+            a.push(source);
         }
         if self.proxytunnel {
             a.push("--proxytunnel".into())
@@ -312,6 +356,10 @@ impl ChildLifecycle {
             return Ok(());
         }
         for pac_file in prefs.effective_pac_files() {
+            let source = pac_file.to_string_lossy();
+            if parse_remote_pac_uri(&source)?.is_some() {
+                continue;
+            }
             anyhow::ensure!(pac_file.is_absolute(), "PAC path must be absolute");
             anyhow::ensure!(
                 pac_file.is_file(),
@@ -1503,6 +1551,111 @@ mod native {
         let path: *mut AnyObject = unsafe { msg_send![url, path] };
         cocoa_text(path)
     }
+    fn add_remote_pac_file() -> Result<()> {
+        let Some(value) = prompt("HTTP or HTTPS PAC URL", "https://") else {
+            return Ok(());
+        };
+        let uri = parse_remote_pac_uri(&value)?.context("enter a valid HTTP or HTTPS PAC URL")?;
+        let mut values = EDITOR_PAC_FILES.lock().unwrap();
+        values.push(uri.to_string());
+        let index = values.len() - 1;
+        drop(values);
+
+        let table = *PAC_FILE_TABLE.lock().unwrap() as *mut AnyObject;
+        if !table.is_null() {
+            let _: () = unsafe { msg_send![table, reloadData] };
+            let _: () = unsafe {
+                msg_send![table, selectRowIndexes:index_set(index), byExtendingSelection:objc2::runtime::Bool::NO]
+            };
+            let _: () = unsafe { msg_send![table, scrollRowToVisible:index as isize] };
+        }
+        commit_editor_preferences()
+    }
+    fn show_pac_content(target: *mut AnyObject, source: &str, content: &str) -> Result<()> {
+        let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSWindow), alloc] };
+        let window: *mut AnyObject = unsafe {
+            msg_send![allocated, initWithContentRect:rect(0.0, 0.0, 900.0, 640.0), styleMask:15isize, backing:2isize, defer:objc2::runtime::Bool::NO]
+        };
+        anyhow::ensure!(!window.is_null(), "could not create the PAC viewer");
+        let _: () = unsafe { msg_send![window, setReleasedWhenClosed:objc2::runtime::Bool::NO] };
+        let _: () = unsafe { msg_send![window, setDelegate:target] };
+        let _: () =
+            unsafe { msg_send![window, setTitle:cocoa_string(&format!("PAC · {source}"))] };
+        let _: () = unsafe { msg_send![window, center] };
+
+        let view: *mut AnyObject = unsafe { msg_send![window, contentView] };
+        let scroll_allocated: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSScrollView), alloc] };
+        let scroll: *mut AnyObject =
+            unsafe { msg_send![scroll_allocated, initWithFrame:rect(18.0, 55.0, 864.0, 565.0)] };
+        let _: () = unsafe { msg_send![scroll, setBorderType:2isize] };
+        let _: () = unsafe { msg_send![scroll, setHasVerticalScroller:objc2::runtime::Bool::YES] };
+        let _: () =
+            unsafe { msg_send![scroll, setHasHorizontalScroller:objc2::runtime::Bool::YES] };
+
+        let text_allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSTextView), alloc] };
+        let text: *mut AnyObject =
+            unsafe { msg_send![text_allocated, initWithFrame:rect(0.0, 0.0, 860.0, 560.0)] };
+        let _: () = unsafe { msg_send![text, setEditable:objc2::runtime::Bool::NO] };
+        let _: () = unsafe { msg_send![text, setSelectable:objc2::runtime::Bool::YES] };
+        let _: () = unsafe { msg_send![text, setRichText:objc2::runtime::Bool::NO] };
+        let _: () = unsafe { msg_send![text, setString:cocoa_string(content)] };
+        let font: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSFont), userFixedPitchFontOfSize:12.0f64] };
+        let _: () = unsafe { msg_send![text, setFont:font] };
+        let _: () = unsafe { msg_send![text, setHorizontallyResizable:objc2::runtime::Bool::YES] };
+        let _: () = unsafe { msg_send![text, setVerticallyResizable:objc2::runtime::Bool::YES] };
+        let _: () = unsafe { msg_send![text, setAutoresizingMask:18usize] };
+        let container: *mut AnyObject = unsafe { msg_send![text, textContainer] };
+        let _: () = unsafe {
+            msg_send![container, setContainerSize:Size { width: 100_000.0, height: 100_000.0 }]
+        };
+        let _: () =
+            unsafe { msg_send![container, setWidthTracksTextView:objc2::runtime::Bool::NO] };
+        let _: () = unsafe { msg_send![scroll, setDocumentView:text] };
+        let _: () = unsafe { msg_send![view, addSubview:scroll] };
+        settings_button(
+            view,
+            target,
+            "Close",
+            "Close PAC viewer",
+            1001,
+            rect(790.0, 14.0, 92.0, 30.0),
+            Some("\r"),
+        );
+
+        let app: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSApplication), sharedApplication] };
+        let _: () = unsafe { msg_send![window, makeKeyAndOrderFront:ptr::null_mut::<AnyObject>()] };
+        let _: isize = unsafe { msg_send![app, runModalForWindow:window] };
+        let _: () = unsafe { msg_send![window, orderOut:ptr::null_mut::<AnyObject>()] };
+        Ok(())
+    }
+    fn open_selected_pac(target: *mut AnyObject) -> Result<()> {
+        let table = *PAC_FILE_TABLE.lock().unwrap() as *mut AnyObject;
+        anyhow::ensure!(!table.is_null(), "PAC file table is unavailable");
+        let row: isize = unsafe { msg_send![table, selectedRow] };
+        anyhow::ensure!(row >= 0, "select a PAC source first");
+        let value = EDITOR_PAC_FILES
+            .lock()
+            .unwrap()
+            .get(row as usize)
+            .cloned()
+            .context("selected PAC source is unavailable")?;
+        if let Some(uri) = parse_remote_pac_uri(&value)? {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("start PAC download runtime")?;
+            let content = runtime.block_on(crate::net::fetch_remote_pac(&uri.to_string()))?;
+            show_pac_content(target, &uri.to_string(), &content)
+        } else {
+            let path = PathBuf::from(value);
+            anyhow::ensure!(path.is_absolute(), "PAC path must be absolute");
+            anyhow::ensure!(path.is_file(), "PAC file is missing: {}", path.display());
+            open_path(&path)
+        }
+    }
     unsafe extern "C-unwind" fn list_row_count(
         _this: *mut AnyObject,
         _cmd: Sel,
@@ -1615,15 +1768,27 @@ mod native {
         Ok(new_selection)
     }
     unsafe extern "C-unwind" fn list_editor_action(
-        _this: *mut AnyObject,
+        this: *mut AnyObject,
         _cmd: Sel,
         sender: *mut AnyObject,
     ) {
         let action: isize = unsafe { msg_send![sender, tag] };
-        if action == 1000 {
+        if action == 1000 || action == 1001 {
             let app: *mut AnyObject =
                 unsafe { msg_send![objc2::class!(NSApplication), sharedApplication] };
-            let _: () = unsafe { msg_send![app, stopModalWithCode:1000isize] };
+            let _: () = unsafe { msg_send![app, stopModalWithCode:action] };
+            return;
+        }
+        if action == 1206 {
+            if let Err(error) = open_selected_pac(this) {
+                show_message("Could not open PAC source", &format!("{error:#}"));
+            }
+            return;
+        }
+        if action == 1207 {
+            if let Err(error) = add_remote_pac_file() {
+                show_message("Could not add PAC URL", &format!("{error:#}"));
+            }
             return;
         }
         if (3001..=3003).contains(&action) {
@@ -1777,20 +1942,25 @@ mod native {
         let mut pac_files = Vec::with_capacity(pac_values.len());
         let mut unique_pac_files = std::collections::HashSet::new();
         for value in pac_values {
-            let path = PathBuf::from(value);
-            anyhow::ensure!(
-                path.is_absolute(),
-                "PAC path must be absolute: {}",
-                path.display()
-            );
-            anyhow::ensure!(path.is_file(), "PAC file is missing: {}", path.display());
+            let path = if let Some(uri) = parse_remote_pac_uri(&value)? {
+                PathBuf::from(uri.to_string())
+            } else {
+                let path = PathBuf::from(value.trim());
+                anyhow::ensure!(
+                    path.is_absolute(),
+                    "PAC path must be absolute: {}",
+                    path.display()
+                );
+                anyhow::ensure!(path.is_file(), "PAC file is missing: {}", path.display());
+                std::fs::File::open(&path)
+                    .with_context(|| format!("could not read PAC file {}", path.display()))?;
+                path
+            };
             anyhow::ensure!(
                 unique_pac_files.insert(path.clone()),
-                "PAC file is listed more than once: {}",
+                "PAC source is listed more than once: {}",
                 path.display()
             );
-            std::fs::File::open(&path)
-                .with_context(|| format!("could not read PAC file {}", path.display()))?;
             pac_files.push(path);
         }
 
@@ -1915,7 +2085,7 @@ mod native {
         settings_label(content, "PAC files", 490.0, 570.0, 446.0, 24.0, true);
         settings_label(
             content,
-            "Evaluated top to bottom; the first non-DIRECT result wins.",
+            "Files or URLs; first non-DIRECT result wins, top to bottom.",
             490.0,
             542.0,
             446.0,
@@ -1928,6 +2098,24 @@ mod native {
         *PAC_FILE_TABLE.lock().unwrap() = pac_table as usize;
         settings_toolbar(content, target, 1100, 24.0);
         settings_toolbar(content, target, 1200, 490.0);
+        settings_button(
+            content,
+            target,
+            "Add URL…",
+            "Add a remote HTTP or HTTPS PAC URL",
+            1207,
+            rect(620.0, 168.0, 100.0, 26.0),
+            None,
+        );
+        settings_button(
+            content,
+            target,
+            "Open / View",
+            "Open the selected local PAC file or view a remote PAC URL",
+            1206,
+            rect(728.0, 168.0, 128.0, 26.0),
+            None,
+        );
 
         settings_label(
             content,
@@ -2080,9 +2268,7 @@ mod native {
                 );
             }
         }
-        if !p.pac_file.is_absolute() {
-            p.pac_file = std::env::current_dir()?.join(&p.pac_file);
-        }
+        p.pac_file = resolve_pac_source(p.pac_file)?;
         let pac_files = get("pacFiles");
         if !pac_files.is_null() {
             let count: usize = unsafe { msg_send![pac_files, count] };
@@ -2091,15 +2277,12 @@ mod native {
                 let item: *mut AnyObject = unsafe { msg_send![pac_files, objectAtIndex:index] };
                 let bytes: *const std::ffi::c_char = unsafe { msg_send![item, UTF8String] };
                 if !bytes.is_null() {
-                    let mut path = PathBuf::from(
+                    let path = PathBuf::from(
                         unsafe { std::ffi::CStr::from_ptr(bytes) }
                             .to_string_lossy()
                             .into_owned(),
                     );
-                    if !path.is_absolute() {
-                        path = std::env::current_dir()?.join(path);
-                    }
-                    values.push(path);
+                    values.push(resolve_pac_source(path)?);
                 }
             }
             if let Some(first) = values.first() {
@@ -2785,10 +2968,26 @@ mod native {
         support_dir: &Path,
         pac_file: &Path,
     ) -> Result<()> {
-        settings_window_with(prefs, |_window, target| {
+        settings_window_with(prefs, |window, target| {
             let listener_table = *LISTENER_TABLE.lock().unwrap() as *mut AnyObject;
             let pac_table = *PAC_FILE_TABLE.lock().unwrap() as *mut AnyObject;
             anyhow::ensure!(!listener_table.is_null() && !pac_table.is_null());
+            let content: *mut AnyObject = unsafe { msg_send![window, contentView] };
+            let subviews: *mut AnyObject = unsafe { msg_send![content, subviews] };
+            let subview_count: usize = unsafe { msg_send![subviews, count] };
+            let mut has_open_view = false;
+            let mut has_add_url = false;
+            for index in 0..subview_count {
+                let subview: *mut AnyObject = unsafe { msg_send![subviews, objectAtIndex:index] };
+                let tag: isize = unsafe { msg_send![subview, tag] };
+                has_open_view |= tag == 1206;
+                has_add_url |= tag == 1207;
+            }
+            anyhow::ensure!(
+                has_open_view,
+                "settings window has no Open / View PAC button"
+            );
+            anyhow::ensure!(has_add_url, "settings window has no Add URL button");
             let original_listeners = prefs.effective_listeners();
 
             let listener_rows: isize =
@@ -3071,8 +3270,27 @@ mod native {
                     .to_string()
                     .contains("more than once")
             );
-            *EDITOR_PAC_FILES.lock().unwrap() = vec![valid_pac];
+            *EDITOR_PAC_FILES.lock().unwrap() = vec![valid_pac.clone()];
             anyhow::ensure!(validated_editor_preferences().is_ok());
+            *EDITOR_PAC_FILES.lock().unwrap() =
+                vec!["HTTPS://proxy.example.org/company.pac".into()];
+            let remote_prefs = validated_editor_preferences()?;
+            anyhow::ensure!(
+                remote_prefs.effective_pac_files()[0]
+                    == Path::new("https://proxy.example.org/company.pac"),
+                "settings editor did not preserve the remote PAC URL"
+            );
+            *EDITOR_PAC_FILES.lock().unwrap() = vec![
+                "https://proxy.example.org/company.pac".into(),
+                "HTTPS://proxy.example.org/company.pac".into(),
+            ];
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("more than once")
+            );
+            *EDITOR_PAC_FILES.lock().unwrap() = vec![valid_pac];
             *EDITOR_PREFS.lock().unwrap() = None;
             anyhow::ensure!(
                 validated_editor_preferences()
@@ -3281,6 +3499,26 @@ pub fn launch_helper_main_app() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_pac_uris_are_validated_and_scheme_is_normalized() {
+        let uri = parse_remote_pac_uri("HTTPS://proxy.example.org/company.pac?team=a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            uri.to_string(),
+            "https://proxy.example.org/company.pac?team=a"
+        );
+        assert!(
+            parse_remote_pac_uri("https://user:password@proxy.example.org/policy.pac").is_err()
+        );
+        assert!(parse_remote_pac_uri("https:///policy.pac").is_err());
+        assert!(parse_remote_pac_uri("/tmp/company.pac").unwrap().is_none());
+        assert_eq!(
+            resolve_pac_source(PathBuf::from("HTTPS://proxy.example.org/company.pac")).unwrap(),
+            PathBuf::from("https://proxy.example.org/company.pac")
+        );
+    }
 
     #[cfg(unix)]
     fn executable(dir: &Path, name: &str, body: &str) -> PathBuf {
