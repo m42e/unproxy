@@ -145,6 +145,17 @@ fn activation_descriptors(
 
 /// Run the current platform's service control command.
 pub fn service_control(command: &str, registration: bool) -> Result<()> {
+    let commands = if registration {
+        ["install", "uninstall", "status"].as_slice()
+    } else {
+        ["status", "start", "restart", "stop", "enable", "disable"].as_slice()
+    };
+    anyhow::ensure!(
+        commands.contains(&command),
+        "unknown command {command:?}; expected {}",
+        commands.join(", ")
+    );
+
     #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         let _ = (command, registration);
@@ -549,6 +560,9 @@ mod tests {
     #[cfg(all(not(target_os = "macos"), not(windows)))]
     #[test]
     fn service_control_reports_unsupported_platform() {
+        let invalid = service_control("bogus", false).unwrap_err();
+        assert!(invalid.to_string().contains("unknown command"));
+
         let error = service_control("status", false).unwrap_err();
         assert!(error.to_string().contains("unsupported on this platform"));
     }
