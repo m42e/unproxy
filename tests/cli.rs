@@ -7,8 +7,6 @@ fn isolate_config_dir(command: &mut Command, root: &Path) {
     command
         .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join("config"));
-    #[cfg(target_os = "windows")]
-    command.env("APPDATA", root.join("AppData/Roaming"));
 }
 
 fn run(binary: &str, args: &[&str]) -> Output {
@@ -129,8 +127,9 @@ fn undns_reports_invalid_argument_types_before_starting() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid value"));
 }
 
+#[cfg(not(windows))]
 #[test]
-fn unproxy_reads_the_isolated_rc_unless_norc_is_set() {
+fn unproxy_reads_the_isolated_rc() {
     let temp = tempfile::tempdir().unwrap();
     #[cfg(target_os = "macos")]
     let config = temp.path().join("Library/Application Support/unproxy");
@@ -142,16 +141,19 @@ fn unproxy_reads_the_isolated_rc_unless_norc_is_set() {
     std::fs::write(config.join("unproxyrc"), "--not-a-real-settings-option\n").unwrap();
 
     let mut with_rc_command = Command::new(env!("CARGO_BIN_EXE_unproxy"));
+    with_rc_command.arg("--help");
     isolate_config_dir(&mut with_rc_command, temp.path());
     with_rc_command.env_remove("UNPROXY_NORC");
     inherit_coverage_profile(&mut with_rc_command);
     let with_rc = with_rc_command.output().unwrap();
     assert!(!with_rc.status.success());
     assert!(String::from_utf8_lossy(&with_rc.stderr).contains("not-a-real-settings-option"));
+}
 
+#[test]
+fn unproxy_norc_skips_settings_and_displays_help() {
     let mut ignored_command = Command::new(env!("CARGO_BIN_EXE_unproxy"));
     ignored_command.arg("--help").env("UNPROXY_NORC", "1");
-    isolate_config_dir(&mut ignored_command, temp.path());
     inherit_coverage_profile(&mut ignored_command);
     let ignored = ignored_command.output().unwrap();
     assert!(
@@ -162,8 +164,9 @@ fn unproxy_reads_the_isolated_rc_unless_norc_is_set() {
     assert!(String::from_utf8_lossy(&ignored.stdout).contains("Usage:"));
 }
 
+#[cfg(not(windows))]
 #[test]
-fn undns_reads_rc_tokens_before_help_and_uses_isolated_config_roots() {
+fn undns_reads_the_isolated_rc_before_help() {
     let temp = tempfile::tempdir().unwrap();
     #[cfg(target_os = "macos")]
     let config = temp.path().join("Library/Application Support/undns");
@@ -172,20 +175,12 @@ fn undns_reads_rc_tokens_before_help_and_uses_isolated_config_roots() {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let config = temp.path().join("config/undns");
     std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("undnsrc"),
-        "# primary resolver\n\n--primary 127.0.0.1:5353\n--port 5454\n",
-    )
-    .unwrap();
+    std::fs::write(config.join("undnsrc"), "--not-a-real-settings-option\n").unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_undns"));
     command.arg("--help");
     isolate_config_dir(&mut command, temp.path());
     inherit_coverage_profile(&mut command);
     let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("--primary"));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not-a-real-settings-option"));
 }

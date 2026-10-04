@@ -227,9 +227,18 @@ impl MainArgs {
     }
 }
 fn merged_args(args: Vec<std::ffi::OsString>, read_settings: bool) -> Vec<std::ffi::OsString> {
+    let settings = if read_settings { settings_path() } else { None };
+    merged_args_with_settings(args, read_settings, settings)
+}
+
+fn merged_args_with_settings(
+    args: Vec<std::ffi::OsString>,
+    read_settings: bool,
+    settings: Option<PathBuf>,
+) -> Vec<std::ffi::OsString> {
     let program = args.first().cloned().unwrap_or_else(|| "unproxy".into());
     let mut all = vec![program];
-    if read_settings && let Some(p) = settings_path() {
+    if read_settings && let Some(p) = settings {
         all.extend(token_file(&p).into_iter().map(Into::into));
     }
     all.extend(args.into_iter().skip(1));
@@ -399,6 +408,28 @@ mod tests {
             let result = MainArgs::try_parse_from(["x", "--exchange-timeout", value]);
             assert!(result.is_err(), "value {value} should be rejected");
         }
+    }
+
+    #[test]
+    fn merged_args_read_or_skip_an_injected_settings_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("unproxyrc");
+        fs::write(&settings, "--not-a-real-settings-option\n").unwrap();
+        let args = vec!["unproxy".into(), "--help".into()];
+
+        let error = MainArgs::try_parse_from(merged_args_with_settings(
+            args.clone(),
+            true,
+            Some(settings.clone()),
+        ))
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(error.to_string().contains("not-a-real-settings-option"));
+
+        let error =
+            MainArgs::try_parse_from(merged_args_with_settings(args, false, Some(settings)))
+                .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
     }
 
     #[test]
