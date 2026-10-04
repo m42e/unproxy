@@ -44,4 +44,9 @@ that dispatcher instead. The hook runs `cargo xtask check`, which checks
 formatting, runs Clippy with warnings denied, and runs the test suites with all
 features and with default features disabled.
 
+
+## Inspiration
+
+Inspired by [proxydetox](https://github.com/kiron1/proxydetox).
+
 MIT license. Release packages are assembled in CI from tagged versions.
