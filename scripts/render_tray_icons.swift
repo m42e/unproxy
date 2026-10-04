@@ -76,14 +76,15 @@ for states in combinations(palettes.map { Array($0.1.keys).sorted() }) {
     NSColor(hex: 0x55E1C1).setFill()
     NSBezierPath(ovalIn: NSRect(x: 15.8, y: 9.8, width: 6.4, height: 6.4)).fill()
 
-    let centers: [CGFloat] = [12, 25.3, 38.7, 52]
+    let centers: [CGFloat] = [9.5, 24.5, 39.5, 54.5]
+    let statusY: CGFloat = 51.5
     for (index, center) in centers.enumerated() {
         NSColor(hex: 0xEAF4FF).setStroke()
-        let badge = NSBezierPath(ovalIn: NSRect(x: center - 5.4, y: 47.6, width: 10.8, height: 10.8))
-        badge.lineWidth = 1.2
+        let badge = NSBezierPath(ovalIn: NSRect(x: center - 6.4, y: statusY - 6.4, width: 12.8, height: 12.8))
+        badge.lineWidth = 1.4
         badge.stroke()
         palettes[index].1[states[index]]!.setFill()
-        NSBezierPath(ovalIn: NSRect(x: center - 4.6, y: 48.4, width: 9.2, height: 9.2)).fill()
+        NSBezierPath(ovalIn: NSRect(x: center - 5.7, y: statusY - 5.7, width: 11.4, height: 11.4)).fill()
     }
 
     NSGraphicsContext.restoreGraphicsState()
