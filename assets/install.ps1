@@ -114,7 +114,16 @@ if (Test-Path $prefsFile) {
     }
 }
 if (-not $preferences.pacFile) { $preferences.pacFile = Join-Path $root 'proxy.pac' }
-if (-not [IO.Path]::IsPathRooted([string]$preferences.pacFile)) {
+$pacUri = $null
+$isRemotePac = [Uri]::TryCreate(
+    [string]$preferences.pacFile, [UriKind]::Absolute, [ref]$pacUri) -and
+    ($pacUri.Scheme -eq [Uri]::UriSchemeHttp -or $pacUri.Scheme -eq [Uri]::UriSchemeHttps) -and
+    -not [string]::IsNullOrWhiteSpace($pacUri.Host) -and
+    [string]::IsNullOrEmpty($pacUri.UserInfo) -and
+    [string]::IsNullOrEmpty($pacUri.Fragment)
+if ($isRemotePac) {
+    $preferences.pacFile = $pacUri.AbsoluteUri
+} elseif (-not [IO.Path]::IsPathRooted([string]$preferences.pacFile)) {
     $preferences.pacFile = [IO.Path]::GetFullPath((Join-Path $root ([string]$preferences.pacFile)))
 }
 if ($DisableLoginStartup) { $preferences.autostart = $false }
