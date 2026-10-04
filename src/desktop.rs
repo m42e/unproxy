@@ -1485,12 +1485,12 @@ mod native {
             unsafe { msg_send![allocated, initWithFrame:rect(x, 82.0, width, 24.0)] };
         let _: () = unsafe { msg_send![button, setButtonType:3isize] };
         let _: () = unsafe { msg_send![button, setTitle:cocoa_string(title)] };
-        let _: () = unsafe { msg_send![button, setToolTip:cocoa_string(tooltip)] };
         let _: () = unsafe { msg_send![button, setState:if enabled {1isize}else{0isize}] };
         let _: () = unsafe { msg_send![button, setTag:tag] };
         let _: () = unsafe { msg_send![button, setTarget:target] };
         let _: () = unsafe { msg_send![button, setAction:sel!(listEditorAction:)] };
         let _: () = unsafe { msg_send![parent, addSubview:button] };
+        let _: () = unsafe { msg_send![button, setToolTip:cocoa_string(tooltip)] };
         button
     }
     fn settings_list_table(
@@ -2197,6 +2197,15 @@ mod native {
             24.0,
             250.0,
         );
+        settings_label(
+            content,
+            "Tunnel every proxied HTTP request through CONNECT.",
+            24.0,
+            42.0,
+            250.0,
+            36.0,
+            false,
+        );
         settings_checkbox(
             content,
             target,
@@ -2208,6 +2217,15 @@ mod native {
             3002,
             300.0,
             210.0,
+        );
+        settings_label(
+            content,
+            "Try a direct connection if all PAC routes fail.",
+            300.0,
+            42.0,
+            220.0,
+            36.0,
+            false,
         );
         #[cfg(feature = "negotiate")]
         settings_checkbox(
@@ -2221,6 +2239,16 @@ mod native {
             3003,
             540.0,
             170.0,
+        );
+        #[cfg(feature = "negotiate")]
+        settings_label(
+            content,
+            "Authenticate to the proxy with your system credentials.",
+            540.0,
+            42.0,
+            280.0,
+            36.0,
+            false,
         );
         settings_button(
             content,
