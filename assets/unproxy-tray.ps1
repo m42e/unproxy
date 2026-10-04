@@ -744,6 +744,8 @@ function Show-Settings {
     $tunnel.Checked = [bool]$script:p.proxytunnel
     [void]$form.Controls.Add($tunnel)
     $settingsToolTip = [Windows.Forms.ToolTip]::new()
+    # Keep the component alive for as long as the settings form is open.
+    $form.Tag = $settingsToolTip
     $settingsToolTip.SetToolTip($tunnel, 'Tunnel proxied HTTP requests with CONNECT, even when the request does not use CONNECT.')
 
     $direct = [Windows.Forms.CheckBox]::new()
