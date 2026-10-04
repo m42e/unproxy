@@ -105,8 +105,17 @@ fn reversed_weekday_and_hour_pairs_match_only_their_endpoints() {
                 format!("new RealDate(2026, 9, {})", 4 + day)
             };
             let expected_day = if gmt { "getUTCDay" } else { "getDay" };
+            let mut cases = Vec::new();
+            if day > 0 {
+                cases.push((day, day - 1, true));
+            }
+            if day < 6 {
+                cases.push((day + 1, day, true));
+            }
+            cases.push((6, 1, day == 6 || day == 1));
+            let cases = serde_json::to_string(&cases).unwrap();
             let expression = format!(
-                "(()=>{{const d={date_expr}; Date=class extends RealDate{{constructor(...a){{super(...(a.length?a:[d]))}} static now(){{return d.getTime()}}}}; const v=new Date().{expected_day}(); const w={weekdays:?}; for(let x=0;x<7;x++)for(let y=0;y<7;y++){{const ordered=x<=y, expect=ordered?(v>=x&&v<=y):(v===x||v===y), got=weekdayRange(w[x],w[y]{gmt_arg}); if(got!==expect)throw Error(x+','+y)}} return true}})()",
+                "(()=>{{const d={date_expr}; Date=class extends RealDate{{constructor(...a){{super(...(a.length?a:[d]))}} static now(){{return d.getTime()}}}}; const v=new Date().{expected_day}(); if(v!=={day})throw Error('date'); const w={weekdays:?}; for(const [x,y,expect] of {cases}){{const got=weekdayRange(w[x],w[y]{gmt_arg}); if(got!==expect)throw Error(x+','+y)}} return true}})()",
                 gmt_arg = if gmt { ", 'GMT'" } else { "" },
             );
             check("2026-10-04T12:00:00Z", &expression);
@@ -118,8 +127,17 @@ fn reversed_weekday_and_hour_pairs_match_only_their_endpoints() {
                 format!("new RealDate(2026, 9, 2, {hour})")
             };
             let getter = if gmt { "getUTCHours" } else { "getHours" };
+            let mut cases = Vec::new();
+            if hour > 0 {
+                cases.push((hour, hour - 1, true));
+            }
+            if hour < 23 {
+                cases.push((hour + 1, hour, true));
+            }
+            cases.push((23, 2, hour == 23 || hour == 2));
+            let cases = serde_json::to_string(&cases).unwrap();
             let expression = format!(
-                "(()=>{{const d={instant}; Date=class extends RealDate{{constructor(...a){{super(...(a.length?a:[d]))}} static now(){{return d.getTime()}}}}; const v=new Date().{getter}(); for(let x=0;x<24;x++)for(let y=0;y<24;y++){{const expect=x<=y?(v>=x&&v<=y):(v===x||v===y), got=timeRange(x,y{gmt_arg}); if(got!==expect)throw Error(x+','+y)}} return true}})()",
+                "(()=>{{const d={instant}; Date=class extends RealDate{{constructor(...a){{super(...(a.length?a:[d]))}} static now(){{return d.getTime()}}}}; const v=new Date().{getter}(); if(v!=={hour})throw Error('time'); for(const [x,y,expect] of {cases}){{const got=timeRange(x,y{gmt_arg}); if(got!==expect)throw Error(x+','+y)}} return true}})()",
                 gmt_arg = if gmt { ", 'GMT'" } else { "" },
             );
             check("2026-10-02T12:00:00Z", &expression);

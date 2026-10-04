@@ -2390,7 +2390,14 @@ mod native {
     ) -> Result<()> {
         objc2::rc::autoreleasepool(|_| {
             std::fs::create_dir_all(support_dir)?;
-            let suite = cocoa_string(&format!("de.m42e.unproxy.test.{}", std::process::id()));
+            let invocation = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            let suite = cocoa_string(&format!(
+                "de.m42e.unproxy.test.{}.{}",
+                std::process::id(),
+                invocation
+            ));
             let defaults_class = objc2::class!(NSUserDefaults);
             let allocated: *mut AnyObject = unsafe { msg_send![defaults_class, alloc] };
             let defaults: *mut AnyObject = unsafe { msg_send![allocated, initWithSuiteName:suite] };
