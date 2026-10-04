@@ -79,11 +79,11 @@ for states in combinations(palettes.map { Array($0.1.keys).sorted() }) {
     let centers: [CGFloat] = [12, 25.3, 38.7, 52]
     for (index, center) in centers.enumerated() {
         NSColor(hex: 0xEAF4FF).setStroke()
-        let badge = NSBezierPath(ovalIn: NSRect(x: center - 4.1, y: 48.9, width: 8.2, height: 8.2))
-        badge.lineWidth = 1.6
+        let badge = NSBezierPath(ovalIn: NSRect(x: center - 5.4, y: 47.6, width: 10.8, height: 10.8))
+        badge.lineWidth = 1.2
         badge.stroke()
         palettes[index].1[states[index]]!.setFill()
-        NSBezierPath(ovalIn: NSRect(x: center - 3.2, y: 49.8, width: 6.4, height: 6.4)).fill()
+        NSBezierPath(ovalIn: NSRect(x: center - 4.6, y: 48.4, width: 9.2, height: 9.2)).fill()
     }
 
     NSGraphicsContext.restoreGraphicsState()
