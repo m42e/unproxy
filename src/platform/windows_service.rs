@@ -1151,6 +1151,68 @@ mod tests {
     }
 
     #[test]
+    fn windows_api_adapter_handles_invalid_service_handles_without_mutation() {
+        let api = WindowsServiceApi;
+
+        let manager = api.open_manager(SC_MANAGER_CONNECT);
+        if !manager.is_null() {
+            let name = service_name();
+            let service = api.open_service(manager, name.as_ptr(), SERVICE_QUERY_STATUS);
+            if !service.is_null() {
+                api.close_service_handle(service);
+            }
+            api.close_service_handle(manager);
+        }
+
+        let name = service_name();
+        assert!(
+            api.open_service(ptr::null_mut(), name.as_ptr(), SERVICE_QUERY_STATUS)
+                .is_null()
+        );
+
+        let service = ptr::null_mut();
+        let mut process_status = SERVICE_STATUS_PROCESS::default();
+        let mut required = 0;
+        assert_eq!(
+            api.query_service_status(service, &mut process_status, &mut required),
+            0
+        );
+        assert_eq!(api.start_service(service), 0);
+        let mut status = SERVICE_STATUS::default();
+        assert_eq!(
+            api.control_service(service, SERVICE_CONTROL_STOP, &mut status),
+            0
+        );
+
+        let display = wide(DISPLAY_NAME);
+        let binary = wide(r#""C:\Program Files\Unproxy\unproxy.exe""#);
+        let account = wide("NT AUTHORITY\\NetworkService");
+        assert!(
+            api.create_service(
+                ptr::null_mut(),
+                name.as_ptr(),
+                display.as_ptr(),
+                SERVICE_QUERY_STATUS,
+                binary.as_ptr(),
+                account.as_ptr(),
+            )
+            .is_null()
+        );
+        assert_eq!(
+            api.update_service_config(service, binary.as_ptr(), display.as_ptr()),
+            0
+        );
+        let description_text = wide(SERVICE_DESCRIPTION);
+        let mut description = SERVICE_DESCRIPTIONW {
+            lpDescription: description_text.as_ptr().cast_mut(),
+        };
+        assert_eq!(api.set_description(service, &mut description), 0);
+        assert_eq!(api.change_startup(service, SERVICE_DEMAND_START), 0);
+        assert_eq!(api.delete_service(service), 0);
+        api.close_service_handle(service);
+    }
+
+    #[test]
     fn native_service_entry_points_handle_console_processes_without_mutation() {
         assert!(!dispatch_service().unwrap());
         report_status(SERVICE_RUNNING, 0);

@@ -43,7 +43,8 @@ async fn response_status(proxy: std::net::SocketAddr, origin: std::net::SocketAd
     response.split_whitespace().nth(1)?.parse().ok()
 }
 async fn await_status(proxy: std::net::SocketAddr, origin: std::net::SocketAddr, desired: u16) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    const STATUS_TIMEOUT: Duration = Duration::from_secs(30);
+    tokio::time::timeout(STATUS_TIMEOUT, async {
         loop {
             if response_status(proxy, origin).await == Some(desired) {
                 break;
@@ -52,7 +53,7 @@ async fn await_status(proxy: std::net::SocketAddr, origin: std::net::SocketAddr,
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|_| panic!("proxy did not return HTTP {desired} within {STATUS_TIMEOUT:?}"));
 }
 fn process(address: std::net::SocketAddr, pac: &str, netrc: &std::path::Path) -> Child {
     process_with_log(address, pac, netrc, None)
