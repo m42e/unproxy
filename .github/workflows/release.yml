@@ -18,6 +18,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-26, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -81,12 +82,14 @@ jobs:
 
           $certPath = Join-Path $env:RUNNER_TEMP 'unproxy-signing.pfx'
           [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
-          $pfxPassword = ConvertTo-SecureString $env:WINDOWS_CERT_PASSWORD -AsPlainText -Force
-          $pfxData = Get-PfxData -FilePath $certPath -Password $pfxPassword
-          $signingCertificate = $pfxData.EndEntityCertificates | Select-Object -First 1
-          if (-not $signingCertificate) { throw 'The Windows signing certificate was not found in the PFX.' }
+          $certificateFlags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+          $signingCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $certPath,
+            $env:WINDOWS_CERT_PASSWORD,
+            $certificateFlags
+          )
           $rootCertificatePath = Join-Path $env:RUNNER_TEMP 'unproxy-signing.cer'
-          Export-Certificate -Cert $signingCertificate -FilePath $rootCertificatePath | Out-Null
+          [IO.File]::WriteAllBytes($rootCertificatePath, $signingCertificate.RawData)
           Import-Certificate -FilePath $rootCertificatePath -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
             Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
