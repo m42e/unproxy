@@ -497,7 +497,7 @@ done
     assert_ok(check);
     assert_eq!(
         std::fs::read_to_string(f.capture.join("cargo.calls")).unwrap(),
-        "<fmt>\n<--all>\n<-->\n<--check>\n<clippy>\n<--locked>\n<--all-targets>\n<--all-features>\n<-->\n<-D>\n<warnings>\n<test>\n<--locked>\n<--all-features>\n<test>\n<--locked>\n<--no-default-features>\n"
+        "<fmt>\n<--all>\n<-->\n<--check>\n<clippy>\n<--locked>\n<--all-targets>\n<--all-features>\n<-->\n<-D>\n<warnings>\n<test>\n<--locked>\n<--all-features>\n<--target-dir>\n<target/xtask-tests>\n<test>\n<--locked>\n<--no-default-features>\n<--target-dir>\n<target/xtask-tests>\n"
     );
 
     f.reset_capture();

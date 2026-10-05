@@ -92,8 +92,23 @@ fn run(command: &mut Command) -> Result<()> {
     Ok(())
 }
 fn test() -> Result<()> {
-    run(Command::new("cargo").args(["test", "--locked", "--all-features"]))?;
-    run(Command::new("cargo").args(["test", "--locked", "--no-default-features"]))
+    // Keep test builds separate from the running xtask executable. Windows
+    // cannot replace target/debug/xtask.exe while `cargo xtask` is executing it.
+    let target_dir = "target/xtask-tests";
+    run(Command::new("cargo").args([
+        "test",
+        "--locked",
+        "--all-features",
+        "--target-dir",
+        target_dir,
+    ]))?;
+    run(Command::new("cargo").args([
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--target-dir",
+        target_dir,
+    ]))
 }
 fn run_pkgbuild(command: &mut Command) -> Result<()> {
     let output = command
