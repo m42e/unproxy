@@ -457,6 +457,16 @@ printf 'fixture pkg' > "$out"
             .join(format!("dist/native/.staging-{}", std::process::id()))
             .exists()
     );
+    assert!(
+        !f.capture
+            .join("zip-1/Unproxy.app/Contents/entitlements.plist")
+            .exists()
+    );
+    assert!(
+        !f.capture
+            .join("zip-1/Unproxy.app/Contents/child-entitlements.plist")
+            .exists()
+    );
 }
 
 #[test]

@@ -489,6 +489,59 @@ mod tests {
         assert!(context.wait_timeout(Duration::from_secs(1)).await);
     }
 
+    #[tokio::test]
+    async fn network_address_changes_are_coalesced_before_reloading_pac() {
+        use crate::{net::ConnectionOptions, route::PathOrUri};
+        use futures_util::stream;
+        use std::{net::SocketAddr, sync::Arc};
+
+        let dir = tempfile::tempdir().unwrap();
+        let pac = dir.path().join("proxy.pac");
+        fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+        let policy = Arc::new(crate::pac::Policy::new(None).unwrap());
+        let input = stream::empty::<std::io::Result<(tokio::io::DuplexStream, SocketAddr)>>();
+        let context =
+            crate::proxy::ContextBuilder::new(policy.clone(), ConnectionOptions::default())
+                .pac_source(PathOrUri::Path(pac.clone()))
+                .serve_connections(input)
+                .await
+                .unwrap();
+        let current = crate::platform::default_interface_ipv4();
+        let other = match current {
+            std::net::IpAddr::V4(ip) if ip == std::net::Ipv4Addr::LOCALHOST => {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+            }
+            _ => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        };
+        let mut observed = Some(other);
+        let mut pending = None;
+        let mut state = crate::network_notifications::TransitionState::new();
+
+        poll_network_change(&context, &mut state, &mut observed, &mut pending).await;
+        assert_eq!(observed, Some(current));
+        assert_eq!(pending.map(|(address, _)| address), Some(current));
+
+        pending = Some((
+            current,
+            tokio::time::Instant::now() - Duration::from_secs(2),
+        ));
+        poll_network_change(&context, &mut state, &mut observed, &mut pending).await;
+        assert!(pending.is_none());
+        assert!(policy.is_loaded());
+
+        fs::write(&pac, "function {").unwrap();
+        pending = Some((
+            current,
+            tokio::time::Instant::now() - Duration::from_secs(2),
+        ));
+        poll_network_change(&context, &mut state, &mut observed, &mut pending).await;
+        assert!(pending.is_none());
+        assert!(policy.is_loaded());
+
+        context.shutdown();
+        assert!(context.wait_timeout(Duration::from_secs(1)).await);
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_service_signals_ready_and_drains_on_shutdown() {
