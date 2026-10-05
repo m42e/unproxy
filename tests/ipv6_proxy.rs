@@ -71,9 +71,9 @@ async fn https_proxy_ipv6_endpoint_connects_to_ipv6_authority() {
     };
     let port = listener.local_addr().unwrap().port();
     let acceptor: tokio_native_tls::TlsAcceptor = {
-        let identity = native_tls::Identity::from_pkcs8(
-            include_bytes!("fixtures/localhost.pem"),
-            include_bytes!("fixtures/localhost.key"),
+        let identity = native_tls::Identity::from_pkcs12(
+            include_bytes!("fixtures/localhost.p12"),
+            "unproxy-test",
         )
         .unwrap();
         native_tls::TlsAcceptor::new(identity).unwrap().into()

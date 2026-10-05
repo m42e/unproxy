@@ -79,11 +79,9 @@ fn doh_tls() -> (
 ) {
     let certificate =
         native_tls::Certificate::from_pem(include_bytes!("fixtures/localhost.pem")).unwrap();
-    let identity = native_tls::Identity::from_pkcs8(
-        include_bytes!("fixtures/localhost.pem"),
-        include_bytes!("fixtures/localhost.key"),
-    )
-    .unwrap();
+    let identity =
+        native_tls::Identity::from_pkcs12(include_bytes!("fixtures/localhost.p12"), "unproxy-test")
+            .unwrap();
     let acceptor = native_tls::TlsAcceptor::new(identity).unwrap().into();
     let connector = native_tls::TlsConnector::builder()
         .add_root_certificate(certificate)

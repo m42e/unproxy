@@ -300,11 +300,9 @@ async fn rejects_malformed_and_truncated_http_responses() {
 async fn https_fetch_uses_default_certificate_verification() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let identity = native_tls::Identity::from_pkcs8(
-        include_bytes!("fixtures/localhost.pem"),
-        include_bytes!("fixtures/localhost.key"),
-    )
-    .unwrap();
+    let identity =
+        native_tls::Identity::from_pkcs12(include_bytes!("fixtures/localhost.p12"), "unproxy-test")
+            .unwrap();
     let acceptor: tokio_native_tls::TlsAcceptor =
         native_tls::TlsAcceptor::new(identity).unwrap().into();
     let server = tokio::spawn(async move {

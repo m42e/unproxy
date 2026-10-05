@@ -26,11 +26,9 @@ fn tls_options(auth: AuthFactory) -> ConnectionOptions {
     }
 }
 fn acceptor() -> tokio_native_tls::TlsAcceptor {
-    let identity = native_tls::Identity::from_pkcs8(
-        include_bytes!("fixtures/localhost.pem"),
-        include_bytes!("fixtures/localhost.key"),
-    )
-    .unwrap();
+    let identity =
+        native_tls::Identity::from_pkcs12(include_bytes!("fixtures/localhost.p12"), "unproxy-test")
+            .unwrap();
     native_tls::TlsAcceptor::new(identity).unwrap().into()
 }
 async fn read_head<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> String {
