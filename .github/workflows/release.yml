@@ -81,6 +81,18 @@ jobs:
 
           $certPath = Join-Path $env:RUNNER_TEMP 'unproxy-signing.pfx'
           [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+          $pfxPassword = ConvertTo-SecureString $env:WINDOWS_CERT_PASSWORD -AsPlainText -Force
+          $importedCertificates = @(Import-PfxCertificate `
+            -FilePath $certPath `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -Password $pfxPassword)
+          $signingCertificate = $importedCertificates |
+            Where-Object HasPrivateKey |
+            Select-Object -First 1
+          if (-not $signingCertificate) { throw 'The Windows signing certificate was not found in the PFX.' }
+          $rootCertificatePath = Join-Path $env:RUNNER_TEMP 'unproxy-signing.cer'
+          Export-Certificate -Cert $signingCertificate -FilePath $rootCertificatePath | Out-Null
+          Import-Certificate -FilePath $rootCertificatePath -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
             Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
             Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
@@ -100,6 +112,8 @@ jobs:
           }
           Remove-Item $zip.FullName
           Compress-Archive -Path (Join-Path $unpack '*') -DestinationPath $zip.FullName -CompressionLevel Optimal
+          Remove-Item "Cert:\CurrentUser\Root\$($signingCertificate.Thumbprint)" -ErrorAction SilentlyContinue
+          Remove-Item "Cert:\CurrentUser\My\$($signingCertificate.Thumbprint)" -ErrorAction SilentlyContinue
       - name: Notarize and staple macOS release artifacts
         if: runner.os == 'macOS'
         shell: bash
