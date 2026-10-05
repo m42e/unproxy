@@ -122,6 +122,7 @@ jobs:
             xcrun notarytool submit "$artifact" --wait \
               --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID"
             workdir="$RUNNER_TEMP/staple-app"
+            artifact_path="$(cd "$(dirname "$artifact")" && pwd)/$(basename "$artifact")"
             rm -rf "$workdir"
             mkdir -p "$workdir"
             ditto -x -k "$artifact" "$workdir"
@@ -130,7 +131,7 @@ jobs:
             xcrun stapler staple "$app_path"
             xcrun stapler validate "$app_path"
             rm -f "$artifact"
-            (cd "$workdir" && zip -qry "$artifact" .)
+            (cd "$workdir" && zip -qry "$artifact_path" .)
           done
 
           if [ "$MACOS_INSTALLER_SECRETS_PRESENT" = "true" ]; then
