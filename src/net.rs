@@ -351,15 +351,16 @@ pub async fn connect_observed(
                 proxy_connect(proxy, destination, tunnel, options, timeout, true).await
             }
             Route::Socks4(proxy) | Route::Socks5(proxy) => {
-                let mut stream = tcp(proxy, options, timeout).await?;
-                let authenticated = crate::socks::handshake(
-                    &mut stream,
+                let stream: BoxedIo = Box::new(tcp(proxy, options, timeout).await?);
+                let (stream, authenticated) = crate::socks::handshake(
+                    stream,
                     destination,
+                    &proxy.host,
                     matches!(route, Route::Socks5(_)),
-                    options.auth.socks_credentials(&proxy.host),
+                    &options.auth,
                 )
                 .await?;
-                Ok((Box::new(stream) as BoxedIo, authenticated))
+                Ok((stream, authenticated))
             }
         }
     })

@@ -268,6 +268,22 @@ impl AuthFactory {
             _ => None,
         }
     }
+    pub(crate) fn socks_gss_enabled(&self, host: &str) -> bool {
+        #[cfg(feature = "negotiate")]
+        if let AuthMode::Negotiate(hosts) = &self.mode {
+            return hosts.is_empty() || hosts.iter().any(|allowed| allowed == host);
+        }
+        let _ = host;
+        false
+    }
+    #[cfg(feature = "negotiate")]
+    pub(crate) fn socks_gss_context(&self, host: &str) -> Result<Option<NegotiateContext>> {
+        if self.socks_gss_enabled(host) {
+            Ok(Some(NegotiateContext::new_socks(host)?))
+        } else {
+            Ok(None)
+        }
+    }
     pub async fn authorization(&self, host: &str) -> Result<Option<HeaderValue>> {
         #[cfg(feature = "negotiate")]
         {

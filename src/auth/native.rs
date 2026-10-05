@@ -7,7 +7,13 @@ pub struct NegotiateContext {
     ctx: *mut std::ffi::c_void,
     target: *mut std::ffi::c_void,
     host: String,
+    socks: bool,
+    complete: bool,
 }
+// GSS handles are owned by this context and all access during a SOCKS exchange
+// is serialized by one mutex before operations are moved to the relay task.
+#[cfg(all(feature = "negotiate", unix))]
+unsafe impl Send for NegotiateContext {}
 #[cfg(all(feature = "negotiate", unix))]
 #[repr(C)]
 struct GssBuf {
@@ -48,6 +54,25 @@ type GssInitSecContext = unsafe extern "C" fn(
 #[cfg(all(feature = "negotiate", unix))]
 type GssReleaseBuffer = unsafe extern "C" fn(*mut u32, *mut GssBuf) -> GssStatus;
 #[cfg(all(feature = "negotiate", unix))]
+type GssWrap = unsafe extern "C" fn(
+    *mut u32,
+    *mut std::ffi::c_void,
+    i32,
+    u32,
+    *mut GssBuf,
+    *mut i32,
+    *mut GssBuf,
+) -> GssStatus;
+#[cfg(all(feature = "negotiate", unix))]
+type GssUnwrap = unsafe extern "C" fn(
+    *mut u32,
+    *mut std::ffi::c_void,
+    *mut GssBuf,
+    *mut GssBuf,
+    *mut i32,
+    *mut u32,
+) -> GssStatus;
+#[cfg(all(feature = "negotiate", unix))]
 type GssDeleteContext =
     unsafe extern "C" fn(*mut u32, *mut *mut std::ffi::c_void, *mut GssBuf) -> GssStatus;
 #[cfg(all(feature = "negotiate", unix))]
@@ -56,11 +81,16 @@ type GssReleaseName = unsafe extern "C" fn(*mut u32, *mut *mut std::ffi::c_void)
 #[cfg(all(feature = "negotiate", unix))]
 unsafe fn import_gss_target(
     host: &str,
+    socks: bool,
     import: GssImportName,
     release_name: Option<GssReleaseName>,
     mut display_status: impl FnMut(u32, i32) -> String,
 ) -> Result<*mut std::ffi::c_void> {
-    let target = format!("HTTP@{host}");
+    let target = if socks {
+        format!("SERVICE:socks@{host}")
+    } else {
+        format!("HTTP@{host}")
+    };
     let mut name = GssBuf {
         len: target.len(),
         value: target.as_ptr() as *mut _,
@@ -73,7 +103,18 @@ unsafe fn import_gss_target(
     };
     let mut minor = 0;
     let mut imported = std::ptr::null_mut();
-    let status = unsafe { import(&mut minor, &mut name, &mut name_oid, &mut imported) };
+    let status = unsafe {
+        import(
+            &mut minor,
+            &mut name,
+            if socks {
+                std::ptr::null_mut()
+            } else {
+                &mut name_oid
+            },
+            &mut imported,
+        )
+    };
     if status != 0 {
         let major_text = display_status(status as u32, 1);
         let minor_text = display_status(minor, 2);
@@ -86,7 +127,7 @@ unsafe fn import_gss_target(
             unsafe { release(&mut release_minor, &mut imported) };
         }
         return Err(anyhow!(
-            "GSSAPI name import failed for HTTP@{host}: major={status} ({major_text}), minor={minor} ({minor_text})"
+            "GSSAPI name import failed for {target}: major={status} ({major_text}), minor={minor} ({minor_text})"
         ));
     }
     Ok(imported)
@@ -126,6 +167,12 @@ unsafe fn release_gss_handles(
 #[cfg(all(feature = "negotiate", unix))]
 impl NegotiateContext {
     pub fn new(host: &str) -> Result<Self> {
+        Self::new_for_service(host, false)
+    }
+    pub(crate) fn new_socks(host: &str) -> Result<Self> {
+        Self::new_for_service(host, true)
+    }
+    fn new_for_service(host: &str, socks: bool) -> Result<Self> {
         unsafe {
             let names: [&str; 5] = [
                 "libgssapi_krb5.so.2",
@@ -143,7 +190,7 @@ impl NegotiateContext {
                 .get::<GssReleaseName>(b"gss_release_name\0")
                 .ok()
                 .map(|symbol| *symbol);
-            let target = import_gss_target(host, *import, release_name, |status, kind| {
+            let target = import_gss_target(host, socks, *import, release_name, |status, kind| {
                 gss_status_text(&lib, status, kind)
             })?;
             Ok(Self {
@@ -151,10 +198,18 @@ impl NegotiateContext {
                 ctx: std::ptr::null_mut(),
                 target,
                 host: host.to_owned(),
+                socks,
+                complete: false,
             })
         }
     }
     pub fn step(&mut self, server_token: Option<&[u8]>) -> Result<Option<Vec<u8>>> {
+        self.step_with_status(server_token).map(|(token, _)| token)
+    }
+    pub(crate) fn step_with_status(
+        &mut self,
+        server_token: Option<&[u8]>,
+    ) -> Result<(Option<Vec<u8>>, bool)> {
         unsafe {
             let f: libloading::Symbol<GssInitSecContext> = self
                 .lib
@@ -183,8 +238,12 @@ impl NegotiateContext {
                 std::ptr::null_mut(),
                 &mut self.ctx,
                 self.target,
-                &mut mech,
-                2,
+                if self.socks {
+                    std::ptr::null_mut()
+                } else {
+                    &mut mech
+                },
+                if self.socks { 15 } else { 2 },
                 0,
                 std::ptr::null_mut(),
                 &mut input,
@@ -210,7 +269,100 @@ impl NegotiateContext {
                     gss_status_text(&self.lib, minor, 2)
                 ));
             }
-            Ok(bytes)
+            self.complete = (status as u32 & 0xffff) == 0;
+            Ok((bytes, self.complete))
+        }
+    }
+    pub(crate) fn is_complete(&self) -> bool {
+        self.complete
+    }
+    pub(crate) fn wrap(&mut self, message: &[u8], confidential: bool) -> Result<Vec<u8>> {
+        unsafe {
+            let wrap: libloading::Symbol<GssWrap> = self.lib.get(b"gss_wrap\0")?;
+            let mut input = GssBuf {
+                len: message.len(),
+                value: message.as_ptr() as *mut _,
+            };
+            let mut output = GssBuf {
+                len: 0,
+                value: std::ptr::null_mut(),
+            };
+            let mut minor = 0;
+            let mut conf_state = 0;
+            let status = wrap(
+                &mut minor,
+                self.ctx,
+                i32::from(confidential),
+                0,
+                &mut input,
+                &mut conf_state,
+                &mut output,
+            );
+            let result = if output.value.is_null() {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(output.value.cast::<u8>(), output.len).to_vec()
+            };
+            release_gss_buffer(&self.lib, &mut minor, &mut output);
+            if (status as u32 & 0xffff_0000) != 0 {
+                return Err(anyhow!(
+                    "GSSAPI wrap failed for {}: {}",
+                    self.host,
+                    gss_status_text(&self.lib, status as u32, 1)
+                ));
+            }
+            if confidential && conf_state == 0 {
+                return Err(anyhow!(
+                    "GSSAPI did not provide requested confidentiality for {}",
+                    self.host
+                ));
+            }
+            Ok(result)
+        }
+    }
+    pub(crate) fn unwrap(
+        &mut self,
+        message: &[u8],
+        require_confidentiality: bool,
+    ) -> Result<Vec<u8>> {
+        unsafe {
+            let unwrap: libloading::Symbol<GssUnwrap> = self.lib.get(b"gss_unwrap\0")?;
+            let mut input = GssBuf {
+                len: message.len(),
+                value: message.as_ptr() as *mut _,
+            };
+            let mut output = GssBuf {
+                len: 0,
+                value: std::ptr::null_mut(),
+            };
+            let mut minor = 0;
+            let mut conf_state = 0;
+            let mut qop_state = 0;
+            let status = unwrap(
+                &mut minor,
+                self.ctx,
+                &mut input,
+                &mut output,
+                &mut conf_state,
+                &mut qop_state,
+            );
+            let result = if output.value.is_null() {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(output.value.cast::<u8>(), output.len).to_vec()
+            };
+            release_gss_buffer(&self.lib, &mut minor, &mut output);
+            if (status as u32 & 0xffff_0000) != 0 {
+                return Err(anyhow!(
+                    "GSSAPI unwrap failed for {}: {}",
+                    self.host,
+                    gss_status_text(&self.lib, status as u32, 1)
+                ));
+            }
+            if require_confidentiality && conf_state == 0 {
+                return Err(anyhow!("SOCKS5 GSSAPI token lacks confidentiality"));
+            }
+            Ok(result)
         }
     }
 }
@@ -313,6 +465,21 @@ impl NegotiateContext {
     pub fn step(&mut self, _: Option<&[u8]>) -> Result<Option<Vec<u8>>> {
         Err(anyhow!("native Negotiate unavailable"))
     }
+    pub(crate) fn new_socks(_: &str) -> Result<Self> {
+        Err(anyhow!("native GSSAPI unavailable"))
+    }
+    pub(crate) fn step_with_status(&mut self, _: Option<&[u8]>) -> Result<(Option<Vec<u8>>, bool)> {
+        Err(anyhow!("native GSSAPI unavailable"))
+    }
+    pub(crate) fn is_complete(&self) -> bool {
+        false
+    }
+    pub(crate) fn wrap(&mut self, _: &[u8], _: bool) -> Result<Vec<u8>> {
+        Err(anyhow!("native GSSAPI unavailable"))
+    }
+    pub(crate) fn unwrap(&mut self, _: &[u8], _: bool) -> Result<Vec<u8>> {
+        Err(anyhow!("native GSSAPI unavailable"))
+    }
 }
 #[cfg(all(feature = "negotiate", windows))]
 #[derive(Clone, Copy)]
@@ -353,15 +520,45 @@ type InitializeSecurityContextW = unsafe extern "system" fn(
 #[cfg(all(feature = "negotiate", windows))]
 type SspiHandleAction = unsafe extern "system" fn(*mut SecHandle) -> i32;
 #[cfg(all(feature = "negotiate", windows))]
+#[repr(C)]
+struct SecPkgContextSizes {
+    max_token: u32,
+    max_signature: u32,
+    block_size: u32,
+    security_trailer: u32,
+}
+#[cfg(all(feature = "negotiate", windows))]
+type QueryContextAttributesW =
+    unsafe extern "system" fn(*mut SecHandle, u32, *mut std::ffi::c_void) -> i32;
+#[cfg(all(feature = "negotiate", windows))]
+type EncryptMessage =
+    unsafe extern "system" fn(*mut SecHandle, u32, *mut SecBufferDesc, u32) -> i32;
+#[cfg(all(feature = "negotiate", windows))]
+type DecryptMessage =
+    unsafe extern "system" fn(*mut SecHandle, *mut SecBufferDesc, u32, *mut u32) -> i32;
+#[cfg(all(feature = "negotiate", windows))]
+type CompleteAuthToken = unsafe extern "system" fn(*mut SecHandle, *mut SecBufferDesc) -> i32;
+#[cfg(all(feature = "negotiate", windows))]
 pub struct NegotiateContext {
     lib: libloading::Library,
     cred: SecHandle,
     ctx: SecHandle,
     target: Vec<u16>,
+    socks: bool,
+    complete: bool,
 }
+// SSPI handles are owned by this context and serialized during relay use.
+#[cfg(all(feature = "negotiate", windows))]
+unsafe impl Send for NegotiateContext {}
 #[cfg(all(feature = "negotiate", windows))]
 impl NegotiateContext {
     pub fn new(host: &str) -> Result<Self> {
+        Self::new_for_service(host, false)
+    }
+    pub(crate) fn new_socks(host: &str) -> Result<Self> {
+        Self::new_for_service(host, true)
+    }
+    fn new_for_service(host: &str, socks: bool) -> Result<Self> {
         unsafe {
             let lib = libloading::Library::new("secur32.dll").context("loading Windows SSPI")?;
             let acquire: libloading::Symbol<
@@ -403,19 +600,40 @@ impl NegotiateContext {
                 lib,
                 cred,
                 ctx: SecHandle { a: 0, b: 0 },
-                target: format!("HTTP/{host}")
+                target: format!("{}{host}", if socks { "socks/" } else { "HTTP/" })
                     .encode_utf16()
                     .chain(Some(0))
                     .collect(),
+                socks,
+                complete: false,
             })
         }
     }
-    pub fn step(&mut self, _server_token: Option<&[u8]>) -> Result<Option<Vec<u8>>> {
+    pub fn step(&mut self, server_token: Option<&[u8]>) -> Result<Option<Vec<u8>>> {
+        self.step_with_status(server_token).map(|(token, _)| token)
+    }
+    pub(crate) fn step_with_status(
+        &mut self,
+        server_token: Option<&[u8]>,
+    ) -> Result<(Option<Vec<u8>>, bool)> {
         unsafe {
             let init: libloading::Symbol<InitializeSecurityContextW> =
                 self.lib.get(b"InitializeSecurityContextW\0")?;
-            let _ = _server_token; // The Windows adapter intentionally ignores server challenge tokens.
-            let in_desc: *mut SecBufferDesc = std::ptr::null_mut();
+            let mut input_buf = SecBuffer {
+                size: server_token.map_or(0, |token| token.len() as u32),
+                kind: 2,
+                data: server_token.map_or(std::ptr::null_mut(), |token| token.as_ptr() as *mut _),
+            };
+            let mut input_desc = SecBufferDesc {
+                version: 0,
+                count: 1,
+                buffers: &mut input_buf,
+            };
+            let in_desc = if server_token.is_some() {
+                &mut input_desc
+            } else {
+                std::ptr::null_mut()
+            };
             let mut prior = self.ctx;
             let prior_ptr = if prior.a == 0 && prior.b == 0 {
                 std::ptr::null_mut()
@@ -435,11 +653,11 @@ impl NegotiateContext {
                 buffers: &mut outbuf,
             };
             let mut attrs = 0;
-            let status = init(
+            let mut status = init(
                 &mut self.cred,
                 prior_ptr,
                 self.target.as_ptr(),
-                2,
+                if self.socks { 0x0001_001f } else { 2 },
                 0,
                 0,
                 in_desc,
@@ -449,7 +667,23 @@ impl NegotiateContext {
                 &mut attrs,
                 std::ptr::null_mut(),
             );
-            if status < 0 {
+            if status == 0x0009_0313 || status == 0x0009_0314 {
+                let complete_token: libloading::Symbol<CompleteAuthToken> =
+                    self.lib.get(b"CompleteAuthToken\0")?;
+                let completion = complete_token(&mut next, &mut outdesc);
+                if completion < 0 {
+                    return Err(anyhow!(
+                        "CompleteAuthToken failed: 0x{:08x}",
+                        completion as u32
+                    ));
+                }
+                status = if status == 0x0009_0313 {
+                    0
+                } else {
+                    0x0009_0312
+                };
+            }
+            if status < 0 && status != 0x0009_0312 {
                 return Err(anyhow!(
                     "InitializeSecurityContextW failed: 0x{:08x}",
                     status as u32
@@ -457,7 +691,121 @@ impl NegotiateContext {
             }
             self.ctx = next;
             storage.truncate(outbuf.size as usize);
-            Ok((!storage.is_empty()).then_some(storage))
+            self.complete = status == 0;
+            if self.socks && self.complete && attrs & 2 == 0 {
+                return Err(anyhow!(
+                    "Windows Negotiate did not establish mutual authentication for SOCKS5"
+                ));
+            }
+            Ok(((!storage.is_empty()).then_some(storage), self.complete))
+        }
+    }
+    pub(crate) fn is_complete(&self) -> bool {
+        self.complete
+    }
+    pub(crate) fn wrap(&mut self, message: &[u8], confidential: bool) -> Result<Vec<u8>> {
+        unsafe {
+            let query: libloading::Symbol<QueryContextAttributesW> =
+                self.lib.get(b"QueryContextAttributesW\0")?;
+            let encrypt: libloading::Symbol<EncryptMessage> = self.lib.get(b"EncryptMessage\0")?;
+            let mut sizes = SecPkgContextSizes {
+                max_token: 0,
+                max_signature: 0,
+                block_size: 0,
+                security_trailer: 0,
+            };
+            let status = query(
+                &mut self.ctx,
+                0,
+                (&mut sizes as *mut SecPkgContextSizes).cast(),
+            );
+            if status < 0 {
+                return Err(anyhow!(
+                    "QueryContextAttributesW failed: 0x{:08x}",
+                    status as u32
+                ));
+            }
+            let header_size = sizes.security_trailer as usize;
+            let padding_size = sizes.block_size as usize;
+            let mut storage = vec![0u8; header_size + message.len() + padding_size];
+            storage[header_size..header_size + message.len()].copy_from_slice(message);
+            let mut buffers = [
+                SecBuffer {
+                    size: header_size as u32,
+                    kind: 2,
+                    data: storage.as_mut_ptr().cast(),
+                },
+                SecBuffer {
+                    size: message.len() as u32,
+                    kind: 1,
+                    data: storage.as_mut_ptr().add(header_size).cast(),
+                },
+                SecBuffer {
+                    size: padding_size as u32,
+                    kind: 9,
+                    data: storage.as_mut_ptr().add(header_size + message.len()).cast(),
+                },
+            ];
+            let mut desc = SecBufferDesc {
+                version: 0,
+                count: buffers.len() as u32,
+                buffers: buffers.as_mut_ptr(),
+            };
+            let qop = if confidential { 0 } else { 0x8000_0001 };
+            let status = encrypt(&mut self.ctx, qop, &mut desc, 0);
+            if status < 0 {
+                return Err(anyhow!("EncryptMessage failed: 0x{:08x}", status as u32));
+            }
+            let mut output = Vec::new();
+            for (buffer, start) in buffers
+                .iter()
+                .zip([0, header_size, header_size + message.len()])
+            {
+                output.extend_from_slice(&storage[start..start + buffer.size as usize]);
+            }
+            Ok(output)
+        }
+    }
+    pub(crate) fn unwrap(
+        &mut self,
+        message: &[u8],
+        require_confidentiality: bool,
+    ) -> Result<Vec<u8>> {
+        unsafe {
+            let decrypt: libloading::Symbol<DecryptMessage> = self.lib.get(b"DecryptMessage\0")?;
+            let mut storage = message.to_vec();
+            let mut buffer = SecBuffer {
+                size: storage.len() as u32,
+                kind: 10,
+                data: storage.as_mut_ptr().cast(),
+            };
+            let mut desc = SecBufferDesc {
+                version: 0,
+                count: 1,
+                buffers: &mut buffer,
+            };
+            let mut qop = 0;
+            let status = decrypt(&mut self.ctx, &mut desc, 0, &mut qop);
+            if status < 0 {
+                return Err(anyhow!("DecryptMessage failed: 0x{:08x}", status as u32));
+            }
+            if require_confidentiality && qop == 0x8000_0001 {
+                return Err(anyhow!("SOCKS5 GSSAPI token lacks confidentiality"));
+            }
+            let data = (0..desc.count as usize)
+                .find_map(|index| {
+                    let buffer = &*desc.buffers.add(index);
+                    (buffer.kind & 0xffff == 1).then_some(buffer)
+                })
+                .ok_or_else(|| anyhow!("DecryptMessage returned no data buffer"))?;
+            let start = (data.data as usize)
+                .checked_sub(storage.as_ptr() as usize)
+                .ok_or_else(|| anyhow!("DecryptMessage returned an invalid data buffer"))?;
+            let end = start
+                .checked_add(data.size as usize)
+                .filter(|end| *end <= storage.len())
+                .ok_or_else(|| anyhow!("DecryptMessage data exceeds the input token"))?;
+            Ok(storage[start..end].to_vec())
         }
     }
 }
@@ -565,6 +913,7 @@ mod tests {
         let error = unsafe {
             import_gss_target(
                 "fixture.test",
+                false,
                 fixture_import_failure,
                 Some(fixture_release_name),
                 |status, kind| format!("status {status} kind {kind}"),

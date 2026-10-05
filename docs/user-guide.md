@@ -135,9 +135,12 @@ function FindProxyForURL(url, host) {
 SOCKS routes support HTTP requests and HTTPS CONNECT tunnels. Hostnames are
 resolved by the upstream proxy; SOCKS4 uses the SOCKS4a hostname extension.
 SOCKS5 also supports IPv6 destinations. SOCKS5 username/password authentication
-uses the proxy host's netrc entry described below. SOCKS4 uses an empty user ID;
-Negotiate authentication applies only to HTTP and HTTPS upstream proxies.
-Applications continue to use Unproxy's HTTP/HTTPS proxy listener.
+uses the proxy host's netrc entry described below. SOCKS4 uses an empty user ID.
+To use SOCKS5 GSSAPI with your system credentials, enable **Negotiate** in the
+desktop app or start Unproxy with `--negotiate`; the option can take a proxy host
+to limit where credentials are offered. GSSAPI requests integrity and
+confidentiality protection for the SOCKS connection. Applications continue to
+use Unproxy's HTTP/HTTPS proxy listener.
 
 `undns --proxy socks5://proxy.example.org:1080` also supports SOCKS upstreams;
 `socks://`, `socks4://`, and `socks4a://` select SOCKS4a. The default SOCKS port is
