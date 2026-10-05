@@ -82,6 +82,7 @@ jobs:
           $certPath = Join-Path $env:RUNNER_TEMP 'unproxy-signing.pfx'
           [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
             Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
             Select-Object -First 1 -ExpandProperty FullName
           if (-not $signtool) { throw 'signtool.exe was not found in the Windows SDK.' }
