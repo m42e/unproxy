@@ -416,9 +416,11 @@ mod tests {
     #[test]
     fn auth_factory_debug_identifies_modes_without_exposing_passwords() {
         assert_eq!(format!("{:?}", AuthFactory::no_auth()), "AuthFactory(None)");
+        assert!(!AuthFactory::no_auth().is_configured());
         let credentials =
             CredentialStore::parse("machine proxy.example login alice password confidential")
                 .unwrap();
+        assert!(AuthFactory::basic(credentials.clone()).is_configured());
         let debug = format!("{:?}", AuthFactory::basic(credentials));
         assert!(debug.contains("AuthFactory(Basic)"));
         assert!(debug.contains("proxy.example"));
@@ -481,6 +483,7 @@ mod tests {
     #[cfg(feature = "negotiate")]
     async fn negotiate_host_restriction_skips_unlisted_hosts_before_native_setup() {
         let auth = AuthFactory::negotiate(vec!["proxy.corp.test".into()]);
+        assert!(auth.is_configured());
         assert_eq!(auth.authorization("proxy.public.test").await.unwrap(), None);
         assert!(format!("{auth:?}").contains("proxy.corp.test"));
     }

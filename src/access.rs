@@ -126,4 +126,27 @@ mod tests {
         assert!(formatted.contains("GET http://example.test/resource HTTP/1.1"));
         assert!(formatted.contains("204 -b"));
     }
+
+    #[test]
+    fn errors_escape_control_characters_and_user_agents() {
+        let request = http::Request::builder()
+            .method(Method::POST)
+            .uri("http://example.test/upload")
+            .header(http::header::USER_AGENT, "agent\\name\"quoted")
+            .body(())
+            .unwrap();
+        let entry = AccessEntry::for_request(
+            "127.0.0.1:1234".parse().unwrap(),
+            Some(Route::Direct),
+            &request,
+            Duration::from_millis(4),
+            AccessOutcome::Error("bad\\request\"\nnext\rline".into()),
+        );
+
+        let formatted = entry.to_string();
+        assert!(formatted.contains("DIRECT"));
+        assert!(formatted.contains("error: \"bad\\\\request\\\"\\nnext\\rline\""));
+        assert!(formatted.ends_with("\"agent\\\\name\\\"quoted\""));
+        assert!(entry.event().starts_with("data:"));
+    }
 }
