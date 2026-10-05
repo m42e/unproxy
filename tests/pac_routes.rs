@@ -115,3 +115,69 @@ fn path_or_uri_distinguishes_local_paths_from_http_sources() {
         PathOrUri::Uri(_)
     ));
 }
+
+#[test]
+fn endpoint_and_route_formatting_preserves_host_and_route_kinds() {
+    let hostname = Endpoint::from_str("proxy.example:3128").unwrap();
+    assert_eq!(hostname.authority(), "proxy.example:3128");
+    assert_eq!(hostname.to_string(), "proxy.example:3128");
+    assert_eq!(
+        Endpoint::from_str("[2001:db8::1]:8443")
+            .unwrap()
+            .to_string(),
+        "[2001:db8::1]:8443"
+    );
+    assert_eq!(
+        Route::from_str("HTTP proxy.example:3128")
+            .unwrap()
+            .to_string(),
+        "HTTP proxy.example:3128"
+    );
+    assert_eq!(
+        Route::from_str("HTTPS proxy.example:443")
+            .unwrap()
+            .to_string(),
+        "HTTPS proxy.example:443"
+    );
+}
+
+#[test]
+fn endpoint_and_route_parsers_reject_invalid_boundaries() {
+    for malformed in [
+        "proxy.example",
+        "[]:80",
+        "[2001:db8::1]80",
+        "proxy@example.org:80",
+        "proxy/example:80",
+        "proxy?query:80",
+        "proxy#fragment:80",
+        "proxy[bad]:80",
+        "proxy]bad:80",
+        "proxy:port",
+        "proxy:+80",
+        "proxy:65536",
+    ] {
+        assert!(Endpoint::from_str(malformed).is_err(), "{malformed}");
+    }
+    for malformed in ["", "HTTP", "HTTP proxy.example:3128 extra"] {
+        assert!(Route::from_str(malformed).is_err(), "{malformed}");
+    }
+    for malformed in ["", " ; \t; ", "DIRECT; NOT_A_ROUTE proxy:80"] {
+        assert!(Routes::from_str(malformed).is_err(), "{malformed}");
+    }
+}
+
+#[test]
+fn destination_and_path_or_uri_cover_authority_and_display_edges() {
+    assert!(Destination::from_uri(&"/relative/path".parse().unwrap()).is_err());
+    assert!(Destination::from_uri(&"ftp://example.org/resource".parse().unwrap()).is_err());
+    let destination = Destination::from_uri(&"http://example.org".parse().unwrap()).unwrap();
+    assert_eq!(destination.path, "/");
+    assert_eq!(destination.pac_url, "http://example.org/");
+
+    let path = PathOrUri::from_str("/etc/unproxy/proxy.pac").unwrap();
+    assert_eq!(path.to_string(), "/etc/unproxy/proxy.pac");
+    let uri = PathOrUri::from_str("https://example.org/policy.pac").unwrap();
+    assert_eq!(uri.to_string(), "https://example.org/policy.pac");
+    assert!(PathOrUri::from_str("http://[invalid").is_err());
+}
