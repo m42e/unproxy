@@ -771,6 +771,55 @@ fn error_response(status: StatusCode, err: impl std::fmt::Display) -> Response<O
     );
     full(status, "text/html; charset=utf-8", body)
 }
+
+fn json_error(status: StatusCode, message: &str) -> Response<OutBody> {
+    full(
+        status,
+        "application/json; charset=utf-8",
+        serde_json::json!({"error": message}).to_string(),
+    )
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let hi = (bytes[index + 1] as char).to_digit(16)? as u8;
+                let lo = (bytes[index + 2] as char).to_digit(16)? as u8;
+                decoded.push((hi << 4) | lo);
+                index += 3;
+            }
+            b'%' => return None,
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+#[cfg(test)]
+mod management_url_tests {
+    use super::percent_decode;
+
+    #[test]
+    fn percent_decode_handles_encoded_urls_and_rejects_invalid_input() {
+        assert_eq!(
+            percent_decode("https%3A%2F%2Fexample.test%2Fa+b"),
+            Some("https://example.test/a b".into())
+        );
+        assert_eq!(percent_decode("bad%2"), None);
+        assert_eq!(percent_decode("%FF"), None);
+    }
+}
 fn sanitize(headers: &mut HeaderMap) {
     let nominated: Vec<HeaderName> = headers
         .get_all(http::header::CONNECTION)
@@ -879,6 +928,73 @@ async fn handle(
                         "authentication_sent": status.authentication_sent,
                     })
                     .to_string(),
+                )
+            }
+            "/resolve.json" => {
+                let Some(url) = req.uri().query().and_then(|query| {
+                    query.split('&').find_map(|part| {
+                        let (key, value) = part.split_once('=')?;
+                        (key == "url").then(|| percent_decode(value)).flatten()
+                    })
+                }) else {
+                    return Ok(json_error(
+                        StatusCode::BAD_REQUEST,
+                        "Provide a URL in the url query parameter",
+                    ));
+                };
+                let uri: Uri = match url.parse::<Uri>() {
+                    Ok(uri) if matches!(uri.scheme_str(), Some("http" | "https")) => uri,
+                    _ => {
+                        return Ok(json_error(
+                            StatusCode::BAD_REQUEST,
+                            "URL must be an absolute HTTP or HTTPS URL",
+                        ));
+                    }
+                };
+                let destination = match Destination::from_uri(&uri) {
+                    Ok(destination) => destination,
+                    Err(error) => {
+                        return Ok(json_error(
+                            StatusCode::BAD_REQUEST,
+                            &format!("Invalid URL: {error}"),
+                        ));
+                    }
+                };
+                let status = cfg.runtime_status.snapshot();
+                let results = match cfg
+                    .policy
+                    .evaluate_each(destination.pac_url, destination.endpoint.host.clone())
+                    .await
+                {
+                    Ok(results) => results,
+                    Err(error) => {
+                        return Ok(json_error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            &format!("PAC evaluation unavailable: {error}"),
+                        ));
+                    }
+                };
+                let pacs: Vec<_> = results
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, result)| {
+                        let name = status
+                            .pac_files
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| format!("PAC {}", index + 1));
+                        match result {
+                            Ok(routes) => {
+                                serde_json::json!({"pac": name, "routes": routes.to_string()})
+                            }
+                            Err(error) => serde_json::json!({"pac": name, "error": error}),
+                        }
+                    })
+                    .collect();
+                full(
+                    StatusCode::OK,
+                    "application/json; charset=utf-8",
+                    serde_json::json!({"url": url, "results": pacs}).to_string(),
                 )
             }
             "/access.log" => event_response(events),
@@ -1377,6 +1493,7 @@ fn status_html() -> String {
     article p { font-size: 1.15rem; margin: 0 0 .25rem; }
     #pac-files { margin: .5rem 0 0; padding-left: 1.25rem; font-size: .85rem; overflow-wrap: anywhere; }
     #negotiation-details { margin: .5rem 0 0; padding-left: 1.25rem; font-size: .85rem; overflow-wrap: anywhere; }
+    #resolve-results { overflow-wrap: anywhere; }
     nav { display: flex; flex-wrap: wrap; gap: 1rem; }
   </style>
 </head>
@@ -1388,6 +1505,11 @@ fn status_html() -> String {
     <article><h2>PAC policy</h2><p id="pac">Loading…</p><small>Whether a PAC policy is currently loaded. Loaded PAC files:</small><ul id="pac-files" aria-label="Loaded PAC files"><li>Loading…</li></ul></article>
     <article><h2>Upstream</h2><p id="upstream">Loading…</p><small id="checked">Checking latest request…</small></article>
     <article><h2>Authentication negotiation</h2><p id="auth">Loading…</p><small>Negotiate creates an OS-backed token for an eligible upstream proxy. Unproxy sends the initial token with CONNECT; the token itself is never displayed.</small><ul id="negotiation-details"><li>Loading…</li></ul></article>
+  </section>
+  <section aria-labelledby="resolve-heading">
+    <h2 id="resolve-heading">Check URL against every loaded PAC</h2>
+    <form id="resolve-form"><label for="resolve-url">HTTP or HTTPS URL</label> <input id="resolve-url" type="url" required placeholder="https://example.com/path" style="width:min(32rem,70vw)"> <button>Check</button></form>
+    <ul id="resolve-results" aria-live="polite"></ul>
   </section>
   <nav aria-label="Proxy resources">
     <a href="/access.html">Live access log</a>
@@ -1445,6 +1567,27 @@ fn status_html() -> String {
     }
     refreshStatus();
     setInterval(refreshStatus, 5000);
+    document.querySelector('#resolve-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const output = document.querySelector('#resolve-results');
+      output.replaceChildren();
+      const item = document.createElement('li'); item.textContent = 'Checking…'; output.append(item);
+      try {
+        const url = document.querySelector('#resolve-url').value;
+        const response = await fetch('/resolve.json?url=' + encodeURIComponent(url), {cache: 'no-store'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+        output.replaceChildren();
+        if (!data.results.length) { const empty = document.createElement('li'); empty.textContent = 'No PACs are loaded.'; output.append(empty); }
+        for (const result of data.results) {
+          const row = document.createElement('li');
+          row.textContent = result.pac + ': ' + (result.routes || ('Error: ' + result.error));
+          output.append(row);
+        }
+      } catch (error) {
+        output.replaceChildren(); const row = document.createElement('li'); row.textContent = error.message; output.append(row);
+      }
+    });
   </script>
 </body>
 </html>"#;

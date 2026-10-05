@@ -234,6 +234,7 @@ impl Pac {
 
 enum Job {
     Eval(String, String, bool, oneshot::Sender<Result<Routes>>),
+    EvalEach(String, String, oneshot::Sender<Vec<Result<Routes, String>>>),
     Scripts(Vec<String>, oneshot::Sender<Result<()>>),
     Ip(IpAddr, oneshot::Sender<()>),
     Snapshot(oneshot::Sender<HashMap<String, Option<IpAddr>>>),
@@ -288,6 +289,17 @@ impl Policy {
                             };
                             let _ = r.send(result);
                         }
+                        Job::EvalEach(u, h, r) => {
+                            let results = pacs
+                                .iter_mut()
+                                .map(|pac| {
+                                    runtime
+                                        .block_on(pac.evaluate_bounded(&u, &h))
+                                        .map_err(|e| format!("{e:#}"))
+                                })
+                                .collect();
+                            let _ = r.send(results);
+                        }
                         Job::Scripts(scripts, r) => {
                             worker_loaded.store(false, Ordering::Release);
                             let replacement = scripts
@@ -335,6 +347,21 @@ impl Policy {
     }
     pub async fn evaluate_strict(&self, url: String, host: String) -> Result<Routes> {
         self.evaluate_with_policy(url, host, true).await
+    }
+    pub async fn evaluate_each(
+        &self,
+        url: String,
+        host: String,
+    ) -> Result<Vec<Result<Routes, String>>> {
+        if !self.is_loaded() {
+            bail!("routing policy is unavailable")
+        }
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Job::EvalEach(url, host, tx))
+            .await
+            .map_err(|_| anyhow!("PAC worker stopped"))?;
+        rx.await.context("PAC worker stopped")
     }
     async fn evaluate_with_policy(
         &self,
@@ -467,6 +494,25 @@ mod tests {
         sync::{Arc, atomic::AtomicBool},
         time::{Duration, Instant},
     };
+
+    #[tokio::test]
+    async fn policy_can_report_each_pac_without_short_circuiting() {
+        let policy = Policy::new_scripts(vec![
+            "function FindProxyForURL(){return 'DIRECT';}".into(),
+            "function FindProxyForURL(){return 'PROXY second.example:8080';}".into(),
+        ])
+        .unwrap();
+        let results = policy
+            .evaluate_each("http://example.test/".into(), "example.test".into())
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].as_ref().unwrap().to_string(), "DIRECT");
+        assert_eq!(
+            results[1].as_ref().unwrap().to_string(),
+            "HTTP second.example:8080"
+        );
+    }
 
     #[test]
     fn pac_substr_supports_standard_start_and_length_semantics() {
