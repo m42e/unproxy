@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 - Bound PAC initialization and evaluation, resolver work, DoH bodies, proxy
   sessions and configurable header, exchange and idle deadlines. Management resources now require a loopback
@@ -10,6 +10,8 @@
   PAC loading or evaluation fails.
 - Regenerate forwarded Host from the request authority and support IPv6 primary
   DNS endpoints. Boa 0.22 removes the unmaintained `paste` dependency.
+
+## Unreleased
 
 ## 0.13.0
 
