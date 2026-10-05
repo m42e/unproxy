@@ -316,7 +316,7 @@ pub async fn connect_direct_tls(
 }
 
 /// Establish the selected route. For proxy routes, `tunnel` performs CONNECT
-/// through the proxy before returning the stream.
+/// through HTTP proxies before returning the stream. SOCKS routes always tunnel.
 pub async fn connect(
     route: &Route,
     destination: &Endpoint,
@@ -349,6 +349,18 @@ pub async fn connect_observed(
             }
             Route::Https(proxy) => {
                 proxy_connect(proxy, destination, tunnel, options, timeout, true).await
+            }
+            Route::Socks4(proxy) | Route::Socks5(proxy) => {
+                let stream: BoxedIo = Box::new(tcp(proxy, options, timeout).await?);
+                let (stream, authenticated) = crate::socks::handshake(
+                    stream,
+                    destination,
+                    &proxy.host,
+                    matches!(route, Route::Socks5(_)),
+                    &options.auth,
+                )
+                .await?;
+                Ok((stream, authenticated))
             }
         }
     })

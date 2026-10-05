@@ -34,7 +34,7 @@ fn endpoint_and_pac_directives_are_strict_and_normalized() {
         routes.to_string(),
         "HTTP proxy.test:80; HTTPS [::1]:443; DIRECT"
     );
-    assert!(Routes::from_str("DIRECT; SOCKS host:1").is_err());
+    assert!(Routes::from_str("DIRECT; SOCKS6 host:1").is_err());
     assert!(Routes::from_str("").is_err());
     assert!(Routes::from_str(" ; ").is_err());
     assert!("proxy host.test:80".parse::<Route>().is_err());

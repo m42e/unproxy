@@ -17,7 +17,8 @@ fn proxy_directives_require_separators_and_trim_outer_whitespace() {
         "HTTPSexample.org:3128",
         "PROXY",
         "HTTPS host.example",
-        "SOCKS host.example:1080",
+        "SOCKShost.example:1080",
+        "SOCKS5",
     ] {
         assert!(Route::from_str(malformed).is_err(), "{malformed}");
     }
@@ -180,4 +181,27 @@ fn destination_and_path_or_uri_cover_authority_and_display_edges() {
     let uri = PathOrUri::from_str("https://example.org/policy.pac").unwrap();
     assert_eq!(uri.to_string(), "https://example.org/policy.pac");
     assert!(PathOrUri::from_str("http://[invalid").is_err());
+}
+
+#[test]
+fn socks_routes_parse_and_roundtrip() {
+    for (directive, canonical) in [
+        ("SOCKS", "SOCKS4"),
+        ("SOCKS4", "SOCKS4"),
+        ("SOCKS4A", "SOCKS4"),
+        ("SOCKS5", "SOCKS5"),
+    ] {
+        let route: Route = format!("{directive} [::1]:1080").parse().unwrap();
+        assert!(route.is_socks());
+        assert_eq!(route.to_string(), format!("{canonical} [::1]:1080"));
+        assert_eq!(route.to_string().parse::<Route>().unwrap(), route);
+    }
+    assert_eq!(
+        "SOCKS5 proxy.test:1080; DIRECT"
+            .parse::<Routes>()
+            .unwrap()
+            .0
+            .len(),
+        2
+    );
 }

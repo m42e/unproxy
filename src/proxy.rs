@@ -1284,7 +1284,8 @@ async fn select_route(
         let route = routes.0[idx].clone();
         let dest = destination.clone();
         let options = options.clone();
-        let tunnel = (connect || force_tunnel) && !matches!(route, Route::Direct);
+        let tunnel =
+            route.is_socks() || ((connect || force_tunnel) && !matches!(route, Route::Direct));
         pending.push(Box::pin(async move {
             let result = net::connect_observed(&route, &dest, tunnel, &options, timeout).await;
             (idx, route, tunnel, result)
@@ -1389,7 +1390,7 @@ async fn forward(
         .insert(http::header::HOST, HeaderValue::from_str(&host)?);
     let proxy = match route {
         Route::Http(e) | Route::Https(e) => Some(e),
-        Route::Direct => None,
+        Route::Direct | Route::Socks4(_) | Route::Socks5(_) => None,
     };
     if let Some(proxy) = proxy.filter(|_| !tunneled)
         && let Some(v) = options.auth.authorization(&proxy.host).await?
