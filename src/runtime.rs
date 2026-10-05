@@ -386,6 +386,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_binds_before_ready_and_drains_after_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let pac = dir.path().join("proxy.pac");
+        fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+        let args = MainArgs::try_parse_from([
+            "unproxy",
+            "--listen",
+            "127.0.0.1:0",
+            "--pac-file",
+            pac.to_str().unwrap(),
+            "--graceful-shutdown-timeout",
+            "1",
+        ])
+        .unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        run_until(
+            args,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            move || {
+                ready_tx.send(()).unwrap();
+                shutdown_tx.send(()).unwrap();
+            },
+        )
+        .await
+        .unwrap();
+        ready_rx.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn explicit_netrc_credentials_build_a_basic_authorization_header() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("netrc");

@@ -3529,6 +3529,127 @@ mod native {
         use super::*;
 
         #[test]
+        fn runtime_status_response_parses_optional_fields_and_rejects_bad_responses() {
+            let now = chrono::Utc::now().timestamp();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"pac_loaded\":true,\"authentication_configured\":true,\"upstream_state\":\"ok\",\"authentication_state\":\"authenticated\",\"upstream_checked_at\":{now}}}"
+            );
+            let status = parse_runtime_status_response(response.as_bytes()).unwrap();
+            assert_eq!(status.pac_loaded, Some(true));
+            assert!(status.authentication_configured);
+            assert_eq!(status.upstream_state, "ok");
+            assert_eq!(status.authentication_state, "authenticated");
+            assert_eq!(status.upstream_checked_at, Some(now));
+            assert!(upstream_is_recent(&status));
+
+            let defaults = parse_runtime_status_response(b"HTTP/1.1 200 OK\r\n\r\n{}").unwrap();
+            assert_eq!(defaults.pac_loaded, None);
+            assert!(!defaults.authentication_configured);
+            assert_eq!(defaults.upstream_state, "unknown");
+            assert_eq!(defaults.authentication_state, "unknown");
+            assert_eq!(defaults.upstream_checked_at, None);
+            assert!(!upstream_is_recent(&defaults));
+            assert!(parse_runtime_status_response(b"not an HTTP response").is_none());
+            assert!(parse_runtime_status_response(b"HTTP/1.1 200 OK\r\n\r\n{").is_none());
+        }
+
+        #[test]
+        fn tray_status_maps_running_and_failed_proxy_states_to_labels() {
+            let now = chrono::Utc::now().timestamp();
+            let mut state = State {
+                prefs: Preferences::default(),
+                prefs_path: PathBuf::new(),
+                defaults: 0,
+                child: ChildLifecycle::default(),
+                child_exe: PathBuf::new(),
+                network_available: None,
+                _instance_lock: std::fs::File::open("/dev/null").unwrap(),
+                status_button: 0,
+                last_running: false,
+                start_failed: false,
+                notice: None,
+                tray_status: TrayStatus {
+                    pac_loaded: Some(true),
+                    authentication_configured: true,
+                    upstream_state: "ok".into(),
+                    authentication_state: "authenticated".into(),
+                    upstream_checked_at: Some(now),
+                },
+                last_icon_key: String::new(),
+            };
+            assert_eq!(
+                icon_statuses(&state, true),
+                ("running", "loaded", "ok", "authenticated")
+            );
+            assert_eq!(
+                status_labels(&state, true),
+                (
+                    "Running".into(),
+                    "Loaded".into(),
+                    "Last proxy request succeeded".into(),
+                    "Accepted on last request".into()
+                )
+            );
+
+            state.start_failed = true;
+            state.tray_status.pac_loaded = Some(false);
+            state.tray_status.upstream_state = "error".into();
+            state.tray_status.authentication_state = "rejected".into();
+            assert_eq!(
+                icon_statuses(&state, false),
+                ("failed", "unloaded", "error", "rejected")
+            );
+            assert_eq!(
+                status_labels(&state, false),
+                (
+                    "Stopped unexpectedly".into(),
+                    "Not loaded".into(),
+                    "Last proxy request failed".into(),
+                    "Rejected by upstream (407)".into()
+                )
+            );
+        }
+
+        #[test]
+        fn runtime_status_probe_reads_status_from_the_loopback_proxy() {
+            use std::io::{BufRead, BufReader, Write};
+            use std::net::TcpListener;
+
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                request.read_line(&mut request_line).unwrap();
+                assert!(request_line.starts_with("GET /status.json "));
+                loop {
+                    let mut header = String::new();
+                    request.read_line(&mut header).unwrap();
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                }
+                let body = r#"{"pac_loaded":true,"authentication_configured":false,"upstream_state":"ok","authentication_state":"disabled"}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            });
+
+            let result = probe_runtime_status(address);
+            server.join().unwrap();
+            let status = result.expect("status probe should parse the loopback response");
+            assert_eq!(status.pac_loaded, Some(true));
+            assert!(!status.authentication_configured);
+            assert_eq!(status.upstream_state, "ok");
+            assert_eq!(status.authentication_state, "disabled");
+        }
+
+        #[test]
         fn pac_files_open_in_textedit_without_relying_on_file_associations() {
             let path = Path::new("/tmp/my proxy.pac");
             let command = pac_editor_command(path);
@@ -3947,5 +4068,103 @@ mod tests {
         let mut child = ChildLifecycle::for_test(blocker, Duration::from_secs(1));
         assert!(child.start(&program, &prefs).is_err());
         assert!(!child.is_running());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_validates_local_pac_sources_and_accepts_remote_sources() {
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("remote-pac-started");
+        let program = executable(
+            dir.path(),
+            "remote-pac.sh",
+            &format!("echo started > '{}'; exec sleep 30", marker.display()),
+        );
+        let mut child =
+            ChildLifecycle::for_test(dir.path().join("support"), Duration::from_secs(1));
+
+        let relative = Preferences {
+            pac_file: PathBuf::from("relative.pac"),
+            ..Preferences::default()
+        };
+        assert!(
+            child
+                .start(&program, &relative)
+                .unwrap_err()
+                .to_string()
+                .contains("absolute")
+        );
+
+        let missing = Preferences {
+            pac_file: dir.path().join("missing.pac"),
+            ..Preferences::default()
+        };
+        assert!(
+            child
+                .start(&program, &missing)
+                .unwrap_err()
+                .to_string()
+                .contains("missing")
+        );
+
+        let remote = Preferences {
+            pac_file: PathBuf::from("HTTPS://pac.example.test/corporate.pac"),
+            ..Preferences::default()
+        };
+        child.start(&program, &remote).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "remote PAC child did not start");
+        child.stop().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_restart_stops_the_old_child_and_starts_the_replacement() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("launches");
+        let first = executable(
+            dir.path(),
+            "first.sh",
+            &format!("echo first >> '{}'; exec sleep 30", marker.display()),
+        );
+        let second = executable(
+            dir.path(),
+            "second.sh",
+            &format!("echo second >> '{}'; exec sleep 30", marker.display()),
+        );
+        let pac = dir.path().join("proxy.pac");
+        std::fs::write(&pac, "DIRECT").unwrap();
+        let prefs = Preferences {
+            pac_file: pac,
+            ..Preferences::default()
+        };
+        let mut child =
+            ChildLifecycle::for_test(dir.path().join("support"), Duration::from_secs(1));
+
+        child.start(&first, &prefs).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "first\n");
+        assert!(child.is_running());
+
+        child.restart(&second, &prefs).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while std::fs::read_to_string(&marker).unwrap().lines().count() < 2
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "first\nsecond\n");
+        assert!(child.is_running());
+        child.stop().unwrap();
     }
 }
