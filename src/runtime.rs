@@ -574,6 +574,42 @@ mod tests {
         assert!(context.wait_timeout(Duration::from_secs(1)).await);
     }
 
+    #[tokio::test]
+    async fn logfile_receives_runtime_startup_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let pac = dir.path().join("proxy.pac");
+        let logfile = dir.path().join("unproxy.log");
+        fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+        let args = MainArgs::try_parse_from([
+            "unproxy",
+            "--listen",
+            "127.0.0.1:0",
+            "--pac-file",
+            pac.to_str().unwrap(),
+            "--logfile",
+            logfile.to_str().unwrap(),
+        ])
+        .unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        run_until(
+            args,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+            move || {
+                ready_tx.send(()).unwrap();
+                shutdown_tx.send(()).unwrap();
+            },
+        )
+        .await
+        .unwrap();
+        ready_rx.await.unwrap();
+        let log = fs::read_to_string(logfile).unwrap();
+        assert!(log.contains("proxy listening"));
+        assert!(log.contains("proxy started"));
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_service_signals_ready_and_drains_on_shutdown() {
@@ -590,6 +626,26 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), server)
             .await
             .expect("service did not stop after the shutdown signal")
+            .expect("service task panicked")
+            .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_service_stops_when_shutdown_sender_is_dropped() {
+        let args = MainArgs::try_parse_from(["unproxy", "--listen", "127.0.0.1:0"]).unwrap();
+        let (shutdown, receiver) = tokio::sync::watch::channel(false);
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(run_windows_service(args, receiver, ready));
+
+        tokio::time::timeout(Duration::from_secs(5), started)
+            .await
+            .expect("service did not report readiness")
+            .expect("service dropped its readiness signal");
+        drop(shutdown);
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("service did not stop after its shutdown sender was dropped")
             .expect("service task panicked")
             .unwrap();
     }

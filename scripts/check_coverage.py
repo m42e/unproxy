@@ -87,7 +87,7 @@ def main() -> int:
         ("portable", None, 95.0, 90.0),
     ):
         for metric, floor in (("lines", line_floor), ("regions", region_floor)):
-            if scope == "total":
+            if scope.startswith("total"):
                 covered, count = gated_lines if metric == "lines" else gated_regions
             else:
                 covered, count = sum_metrics(portable, metric)
