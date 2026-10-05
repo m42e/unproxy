@@ -40,7 +40,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_System_Services", "Win32_Security_Authentication_Identity", "Win32_Foundation"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+tray-icon = "0.26"
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_System_Services", "Win32_Security_Authentication_Identity", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

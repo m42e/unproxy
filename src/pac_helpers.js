@@ -1,3 +1,17 @@
+if (typeof String.prototype.substr !== 'function') {
+  String.prototype.substr = function(start, length) {
+    const value = String(this);
+    const size = value.length;
+    const offset = Number(start) || 0;
+    const from = offset < 0
+      ? Math.max(size + Math.ceil(offset), 0)
+      : Math.min(Math.floor(offset), size);
+    if (length === undefined) return value.slice(from);
+    const count = Number(length);
+    return count <= 0 ? '' : value.slice(from, from + Math.floor(count));
+  };
+}
+
 function shExpMatch(value, pattern) {
   if (typeof value !== 'string' || typeof pattern !== 'string') throw new TypeError('shExpMatch expects strings');
   let re='^';

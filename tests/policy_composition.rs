@@ -177,3 +177,31 @@ async fn runaway_replacement_keeps_active_policy_and_new_runtime_is_limited() {
     );
     assert!(Policy::new_scripts(vec!["while(true){}".into()]).is_err());
 }
+
+#[tokio::test]
+async fn recursive_pac_calls_are_limited_without_terminating_the_worker() {
+    let policy = Policy::new_scripts(vec![
+        "function recurse(){return recurse();} function FindProxyForURL(){return recurse();}"
+            .into(),
+    ])
+    .unwrap();
+    assert!(
+        policy
+            .evaluate("http://example.test/".into(), "example.test".into())
+            .await
+            .is_err()
+    );
+
+    policy
+        .set_scripts(vec!["function FindProxyForURL(){return 'DIRECT';}".into()])
+        .await
+        .unwrap();
+    assert_eq!(
+        policy
+            .evaluate("http://example.test/".into(), "example.test".into())
+            .await
+            .unwrap()
+            .to_string(),
+        "DIRECT"
+    );
+}

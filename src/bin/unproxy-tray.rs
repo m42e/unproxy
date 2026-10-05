@@ -16,7 +16,7 @@ fn main() {
         eprintln!("UnproxyTray: {error:#}");
         #[cfg(windows)]
         {
-            let _ = std::process::Command::new("powershell").args(["-NoProfile", "-Command", &format!("Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('{}','Unproxy')", error.to_string().replace('\'', "''"))]).status();
+            unproxy::desktop::show_tray_error(&format!("{error:#}"));
         }
         std::process::exit(1)
     }

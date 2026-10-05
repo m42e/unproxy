@@ -15,16 +15,18 @@ pub const INTERNAL_UNAVAILABLE_NOTIFICATION: &str =
     "com.apple.KerberosPlugin.InternalNetworkNotAvailable";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Preferences {
     pub port: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listeners: Option<Vec<String>>,
+    #[serde(alias = "pac_file")]
     pub pac_file: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "pac_files")]
     pub pac_files: Option<Vec<PathBuf>>,
     pub negotiate: bool,
     pub proxytunnel: bool,
+    #[serde(alias = "direct_fallback")]
     pub direct_fallback: bool,
     pub autostart: bool,
 }
@@ -253,7 +255,9 @@ impl Preferences {
             p.save(path)?;
             return Ok(p);
         }
-        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        let bytes = std::fs::read(path)?;
+        let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
+        let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
         if let Some(port) = value.get_mut("port") {
             let saved = port.as_u64();
             if saved.is_none() || saved.is_some_and(|n| n > u32::MAX as u64) {
@@ -463,53 +467,16 @@ pub fn run_app() -> Result<()> {
     anyhow::bail!("the menu-bar application is available only on macOS")
 }
 #[cfg(windows)]
+mod windows_tray;
+
+#[cfg(windows)]
 pub fn run_tray() -> Result<()> {
-    use std::os::windows::process::CommandExt;
-    let exe = std::env::current_exe()?;
-    run_tray_with(&exe, |program, args, flags| {
-        Command::new(program)
-            .args(args)
-            .creation_flags(flags)
-            .status()
-    })
+    windows_tray::run()
 }
 
 #[cfg(windows)]
-fn run_tray_with(
-    exe: &Path,
-    execute: impl FnOnce(
-        &std::ffi::OsStr,
-        &[std::ffi::OsString],
-        u32,
-    ) -> std::io::Result<std::process::ExitStatus>,
-) -> Result<()> {
-    let script = exe
-        .parent()
-        .context("tray executable has no parent directory")?
-        .join("unproxy-tray.ps1");
-    anyhow::ensure!(
-        script.is_file(),
-        "tray controller script is missing: {}",
-        script.display()
-    );
-    let args = [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-STA",
-        "-WindowStyle",
-        "Hidden",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-    ]
-    .into_iter()
-    .map(std::ffi::OsString::from)
-    .chain(std::iter::once(script.into_os_string()))
-    .collect::<Vec<_>>();
-    let status = execute(std::ffi::OsStr::new("powershell.exe"), &args, 0x08000000)?;
-    anyhow::ensure!(status.success(), "tray controller exited with {status}");
-    Ok(())
+pub fn show_tray_error(message: &str) {
+    windows_tray::show_startup_error(message);
 }
 #[cfg(not(windows))]
 pub fn run_tray() -> Result<()> {
@@ -3794,56 +3761,6 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("only on macOS")
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn tray_command_uses_hidden_sta_powershell_and_reports_failures() {
-        use std::os::windows::process::ExitStatusExt;
-
-        let temp = tempfile::tempdir().unwrap();
-        let exe = temp.path().join("Unproxy Tray.exe");
-        let script = temp.path().join("unproxy-tray.ps1");
-        std::fs::write(&script, "fixture").unwrap();
-        let mut called = false;
-        run_tray_with(&exe, |program, args, flags| {
-            called = true;
-            assert_eq!(program, "powershell.exe");
-            assert_eq!(
-                args.iter()
-                    .map(|arg| arg.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>(),
-                [
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-STA",
-                    "-WindowStyle",
-                    "Hidden",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    script.to_string_lossy().as_ref(),
-                ]
-            );
-            assert_eq!(flags, 0x08000000);
-            Ok(std::process::ExitStatus::from_raw(0))
-        })
-        .unwrap();
-        assert!(called);
-
-        let failure =
-            run_tray_with(&exe, |_, _, _| Ok(std::process::ExitStatus::from_raw(1))).unwrap_err();
-        assert!(failure.to_string().contains("tray controller exited"));
-
-        std::fs::remove_file(script).unwrap();
-        let missing =
-            run_tray_with(&exe, |_, _, _| panic!("missing script must not launch")).unwrap_err();
-        assert!(
-            missing
-                .to_string()
-                .contains("tray controller script is missing")
         );
     }
 

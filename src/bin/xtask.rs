@@ -487,7 +487,10 @@ fn package(
                         std::fs::create_dir_all(&destination)?;
                         for icon in std::fs::read_dir(icons)? {
                             let icon = icon?.path();
-                            if icon.extension().is_some_and(|ext| ext == "ico") {
+                            if icon
+                                .extension()
+                                .is_some_and(|ext| ext == "ico" || ext == "png")
+                            {
                                 std::fs::copy(&icon, destination.join(icon.file_name().unwrap()))?;
                             }
                         }

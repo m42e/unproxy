@@ -171,6 +171,18 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
     let root = fixture.root.path();
     let assets = root.join("assets");
     std::fs::create_dir_all(&assets).unwrap();
+    let tray_icons = assets.join("tray-icons");
+    std::fs::create_dir_all(&tray_icons).unwrap();
+    std::fs::write(
+        tray_icons.join("stopped-unloaded-unknown-disabled.ico"),
+        b"fixture tray icon",
+    )
+    .unwrap();
+    std::fs::write(
+        tray_icons.join("stopped-unloaded-unknown-disabled.png"),
+        b"fixture tray png",
+    )
+    .unwrap();
     std::fs::write(root.join("README.md"), "fixture README").unwrap();
     std::fs::write(
         assets.join("proxy.pac"),
@@ -228,6 +240,10 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
         b"fixture tray"
     );
     assert!(!extracted.join("unproxy-tray.exe").exists());
+    assert_eq!(
+        std::fs::read(extracted.join("tray-icons/stopped-unloaded-unknown-disabled.png")).unwrap(),
+        b"fixture tray png"
+    );
     assert_eq!(
         std::fs::read_to_string(extracted.join("README.md")).unwrap(),
         "fixture README"

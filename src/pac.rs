@@ -19,6 +19,8 @@ const PAC_LOOP_LIMIT: u64 = 100_000;
 const PAC_QUEUE_CAPACITY: usize = 64;
 const PAC_EVAL_BUDGET: u32 = 256;
 const PAC_EVAL_TIMEOUT: Duration = Duration::from_secs(2);
+const PAC_RECURSION_LIMIT: usize = 64;
+const PAC_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 const MAX_PAC_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
 const DNS_RESOLVE_BUDGET: usize = 4;
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_millis(100);
@@ -255,6 +257,7 @@ impl Policy {
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("pac-policy".into())
+            .stack_size(PAC_WORKER_STACK_SIZE)
             .spawn(move || {
                 let mut active_ip = ip;
                 let mut pacs = match scripts
@@ -427,6 +430,9 @@ fn limited_context() -> Context {
         .runtime_limits_mut()
         .set_loop_iteration_limit(PAC_LOOP_LIMIT);
     context
+        .runtime_limits_mut()
+        .set_recursion_limit(PAC_RECURSION_LIMIT);
+    context
 }
 
 fn resolve_hostname(host: &str) -> Option<IpAddr> {
@@ -461,6 +467,20 @@ mod tests {
         sync::{Arc, atomic::AtomicBool},
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn pac_substr_supports_standard_start_and_length_semantics() {
+        let mut pac = Pac::new(Some(
+            "function FindProxyForURL(url, host) { return host.substr(host.length - 3, 3) === 'com' && host.substr(-3) === 'com' && host.substr(0, 0) === '' && host.substr(0, -1) === '' ? 'PROXY substr.test:80' : 'DIRECT'; }",
+        ))
+        .unwrap();
+        assert_eq!(
+            pac.evaluate("http://example.com", "example.com")
+                .unwrap()
+                .to_string(),
+            "HTTP substr.test:80"
+        );
+    }
 
     #[test]
     fn dns_prefers_first_ipv4_then_falls_back_to_first_ipv6() {

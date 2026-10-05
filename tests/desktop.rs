@@ -212,6 +212,55 @@ fn preferences_roundtrip_and_child_lifecycle_is_idempotent() {
 }
 
 #[test]
+fn preferences_roundtrip_with_camel_case_settings_format_and_load_legacy_snake_case() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("preferences.json");
+    let pac_file = dir.path().join("proxy.pac");
+    let prefs = Preferences {
+        pac_file: pac_file.clone(),
+        pac_files: Some(vec![pac_file.clone()]),
+        direct_fallback: true,
+        ..Preferences::default()
+    };
+    prefs.save(&path).unwrap();
+
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(saved.get("pacFile").is_some());
+    assert!(saved.get("pacFiles").is_some());
+    assert_eq!(saved["directFallback"], true);
+    assert!(saved.get("pac_file").is_none());
+
+    let helper_json = serde_json::json!({
+        "pacFile": pac_file,
+        "pacFiles": [pac_file],
+        "directFallback": true
+    })
+    .to_string();
+    let mut helper_bytes = vec![0xef, 0xbb, 0xbf];
+    helper_bytes.extend_from_slice(helper_json.as_bytes());
+    std::fs::write(&path, helper_bytes).unwrap();
+    let helper_preferences = Preferences::load(&path).unwrap();
+    assert!(helper_preferences.direct_fallback);
+    assert_eq!(helper_preferences.pac_file, pac_file);
+    assert_eq!(helper_preferences.pac_files, Some(vec![pac_file.clone()]));
+
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "pac_file": pac_file,
+            "pac_files": [pac_file],
+            "direct_fallback": true
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let loaded = Preferences::load(&path).unwrap();
+    assert!(loaded.direct_fallback);
+    assert_eq!(loaded.pac_file, pac_file);
+    assert_eq!(loaded.pac_files, Some(vec![pac_file]));
+}
+
+#[test]
 fn preferences_create_defaults_and_sanitize_invalid_saved_ports() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("settings.json");
