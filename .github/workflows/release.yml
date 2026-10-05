@@ -183,6 +183,8 @@ jobs:
       - run: cargo run --locked --bin xtask -- docs --repository "${{ github.repository }}"
       - run: git archive --format=zip HEAD -o dist/site/source.zip
       - uses: actions/configure-pages@v6
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist/site
