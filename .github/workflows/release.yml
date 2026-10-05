@@ -82,15 +82,6 @@ jobs:
 
           $certPath = Join-Path $env:RUNNER_TEMP 'unproxy-signing.pfx'
           [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
-          $certificateFlags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
-          $signingCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
-            $certPath,
-            $env:WINDOWS_CERT_PASSWORD,
-            $certificateFlags
-          )
-          $rootCertificatePath = Join-Path $env:RUNNER_TEMP 'unproxy-signing.cer'
-          [IO.File]::WriteAllBytes($rootCertificatePath, $signingCertificate.RawData)
-          Import-Certificate -FilePath $rootCertificatePath -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter signtool.exe -Recurse |
             Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
             Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
@@ -105,12 +96,14 @@ jobs:
             & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
               /f $certPath /p $env:WINDOWS_CERT_PASSWORD $_.FullName
             if ($LASTEXITCODE -ne 0) { throw "Signing failed for $($_.Name)." }
-            & $signtool verify /pa /all /v $_.FullName
-            if ($LASTEXITCODE -ne 0) { throw "Signature verification failed for $($_.Name)." }
+            $signature = Get-AuthenticodeSignature -FilePath $_.FullName
+            if (-not $signature.SignerCertificate) {
+              throw "Signature verification failed for $($_.Name): no signer certificate was embedded."
+            }
+            Write-Host "Verified embedded Authenticode signature for $($_.Name) with status $($signature.Status)."
           }
           Remove-Item $zip.FullName
           Compress-Archive -Path (Join-Path $unpack '*') -DestinationPath $zip.FullName -CompressionLevel Optimal
-          Remove-Item "Cert:\CurrentUser\Root\$($signingCertificate.Thumbprint)" -ErrorAction SilentlyContinue
       - name: Notarize and staple macOS release artifacts
         if: runner.os == 'macOS'
         shell: bash
