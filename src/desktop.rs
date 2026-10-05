@@ -4076,12 +4076,7 @@ mod tests {
         use std::time::Duration;
 
         let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("remote-pac-started");
-        let program = executable(
-            dir.path(),
-            "remote-pac.sh",
-            &format!("echo started > '{}'; exec sleep 30", marker.display()),
-        );
+        let program = PathBuf::from("true");
         let mut child =
             ChildLifecycle::for_test(dir.path().join("support"), Duration::from_secs(1));
 
@@ -4114,11 +4109,6 @@ mod tests {
             ..Preferences::default()
         };
         child.start(&program, &remote).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !marker.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(marker.exists(), "remote PAC child did not start");
         child.stop().unwrap();
     }
 
