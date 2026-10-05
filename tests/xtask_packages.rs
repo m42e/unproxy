@@ -397,6 +397,16 @@ printf 'fixture pkg' > "$out"
                 .is_file()
         );
     }
+    assert!(
+        !f.capture
+            .join("zip-1/Unproxy.app/Contents/entitlements.plist")
+            .exists()
+    );
+    assert!(
+        !f.capture
+            .join("zip-1/Unproxy.app/Contents/child-entitlements.plist")
+            .exists()
+    );
 }
 
 #[cfg(target_os = "macos")]

@@ -651,14 +651,6 @@ fn package(
                         "10.14",
                     ),
                 )?;
-                std::fs::copy(
-                    "assets/app-entitlements.plist",
-                    app.join("entitlements.plist"),
-                )?;
-                std::fs::copy(
-                    "assets/child-entitlements.plist",
-                    app.join("child-entitlements.plist"),
-                )?;
                 std::fs::create_dir_all(app.join("Resources"))?;
                 let tray_icons = Path::new("assets/tray-icons");
                 if tray_icons.is_dir() {
@@ -680,11 +672,11 @@ fn package(
                 sign_macos_code(&app.join("MacOS/unproxy"), None)?;
                 sign_macos_code(
                     helper.parent().context("helper bundle has no parent")?,
-                    Some(&app.join("child-entitlements.plist")),
+                    Some(Path::new("assets/child-entitlements.plist")),
                 )?;
                 sign_macos_code(
                     app.parent().context("app bundle has no parent")?,
-                    Some(&app.join("entitlements.plist")),
+                    Some(Path::new("assets/app-entitlements.plist")),
                 )?;
                 zip(&staging, &output.join(format!("{package_name}-app.zip")))?;
                 let pkg_root = staging.join("pkg-root");
