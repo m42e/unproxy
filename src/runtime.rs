@@ -311,6 +311,13 @@ async fn drain(context: crate::proxy::Context, timeout: Duration) -> bool {
 }
 
 fn load_auth(a: &MainArgs) -> Result<AuthFactory> {
+    load_auth_with_default_netrc(a, config::netrc_default())
+}
+
+fn load_auth_with_default_netrc(
+    a: &MainArgs,
+    default_netrc: Option<std::path::PathBuf>,
+) -> Result<AuthFactory> {
     #[cfg(feature = "negotiate")]
     if !a.negotiate.is_empty() {
         return Ok(AuthFactory::negotiate(
@@ -321,7 +328,7 @@ fn load_auth(a: &MainArgs) -> Result<AuthFactory> {
                 .collect(),
         ));
     }
-    let path = a.netrc_file.clone().or_else(config::netrc_default);
+    let path = a.netrc_file.clone().or(default_netrc);
     let store = if let Some(p) = path {
         if a.netrc_file.is_some() && !p.is_file() {
             return Err(anyhow!("netrc file does not exist: {}", p.display()));
@@ -669,6 +676,13 @@ mod tests {
             MainArgs::try_parse_from(["unproxy", "--netrc-file", malformed.to_str().unwrap()])
                 .unwrap();
         assert!(load_auth(&args).is_err());
+    }
+
+    #[test]
+    fn missing_default_netrc_uses_unconfigured_authentication() {
+        let args = MainArgs::try_parse_from(["unproxy"]).unwrap();
+        let auth = load_auth_with_default_netrc(&args, None).unwrap();
+        assert!(!auth.is_configured());
     }
 
     #[test]
