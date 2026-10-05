@@ -79,6 +79,13 @@ pub enum Route {
     Direct,
     Http(Endpoint),
     Https(Endpoint),
+    Socks4(Endpoint),
+    Socks5(Endpoint),
+}
+impl Route {
+    pub fn is_socks(&self) -> bool {
+        matches!(self, Self::Socks4(_) | Self::Socks5(_))
+    }
 }
 impl fmt::Display for Route {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -86,6 +93,8 @@ impl fmt::Display for Route {
             Self::Direct => f.write_str("DIRECT"),
             Self::Http(e) => write!(f, "HTTP {e}"),
             Self::Https(e) => write!(f, "HTTPS {e}"),
+            Self::Socks4(e) => write!(f, "SOCKS4 {e}"),
+            Self::Socks5(e) => write!(f, "SOCKS5 {e}"),
         }
     }
 }
@@ -110,6 +119,8 @@ impl FromStr for Route {
         match kind {
             "PROXY" | "HTTP" => Ok(Self::Http(e)),
             "HTTPS" => Ok(Self::Https(e)),
+            "SOCKS" | "SOCKS4" | "SOCKS4A" => Ok(Self::Socks4(e)),
+            "SOCKS5" => Ok(Self::Socks5(e)),
             _ => bail!("unknown PAC directive: {kind}"),
         }
     }

@@ -13,7 +13,7 @@ struct Args {
     /// Local UDP port to listen on.
     #[arg(long, default_value_t = 5353)]
     port: u16,
-    /// HTTP or HTTPS URL of the proxy used to reach the primary DNS server.
+    /// HTTP, HTTPS, SOCKS4 or SOCKS5 URL of the proxy used to reach the primary DNS server.
     #[arg(long)]
     proxy: Option<String>,
     /// Address of the primary DNS server.
@@ -71,11 +71,12 @@ fn proxy_route(proxy: &str) -> Result<unproxy::route::Route> {
     }
     let scheme = p
         .scheme_str()
-        .ok_or_else(|| anyhow!("proxy URL requires an HTTP or HTTPS scheme"))?;
+        .ok_or_else(|| anyhow!("proxy URL requires a proxy scheme"))?;
     let default_port = match scheme {
         "http" => 80,
         "https" => 443,
-        _ => return Err(anyhow!("proxy URL must use HTTP or HTTPS")),
+        "socks" | "socks4" | "socks4a" | "socks5" => 1080,
+        _ => return Err(anyhow!("proxy URL must use HTTP, HTTPS, SOCKS4 or SOCKS5")),
     };
     let port = if unproxy::dns::authority_has_explicit_port(authority.as_str()) {
         authority
@@ -98,10 +99,11 @@ fn proxy_route(proxy: &str) -> Result<unproxy::route::Route> {
     if endpoint.host.is_empty() {
         return Err(anyhow!("proxy URL requires a host"));
     }
-    Ok(if scheme == "http" {
-        unproxy::route::Route::Http(endpoint)
-    } else {
-        unproxy::route::Route::Https(endpoint)
+    Ok(match scheme {
+        "http" => unproxy::route::Route::Http(endpoint),
+        "https" => unproxy::route::Route::Https(endpoint),
+        "socks5" => unproxy::route::Route::Socks5(endpoint),
+        _ => unproxy::route::Route::Socks4(endpoint),
     })
 }
 #[tokio::main]
@@ -157,6 +159,19 @@ mod tests {
                 .to_string(),
             "HTTPS [2001:db8::1]:8443"
         );
+    }
+
+    #[test]
+    fn socks_proxy_urls_use_port_1080_and_preserve_explicit_ports() {
+        for (url, expected) in [
+            ("socks://proxy.test", "SOCKS4 proxy.test:1080"),
+            ("socks4://proxy.test", "SOCKS4 proxy.test:1080"),
+            ("socks4a://proxy.test:1081", "SOCKS4 proxy.test:1081"),
+            ("socks5://[::1]:1082", "SOCKS5 [::1]:1082"),
+            ("socks5://proxy.test", "SOCKS5 proxy.test:1080"),
+        ] {
+            assert_eq!(proxy_route(url).unwrap().to_string(), expected);
+        }
     }
 
     #[test]

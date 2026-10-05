@@ -17,6 +17,7 @@ pub enum Transport {
     DirectTls,
     ForwardProxy,
     ConnectTunnel,
+    SocksTunnel,
 }
 
 pub struct Connection {
@@ -75,6 +76,7 @@ impl Connection {
     ) -> Result<Self> {
         let transport = match route {
             Route::Direct => Transport::DirectTcp,
+            Route::Socks4(_) | Route::Socks5(_) => Transport::SocksTunnel,
             _ if tunnel => Transport::ConnectTunnel,
             _ => Transport::ForwardProxy,
         };

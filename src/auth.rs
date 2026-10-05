@@ -261,6 +261,13 @@ impl AuthFactory {
             AuthMode::Negotiate(_) => true,
         }
     }
+    /// Username/password credentials for SOCKS5; HTTP Negotiate is separate.
+    pub(crate) fn socks_credentials(&self, host: &str) -> Option<(String, String)> {
+        match &self.mode {
+            AuthMode::Basic(store) => store.get(host),
+            _ => None,
+        }
+    }
     pub async fn authorization(&self, host: &str) -> Result<Option<HeaderValue>> {
         #[cfg(feature = "negotiate")]
         {
