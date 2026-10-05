@@ -140,6 +140,9 @@ pub struct MainArgs {
     /// Load a PAC script from a local path or HTTP(S) URL; may be repeated.
     #[arg(short = 'p', long = "pac-file", action = clap::ArgAction::Append)]
     pub pac_file: Vec<String>,
+    /// Reload remote PAC sources after the default network address changes.
+    #[arg(long = "reload-pac-on-network-change")]
+    pub reload_pac_on_network_change: bool,
     /// Override the IP address returned by PAC's myIpAddress() function.
     #[arg(long = "my-ip-address")]
     pub my_ip_address: Option<IpAddr>,

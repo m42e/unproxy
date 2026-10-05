@@ -526,8 +526,24 @@ async fn read_pac_body(io: &mut BoxedIo, header: &str) -> Result<Vec<u8>> {
     Ok(body)
 }
 
+/// Last successful remote PAC representation and its HTTP validator.
+#[derive(Clone, Debug)]
+pub struct CachedRemotePac {
+    pub script: String,
+    etag: Option<String>,
+    etag_uri: Option<String>,
+}
+
 /// Download a PAC script directly, following at most nine absolute redirects.
 pub async fn fetch_remote_pac(uri: &str) -> Result<String> {
+    Ok(fetch_remote_pac_cached(uri, None).await?.script)
+}
+
+/// Download a PAC representation using its cached ETag when available.
+pub async fn fetch_remote_pac_cached(
+    uri: &str,
+    cached: Option<&CachedRemotePac>,
+) -> Result<CachedRemotePac> {
     let requested = uri.to_owned();
     time::timeout(Duration::from_secs(15), async move {
         let mut current = http::Uri::try_from(uri).context("invalid PAC URI")?;
@@ -543,7 +559,14 @@ pub async fn fetch_remote_pac(uri: &str) -> Result<String> {
             if scheme == "https" { io = secure(io, &host, &options.tls).await?; }
             let path = current.path_and_query().map(|v| v.as_str()).unwrap_or("/");
             let host_header = current.authority().unwrap().as_str();
-            let request = format!("GET {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\nAccept: */*\r\n\r\n");
+            let current_string = current.to_string();
+            let validator = cached
+                .filter(|entry| entry.etag_uri.as_deref() == Some(current_string.as_str()))
+                .and_then(|entry| entry.etag.as_deref());
+            let conditional = validator
+                .map(|etag| format!("If-None-Match: {etag}\r\n"))
+                .unwrap_or_default();
+            let request = format!("GET {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\nAccept: */*\r\n{conditional}\r\n");
             io.write_all(request.as_bytes()).await?;
             let raw_header=read_http_head(&mut io).await?;
             let header = std::str::from_utf8(&raw_header).context("invalid PAC response headers")?;
@@ -556,9 +579,23 @@ pub async fn fetch_remote_pac(uri: &str) -> Result<String> {
                 current = next;
                 continue;
             }
+            if status == 304 {
+                if validator.is_some()
+                    && let Some(cached) = cached
+                {
+                    return Ok(cached.clone());
+                }
+                bail!("PAC server returned 304 without a matching cached validator");
+            }
             if status != 200 { bail!("PAC download returned HTTP {status}"); }
+            let etag = header.lines().skip(1).find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("etag").then(|| value.trim().to_owned())
+            }).filter(|value| !value.chars().any(char::is_control));
             let body=read_pac_body(&mut io,header).await?;
-            return String::from_utf8(body).context("PAC response is not UTF-8");
+            let script = String::from_utf8(body).context("PAC response is not UTF-8")?;
+            let etag_uri = etag.as_ref().map(|_| current_string);
+            return Ok(CachedRemotePac { script, etag, etag_uri });
         }
         bail!("too many PAC redirects")
     }).await.context("remote PAC download timed out")?.with_context(||format!("downloading PAC from {requested}"))

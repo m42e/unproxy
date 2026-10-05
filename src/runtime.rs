@@ -147,12 +147,17 @@ async fn run_until(
     let mut notification_ticks = tokio::time::interval(Duration::from_millis(100));
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut notification_ticks = ();
-    #[cfg(target_os = "macos")]
     let mut native_state = crate::network_notifications::TransitionState::new();
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut notifications = ();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut native_state = crate::network_notifications::TransitionState::new();
+    let mut observed_network_ip = if a.reload_pac_on_network_change {
+        Some(crate::platform::default_interface_ipv4())
+    } else {
+        None
+    };
+    let mut pending_network_change: Option<(std::net::IpAddr, tokio::time::Instant)> = None;
+    let mut network_poll = tokio::time::interval(Duration::from_millis(250));
+    network_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     #[cfg(unix)]
     let listener_failed = {
         tokio::pin!(shutdown);
@@ -164,6 +169,14 @@ async fn run_until(
                 _=context.shutdown_notified()=>break true,
                 _=next_network_tick(&mut notification_ticks)=>{
                     pump_network_events(&mut notifications);
+                },
+                _=network_poll.tick(), if a.reload_pac_on_network_change => {
+                    poll_network_change(
+                        &context,
+                        &mut native_state,
+                        &mut observed_network_ip,
+                        &mut pending_network_change,
+                    ).await;
                 },
                 Some(event)=next_network_event(&mut notifications)=>{
                     if let Err(error) = handle_network_event(&context, &mut native_state, event).await {
@@ -187,10 +200,20 @@ async fn run_until(
     #[cfg(not(unix))]
     let listener_failed = {
         tokio::pin!(shutdown);
-        tokio::select! {
-            _ = &mut shutdown => false,
-            _ = tokio::signal::ctrl_c() => false,
-            _ = context.shutdown_notified() => true,
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => break false,
+                _ = tokio::signal::ctrl_c() => break false,
+                _ = context.shutdown_notified() => break true,
+                _ = network_poll.tick(), if a.reload_pac_on_network_change => {
+                    poll_network_change(
+                        &context,
+                        &mut native_state,
+                        &mut observed_network_ip,
+                        &mut pending_network_change,
+                    ).await;
+                },
+            }
         }
     };
     if !drain(context, Duration::from_secs(a.graceful_shutdown_timeout)).await {
@@ -244,10 +267,42 @@ pub async fn handle_network_event(
     let result = match event {
         NetworkEvent::Available => context.reload_pac().await,
         NetworkEvent::Unavailable => context.clear_policy().await,
+        NetworkEvent::Changed => context.reload_pac().await,
     };
     state.complete(event, result.is_ok());
     result?;
     Ok(true)
+}
+
+async fn poll_network_change(
+    context: &crate::proxy::Context,
+    state: &mut crate::network_notifications::TransitionState,
+    observed: &mut Option<std::net::IpAddr>,
+    pending: &mut Option<(std::net::IpAddr, tokio::time::Instant)>,
+) {
+    let current = crate::platform::default_interface_ipv4();
+    if observed.is_some_and(|previous| previous != current) {
+        *pending = Some((current, tokio::time::Instant::now()));
+    }
+    *observed = Some(current);
+
+    // Wait for the observed address to settle before fetching, coalescing the
+    // several interface/address updates produced by a network handoff.
+    if let Some((address, since)) = *pending
+        && address == current
+        && since.elapsed() >= Duration::from_secs(1)
+    {
+        *pending = None;
+        if let Err(error) = handle_network_event(
+            context,
+            state,
+            crate::network_notifications::NetworkEvent::Changed,
+        )
+        .await
+        {
+            tracing::error!(%error, "PAC reload after network change failed; retaining previous policy");
+        }
+    }
 }
 
 async fn drain(context: crate::proxy::Context, timeout: Duration) -> bool {

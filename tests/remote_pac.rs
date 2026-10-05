@@ -5,7 +5,7 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
-use unproxy::net::fetch_remote_pac;
+use unproxy::net::{fetch_remote_pac, fetch_remote_pac_cached};
 
 const LIMIT: usize = 8 * 1024 * 1024;
 const TEST_DEADLINE: Duration = Duration::from_secs(4);
@@ -82,6 +82,40 @@ async fn fetches_utf8_pac_with_get_and_requested_target() {
     assert!(request.starts_with("get /policy.pac?rev=3 http/1.1\r\n"));
     assert!(request.contains(&format!("host: {addr}\r\n").to_ascii_lowercase()));
     assert!(request.contains("connection: close\r\n"));
+}
+
+#[tokio::test]
+async fn revalidates_cached_pac_with_etag_and_keeps_cached_body_on_not_modified() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let first_request = request_head(&mut first).await;
+        first
+            .write_all(&response(
+                "200 OK",
+                "ETag: \"policy-v1\"\r\nContent-Length: 8\r\nConnection: close\r\n",
+                b"PAC BODY",
+            ))
+            .await
+            .unwrap();
+
+        let (mut second, _) = listener.accept().await.unwrap();
+        let second_request = request_head(&mut second).await;
+        second
+            .write_all(b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        (first_request, second_request)
+    });
+    let uri = format!("http://{addr}/policy.pac");
+    let cached = fetch_remote_pac_cached(&uri, None).await.unwrap();
+    assert_eq!(cached.script, "PAC BODY");
+    let unchanged = fetch_remote_pac_cached(&uri, Some(&cached)).await.unwrap();
+    assert_eq!(unchanged.script, "PAC BODY");
+    let (first, second) = server.await.unwrap();
+    assert!(!first.to_ascii_lowercase().contains("if-none-match:"));
+    assert!(second.contains("If-None-Match: \"policy-v1\"\r\n"));
 }
 
 #[tokio::test]

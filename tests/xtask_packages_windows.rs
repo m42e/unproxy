@@ -125,8 +125,13 @@ fn xtask_build_check_coverage_and_bump_use_the_requested_cargo_commands() {
     let calls = std::fs::read_to_string(&fixture.cargo_capture).unwrap();
     assert!(calls.contains("--CALL--\nfmt\n--all\n--\n--check"));
     assert!(calls.contains("--CALL--\nclippy\n--locked\n--all-targets\n--all-features"));
-    assert!(calls.contains("--CALL--\ntest\n--locked\n--all-features"));
-    assert!(calls.ends_with("--CALL--\ntest\n--locked\n--no-default-features"));
+    assert!(
+        calls
+            .contains("--CALL--\ntest\n--locked\n--all-features\n--target-dir\ntarget/xtask-tests")
+    );
+    assert!(calls.ends_with(
+        "--CALL--\ntest\n--locked\n--no-default-features\n--target-dir\ntarget/xtask-tests"
+    ));
 
     let report = fixture.command(&["coverage", "--output", "reports/coverage html"]);
     assert!(report.status.success());

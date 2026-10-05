@@ -75,6 +75,15 @@ or:
 unproxy --pac-file https://proxy.example.org/company.pac
 ```
 
+To reload configured PAC sources when Unproxy detects a change to the local
+address selected by the default route, add `--reload-pac-on-network-change`.
+This option is off by default and works on Windows, macOS, and Linux. Changes
+are coalesced for one second; failed downloads leave the current policy active.
+Remote PAC URLs that provide an ETag are revalidated on reload, so an unchanged
+script can return `304 Not Modified` without sending its body again. The
+detector watches the selected local address, so route changes that keep that
+address may not be detected.
+
 To combine PAC files, repeat `--pac-file`; the files are evaluated from first
 to last. A PAC result containing a proxy route is used, while an all-`DIRECT`
 result lets evaluation continue to the next file.

@@ -1,6 +1,7 @@
 //! HTTP/1 forward proxy and embedded management endpoints.
 
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
@@ -143,6 +144,7 @@ pub struct ContextBuilder {
     idle_timeout: Duration,
     strict_policy: bool,
     runtime_status: RuntimeStatus,
+    pac_cache: Arc<tokio::sync::Mutex<HashMap<String, net::CachedRemotePac>>>,
 }
 impl Clone for ContextBuilder {
     fn clone(&self) -> Self {
@@ -170,6 +172,7 @@ impl Clone for ContextBuilder {
             idle_timeout: self.idle_timeout,
             strict_policy: self.strict_policy,
             runtime_status: self.runtime_status.clone(),
+            pac_cache: self.pac_cache.clone(),
         }
     }
 }
@@ -200,6 +203,7 @@ impl ContextBuilder {
             idle_timeout: Duration::from_secs(60),
             strict_policy: false,
             runtime_status,
+            pac_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
     pub fn listen(mut self, addr: SocketAddr) -> Self {
@@ -290,7 +294,7 @@ impl ContextBuilder {
     }
     async fn initialize_policy(&self) -> Result<()> {
         if !self.pac_sources.is_empty() {
-            let scripts = load_pac_sources(&self.pac_sources).await?;
+            let scripts = load_pac_sources_cached(&self.pac_sources, &self.pac_cache).await?;
             self.policy.set_scripts(scripts).await?;
             self.runtime_status
                 .set_pac_files(self.pac_sources.iter().map(ToString::to_string).collect());
@@ -358,6 +362,7 @@ impl ContextBuilder {
             pac_sources,
             inline_scripts,
             runtime_status: self.runtime_status.clone(),
+            pac_cache: self.pac_cache.clone(),
             relay_handles: self.relay_handles.clone(),
         })
     }
@@ -375,6 +380,7 @@ impl ContextBuilder {
         let pac_sources = self.pac_sources.clone();
         let inline_scripts = self.inline_scripts.clone();
         let runtime_status = self.runtime_status.clone();
+        let pac_cache = self.pac_cache.clone();
         let shutdown_timeout = self.shutdown_timeout;
         let relay_handles = self.relay_handles.clone();
         let cfg = self;
@@ -394,6 +400,7 @@ impl ContextBuilder {
             pac_sources,
             inline_scripts,
             runtime_status,
+            pac_cache,
             relay_handles,
         })
     }
@@ -415,6 +422,7 @@ impl ContextBuilder {
         let sources = self.pac_sources.clone();
         let inline_scripts = self.inline_scripts.clone();
         let runtime_status = self.runtime_status.clone();
+        let pac_cache = self.pac_cache.clone();
         let relay_handles = self.relay_handles.clone();
         let join = tokio::spawn(async move {
             let mut sessions = tokio::task::JoinSet::new();
@@ -434,6 +442,7 @@ impl ContextBuilder {
             pac_sources: sources,
             inline_scripts,
             runtime_status,
+            pac_cache,
             relay_handles,
         })
     }
@@ -450,6 +459,7 @@ pub struct Context {
     pac_sources: Vec<PathOrUri>,
     inline_scripts: Vec<String>,
     runtime_status: RuntimeStatus,
+    pac_cache: Arc<tokio::sync::Mutex<HashMap<String, net::CachedRemotePac>>>,
     relay_handles: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
 }
 
@@ -476,6 +486,34 @@ pub async fn load_pac_sources(sources: &[PathOrUri]) -> Result<Vec<String>> {
                 .with_context(|| format!("loading PAC source {source}"))?,
         );
     }
+    Ok(scripts)
+}
+
+async fn load_pac_sources_cached(
+    sources: &[PathOrUri],
+    cache: &Arc<tokio::sync::Mutex<HashMap<String, net::CachedRemotePac>>>,
+) -> Result<Vec<String>> {
+    let mut updated = HashMap::new();
+    let mut scripts = Vec::with_capacity(sources.len());
+    for source in sources {
+        let loaded = match source {
+            PathOrUri::Path(_) => load_pac_source(source).await,
+            PathOrUri::Uri(uri) => {
+                let key = uri.to_string();
+                let previous = cache.lock().await.get(&key).cloned();
+                net::fetch_remote_pac_cached(&key, previous.as_ref())
+                    .await
+                    .map(|entry| {
+                        let script = entry.script.clone();
+                        updated.insert(key, entry);
+                        script
+                    })
+            }
+        }
+        .with_context(|| format!("loading PAC source {source}"))?;
+        scripts.push(loaded);
+    }
+    cache.lock().await.extend(updated);
     Ok(scripts)
 }
 
@@ -528,7 +566,7 @@ impl Context {
         self.load_pacs(std::slice::from_ref(source)).await
     }
     pub async fn load_pacs(&self, sources: &[PathOrUri]) -> Result<()> {
-        let scripts = load_pac_sources(sources).await?;
+        let scripts = load_pac_sources_cached(sources, &self.pac_cache).await?;
         self.policy.set_scripts(scripts).await?;
         self.runtime_status
             .set_pac_files(sources.iter().map(ToString::to_string).collect());

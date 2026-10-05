@@ -33,6 +33,9 @@ mod portable_tests {
 pub enum NetworkEvent {
     Available,
     Unavailable,
+    /// A generic route or interface change. This requests a PAC reload without
+    /// changing the native availability state.
+    Changed,
 }
 
 /// Owns the notification receiver and native observer registration.
@@ -122,6 +125,7 @@ impl TransitionState {
     /// Return a state only when it should trigger a policy operation.
     pub fn observe(&mut self, event: NetworkEvent) -> Option<NetworkEvent> {
         match event {
+            NetworkEvent::Changed => Some(NetworkEvent::Changed),
             NetworkEvent::Available if !self.available || self.retry_available => {
                 self.available = true;
                 self.retry_available = false;
