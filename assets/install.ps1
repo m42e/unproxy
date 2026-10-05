@@ -107,11 +107,19 @@ if (Test-Path $prefsFile) {
     $preferences = [pscustomobject]@{
         port = 3128
         pacFile = Join-Path $root 'proxy.pac'
+        listeners = @()
+        pacFiles = @()
         proxytunnel = $false
         directFallback = $false
         negotiate = $false
         autostart = $true
     }
+}
+if (-not ($preferences.PSObject.Properties.Name -contains 'listeners')) {
+    $preferences | Add-Member -NotePropertyName listeners -NotePropertyValue @()
+}
+if (-not ($preferences.PSObject.Properties.Name -contains 'pacFiles')) {
+    $preferences | Add-Member -NotePropertyName pacFiles -NotePropertyValue @()
 }
 if (-not $preferences.pacFile) { $preferences.pacFile = Join-Path $root 'proxy.pac' }
 $pacUri = $null
