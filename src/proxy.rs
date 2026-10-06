@@ -1498,16 +1498,19 @@ fn status_html() -> String {
   <title>Unproxy status</title>
   <style>
     :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
-    body { max-width: 54rem; margin: 3rem auto; padding: 0 1.25rem; }
+    body { max-width: 90rem; margin: 3rem auto; padding: 0 1.25rem; }
     h1 { margin-bottom: .25rem; }
     .muted, small { color: GrayText; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1rem; margin: 2rem 0; }
-    article { border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: .75rem; padding: 1rem; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin: 2rem 0; }
+    article { min-width: 0; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: .75rem; padding: 1rem; }
+    @media (max-width: 60rem) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 36rem) { .grid { grid-template-columns: 1fr; } }
     h2 { font-size: .9rem; margin: 0 0 .5rem; }
     article p { font-size: 1.15rem; margin: 0 0 .25rem; }
     #pac-files { margin: .5rem 0 0; padding-left: 1.25rem; font-size: .85rem; overflow-wrap: anywhere; }
     #negotiation-details { margin: .5rem 0 0; padding-left: 1.25rem; font-size: .85rem; overflow-wrap: anywhere; }
     #resolve-results { overflow-wrap: anywhere; }
+    #resolve-url { box-sizing: border-box; max-width: 100%; }
     nav { display: flex; flex-wrap: wrap; gap: 1rem; }
   </style>
 </head>
