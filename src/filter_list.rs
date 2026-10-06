@@ -101,4 +101,16 @@ mod tests {
         assert!(!list.contains("example.test"));
         assert!(!list.contains("safe.test"));
     }
+
+    #[test]
+    fn matches_entries_in_a_hundred_thousand_domain_list() {
+        let text = (0..100_000)
+            .map(|index| format!("0.0.0.0 blocked-{index}.example.test\n"))
+            .collect::<String>();
+        let list = FilterList::parse(&text);
+        assert_eq!(list.0.len(), 100_000);
+        assert!(list.contains("BLOCKED-99999.EXAMPLE.TEST."));
+        assert!(list.contains("sub.blocked-99999.example.test"));
+        assert!(!list.contains("safe.example.test"));
+    }
 }
