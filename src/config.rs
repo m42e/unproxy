@@ -127,7 +127,7 @@ pub struct MainArgs {
     /// Decrease log verbosity; repeat to disable logging.
     #[arg(short='q',long="quiet",action=clap::ArgAction::Count)]
     pub quiet: u8,
-    /// Write diagnostic logs to this file, truncating it at startup.
+    /// Append diagnostic logs to this file, rotating at 10 MiB and retaining three backups.
     #[arg(long)]
     pub logfile: Option<PathBuf>,
     /// Listen on this numeric IP address and port; may be repeated.
