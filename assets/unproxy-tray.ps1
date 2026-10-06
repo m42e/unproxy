@@ -28,6 +28,7 @@ $script:p = if ($hasPreferences) {
         pacFile = (Join-Path $root 'proxy.pac')
         proxytunnel = $false
         directFallback = $false
+        filterLists = @()
         negotiate = $false
         autostart = $true
     }
@@ -37,6 +38,9 @@ if (-not ($script:p.PSObject.Properties.Name -contains 'listeners')) {
 }
 if (-not ($script:p.PSObject.Properties.Name -contains 'pacFiles')) {
     $script:p | Add-Member -NotePropertyName pacFiles -NotePropertyValue @()
+}
+if (-not ($script:p.PSObject.Properties.Name -contains 'filterLists')) {
+    $script:p | Add-Member -NotePropertyName filterLists -NotePropertyValue @()
 }
 if (-not ($script:p.PSObject.Properties.Name -contains 'pacFile')) {
     $defaultPacFile = Join-Path $root 'proxy.pac'
@@ -69,6 +73,14 @@ if ($script:p.pacFiles -and @($script:p.pacFiles).Count -gt 0) {
     $script:p.pacFiles = @($script:p.pacFiles | ForEach-Object {
         $uri = Get-PacUri ([string]$_)
         if ($uri) { $uri.AbsoluteUri } else { [string]$_ }
+    })
+}
+if ($script:p.filterLists -and @($script:p.filterLists).Count -gt 0) {
+    $script:p.filterLists = @($script:p.filterLists | ForEach-Object {
+        $uri = Get-PacUri ([string]$_)
+        if ($uri) { $uri.AbsoluteUri } elseif ([IO.Path]::IsPathRooted([string]$_)) {
+            [IO.Path]::GetFullPath([string]$_)
+        } else { [IO.Path]::GetFullPath((Join-Path $root ([string]$_))) }
     })
 }
 if (-not $hasPreferences -and $script:p.pacFile -eq (Join-Path $root 'proxy.pac')) {
@@ -129,6 +141,13 @@ function Get-PacFiles {
         return @($script:p.pacFiles | ForEach-Object { [string]$_ })
     }
     if ($script:p.pacFile) { return @([string]$script:p.pacFile) }
+    return @()
+}
+
+function Get-FilterLists {
+    if ($script:p.filterLists) {
+        return @($script:p.filterLists | ForEach-Object { [string]$_ })
+    }
     return @()
 }
 
@@ -217,9 +236,9 @@ function Show-PacContent([string]$source, [string]$content, $owner) {
     $viewer.Dispose()
 }
 
-function Prompt-PacUrl($owner) {
+function Prompt-RemoteUrl([string]$title, $owner) {
     $dialog = [Windows.Forms.Form]::new()
-    $dialog.Text = 'Add PAC URL'
+    $dialog.Text = $title
     $dialog.StartPosition = [Windows.Forms.FormStartPosition]::CenterParent
     $dialog.FormBorderStyle = [Windows.Forms.FormBorderStyle]::FixedDialog
     $dialog.ClientSize = [Drawing.Size]::new(520, 125)
@@ -275,7 +294,7 @@ function Show-Settings {
     $form.MaximizeBox = $false
     $form.MinimizeBox = $false
     $form.ShowInTaskbar = $false
-    $form.ClientSize = [Drawing.Size]::new(700, 690)
+    $form.ClientSize = [Drawing.Size]::new(700, 880)
 
     $listenersLabel = [Windows.Forms.Label]::new()
     $listenersLabel.Text = 'Listeners (numeric IP address and port; IPv6 in brackets)'
@@ -483,13 +502,99 @@ function Show-Settings {
     $addPacUrlButton.Size = [Drawing.Size]::new(120, 30)
     [void]$form.Controls.Add($addPacUrlButton)
     $addPacUrlButton.add_Click(({
-        $url = Prompt-PacUrl $form
+        $url = Prompt-RemoteUrl 'Add PAC URL' $form
         if ($url) { & $addPacRow $url }
+    }).GetNewClosure())
+
+    $filterLabel = [Windows.Forms.Label]::new()
+    $filterLabel.Text = 'Optional ad blocking lists (Pi-hole / hosts format)'
+    $filterLabel.Location = [Drawing.Point]::new(20, 480)
+    $filterLabel.AutoSize = $true
+    [void]$form.Controls.Add($filterLabel)
+    $filterPanel = [Windows.Forms.Panel]::new()
+    $filterPanel.Location = [Drawing.Point]::new(20, 504)
+    $filterPanel.Size = [Drawing.Size]::new(660, 130)
+    $filterPanel.AutoScroll = $true
+    $filterPanel.BorderStyle = [Windows.Forms.BorderStyle]::FixedSingle
+    [void]$form.Controls.Add($filterPanel)
+    $filterRows = [Collections.ArrayList]::new()
+    $renderFilterRows = ({
+        $filterPanel.Controls.Clear()
+        for ($index = 0; $index -lt $filterRows.Count; $index++) {
+            $entry = $filterRows[$index]
+            $entry.Panel.Location = [Drawing.Point]::new(0, $index * 34)
+            [void]$filterPanel.Controls.Add($entry.Panel)
+        }
+        $filterPanel.AutoScrollMinSize = [Drawing.Size]::new(0, $filterRows.Count * 34)
+    }).GetNewClosure()
+    $addFilterRow = ({
+        param([string]$value)
+        $row = [Windows.Forms.Panel]::new()
+        $row.Size = [Drawing.Size]::new(635, 32)
+        $sourceBox = [Windows.Forms.TextBox]::new()
+        $sourceBox.Location = [Drawing.Point]::new(5, 4)
+        $sourceBox.Size = [Drawing.Size]::new(480, 24)
+        $sourceBox.Text = $value
+        [void]$row.Controls.Add($sourceBox)
+        $browse = [Windows.Forms.Button]::new()
+        $browse.Text = 'Browse...'
+        $browse.Location = [Drawing.Point]::new(490, 2)
+        $browse.Size = [Drawing.Size]::new(72, 27)
+        [void]$row.Controls.Add($browse)
+        $remove = [Windows.Forms.Button]::new()
+        $remove.Text = 'Remove'
+        $remove.Location = [Drawing.Point]::new(570, 2)
+        $remove.Size = [Drawing.Size]::new(58, 27)
+        [void]$row.Controls.Add($remove)
+        $entry = [pscustomobject]@{ Panel = $row; Source = $sourceBox }
+        $browse.add_Click(({
+            $picker = [Windows.Forms.OpenFileDialog]::new()
+            $picker.Title = 'Choose a filter list'
+            $picker.Filter = 'Text files (*.txt;*.hosts)|*.txt;*.hosts|All files (*.*)|*.*'
+            if (Test-Path -LiteralPath $entry.Source.Text -PathType Leaf) {
+                $picker.FileName = $entry.Source.Text
+            }
+            if ($picker.ShowDialog($form) -eq [Windows.Forms.DialogResult]::OK) {
+                $entry.Source.Text = $picker.FileName
+            }
+            $picker.Dispose()
+        }).GetNewClosure())
+        $remove.add_Click(({
+            [void]$filterRows.Remove($entry)
+            & $renderFilterRows
+        }).GetNewClosure())
+        [void]$filterRows.Add($entry)
+        & $renderFilterRows
+    }).GetNewClosure()
+    foreach ($filterList in @(Get-FilterLists)) { & $addFilterRow ([string]$filterList) }
+
+    $addFilterFileButton = [Windows.Forms.Button]::new()
+    $addFilterFileButton.Text = 'Add Local List...'
+    $addFilterFileButton.Location = [Drawing.Point]::new(20, 642)
+    $addFilterFileButton.Size = [Drawing.Size]::new(130, 30)
+    [void]$form.Controls.Add($addFilterFileButton)
+    $addFilterFileButton.add_Click(({
+        $picker = [Windows.Forms.OpenFileDialog]::new()
+        $picker.Title = 'Choose a filter list'
+        $picker.Filter = 'Text files (*.txt;*.hosts)|*.txt;*.hosts|All files (*.*)|*.*'
+        if ($picker.ShowDialog($form) -eq [Windows.Forms.DialogResult]::OK) {
+            & $addFilterRow $picker.FileName
+        }
+        $picker.Dispose()
+    }).GetNewClosure())
+    $addFilterUrlButton = [Windows.Forms.Button]::new()
+    $addFilterUrlButton.Text = 'Add Remote URL...'
+    $addFilterUrlButton.Location = [Drawing.Point]::new(160, 642)
+    $addFilterUrlButton.Size = [Drawing.Size]::new(140, 30)
+    [void]$form.Controls.Add($addFilterUrlButton)
+    $addFilterUrlButton.add_Click(({
+        $url = Prompt-RemoteUrl 'Add Filter List URL' $form
+        if ($url) { & $addFilterRow $url }
     }).GetNewClosure())
 
     $tunnel = [Windows.Forms.CheckBox]::new()
     $tunnel.Text = 'Always use CONNECT'
-    $tunnel.Location = [Drawing.Point]::new(205, 490)
+    $tunnel.Location = [Drawing.Point]::new(205, 690)
     $tunnel.AutoSize = $true
     $tunnel.Checked = [bool]$script:p.proxytunnel
     [void]$form.Controls.Add($tunnel)
@@ -500,7 +605,7 @@ function Show-Settings {
 
     $direct = [Windows.Forms.CheckBox]::new()
     $direct.Text = 'DIRECT fallback'
-    $direct.Location = [Drawing.Point]::new(205, 520)
+    $direct.Location = [Drawing.Point]::new(205, 720)
     $direct.AutoSize = $true
     $direct.Checked = [bool]$script:p.directFallback
     [void]$form.Controls.Add($direct)
@@ -508,7 +613,7 @@ function Show-Settings {
 
     $negotiate = [Windows.Forms.CheckBox]::new()
     $negotiate.Text = 'Negotiate'
-    $negotiate.Location = [Drawing.Point]::new(205, 550)
+    $negotiate.Location = [Drawing.Point]::new(205, 750)
     $negotiate.AutoSize = $true
     $negotiate.Checked = [bool]$script:p.negotiate
     $negotiate.Enabled = [bool]$script:negotiateAvailable
@@ -517,21 +622,21 @@ function Show-Settings {
 
     $autostart = [Windows.Forms.CheckBox]::new()
     $autostart.Text = 'Start Unproxy when I sign in'
-    $autostart.Location = [Drawing.Point]::new(205, 580)
+    $autostart.Location = [Drawing.Point]::new(205, 780)
     $autostart.AutoSize = $true
     $autostart.Checked = [bool]$script:p.autostart
     [void]$form.Controls.Add($autostart)
 
     $saveButton = [Windows.Forms.Button]::new()
     $saveButton.Text = 'Save'
-    $saveButton.Location = [Drawing.Point]::new(500, 635)
+    $saveButton.Location = [Drawing.Point]::new(500, 830)
     $saveButton.Size = [Drawing.Size]::new(80, 30)
     $saveButton.DialogResult = [Windows.Forms.DialogResult]::None
     [void]$form.Controls.Add($saveButton)
 
     $cancelButton = [Windows.Forms.Button]::new()
     $cancelButton.Text = 'Cancel'
-    $cancelButton.Location = [Drawing.Point]::new(590, 635)
+    $cancelButton.Location = [Drawing.Point]::new(590, 830)
     $cancelButton.Size = [Drawing.Size]::new(80, 30)
     $cancelButton.DialogResult = [Windows.Forms.DialogResult]::Cancel
     [void]$form.Controls.Add($cancelButton)
@@ -597,6 +702,37 @@ function Show-Settings {
             return
         }
 
+        $filterLists = @()
+        foreach ($entry in $filterRows) {
+            $source = $entry.Source.Text.Trim()
+            $uri = Get-PacUri $source
+            if ($uri) {
+                $source = $uri.AbsoluteUri
+            } elseif ($source -match '^(?i:https?)://') {
+                [Windows.Forms.MessageBox]::Show(
+                    "Enter a valid HTTP or HTTPS filter-list URL: $source", 'Unproxy Settings') | Out-Null
+                return
+            } else {
+                if (-not [IO.Path]::IsPathRooted($source)) {
+                    [Windows.Forms.MessageBox]::Show(
+                        "Filter-list paths must be absolute: $source", 'Unproxy Settings') | Out-Null
+                    return
+                }
+                if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+                    [Windows.Forms.MessageBox]::Show(
+                        "Filter-list file not found: $source", 'Unproxy Settings') | Out-Null
+                    return
+                }
+                $source = [IO.Path]::GetFullPath($source)
+            }
+            if ($filterLists -contains $source) {
+                [Windows.Forms.MessageBox]::Show(
+                    "Filter-list source is listed more than once: $source", 'Unproxy Settings') | Out-Null
+                return
+            }
+            $filterLists += $source
+        }
+
         $previousAutostart = [bool]$script:p.autostart
         $firstListener = Parse-ListenerAddress ([string]$listenerAddresses[0])
         $previous = [pscustomobject]@{
@@ -604,6 +740,7 @@ function Show-Settings {
             listeners = @($script:p.listeners)
             pacFiles = @($script:p.pacFiles)
             pacFile = $script:p.pacFile
+            filterLists = @($script:p.filterLists)
             proxytunnel = $script:p.proxytunnel
             directFallback = $script:p.directFallback
             negotiate = $script:p.negotiate
@@ -612,6 +749,7 @@ function Show-Settings {
         $script:p.port = [long]$firstListener.Port
         $script:p.pacFiles = $pacFiles
         $script:p.pacFile = $pacFiles[0]
+        $script:p.filterLists = $filterLists
         $script:p.proxytunnel = [bool]$tunnel.Checked
         $script:p.directFallback = [bool]$direct.Checked
         if ($script:negotiateAvailable) {
@@ -630,6 +768,7 @@ function Show-Settings {
             $script:p.listeners = $previous.listeners
             $script:p.pacFiles = $previous.pacFiles
             $script:p.pacFile = $previous.pacFile
+            $script:p.filterLists = $previous.filterLists
             $script:p.proxytunnel = $previous.proxytunnel
             $script:p.directFallback = $previous.directFallback
             $script:p.negotiate = $previous.negotiate

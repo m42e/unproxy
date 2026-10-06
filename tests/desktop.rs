@@ -8,6 +8,21 @@ fn preferences_have_expected_defaults_and_supported_flags() {
     let args = p.child_args();
     assert!(args.windows(2).any(|a| a == ["--listen", "127.0.0.1:3128"]));
     assert!(args.contains(&"--pac-file".into()));
+    assert!(p.effective_filter_lists().is_empty());
+    let mut with_filters = p.clone();
+    with_filters.filter_lists = Some(vec![
+        std::path::PathBuf::from("/tmp/hosts.txt"),
+        std::path::PathBuf::from("https://filters.example.test/hosts.txt"),
+    ]);
+    let filter_args = with_filters.child_args();
+    assert_eq!(
+        filter_args
+            .windows(2)
+            .filter(|args| args[0] == "--filter-list")
+            .map(|args| args[1].as_str())
+            .collect::<Vec<_>>(),
+        ["/tmp/hosts.txt", "https://filters.example.test/hosts.txt"]
+    );
     assert!(
         args.windows(2)
             .any(|a| a == ["--graceful-shutdown-timeout", "0"])
@@ -25,6 +40,22 @@ fn preferences_have_expected_defaults_and_supported_flags() {
     assert!(a.contains(&"--negotiate".into()));
     #[cfg(not(feature = "negotiate"))]
     assert!(!a.contains(&"--negotiate".into()));
+}
+
+#[test]
+fn windows_settings_dialog_exposes_optional_local_and_remote_filter_sources() {
+    let script = include_str!("../assets/unproxy-tray.ps1");
+    for expected in [
+        "Optional ad blocking lists (Pi-hole / hosts format)",
+        "Add Local List...",
+        "Add Remote URL...",
+        "filterLists = $filterLists",
+    ] {
+        assert!(
+            script.contains(expected),
+            "missing Windows settings UI: {expected}"
+        );
+    }
 }
 
 #[test]
@@ -219,6 +250,10 @@ fn preferences_roundtrip_with_camel_case_settings_format_and_load_legacy_snake_c
     let prefs = Preferences {
         pac_file: pac_file.clone(),
         pac_files: Some(vec![pac_file.clone()]),
+        filter_lists: Some(vec![
+            dir.path().join("hosts.txt"),
+            "https://filters.example.test/hosts.txt".into(),
+        ]),
         direct_fallback: true,
         ..Preferences::default()
     };
@@ -227,12 +262,14 @@ fn preferences_roundtrip_with_camel_case_settings_format_and_load_legacy_snake_c
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert!(saved.get("pacFile").is_some());
     assert!(saved.get("pacFiles").is_some());
+    assert!(saved.get("filterLists").is_some());
     assert_eq!(saved["directFallback"], true);
     assert!(saved.get("pac_file").is_none());
 
     let helper_json = serde_json::json!({
         "pacFile": pac_file,
         "pacFiles": [pac_file],
+        "filterLists": [dir.path().join("hosts.txt"), "https://filters.example.test/hosts.txt"],
         "directFallback": true
     })
     .to_string();
@@ -243,12 +280,14 @@ fn preferences_roundtrip_with_camel_case_settings_format_and_load_legacy_snake_c
     assert!(helper_preferences.direct_fallback);
     assert_eq!(helper_preferences.pac_file, pac_file);
     assert_eq!(helper_preferences.pac_files, Some(vec![pac_file.clone()]));
+    assert_eq!(helper_preferences.filter_lists, prefs.filter_lists);
 
     std::fs::write(
         &path,
         serde_json::json!({
             "pac_file": pac_file,
             "pac_files": [pac_file],
+            "filter_lists": [dir.path().join("hosts.txt"), "https://filters.example.test/hosts.txt"],
             "direct_fallback": true
         })
         .to_string(),
@@ -258,6 +297,7 @@ fn preferences_roundtrip_with_camel_case_settings_format_and_load_legacy_snake_c
     assert!(loaded.direct_fallback);
     assert_eq!(loaded.pac_file, pac_file);
     assert_eq!(loaded.pac_files, Some(vec![pac_file]));
+    assert_eq!(loaded.filter_lists, prefs.filter_lists);
 }
 
 #[test]

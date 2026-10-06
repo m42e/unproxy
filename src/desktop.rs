@@ -24,6 +24,12 @@ pub struct Preferences {
     pub pac_file: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "pac_files")]
     pub pac_files: Option<Vec<PathBuf>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "filter_lists"
+    )]
+    pub filter_lists: Option<Vec<PathBuf>>,
     pub negotiate: bool,
     pub proxytunnel: bool,
     #[serde(alias = "direct_fallback")]
@@ -87,6 +93,7 @@ impl Default for Preferences {
             listeners: None,
             pac_file: default_pac_path(),
             pac_files: None,
+            filter_lists: None,
             negotiate: false,
             proxytunnel: false,
             direct_fallback: false,
@@ -220,6 +227,9 @@ impl Preferences {
         }
         vec![self.pac_file.clone()]
     }
+    pub fn effective_filter_lists(&self) -> Vec<PathBuf> {
+        self.filter_lists.clone().unwrap_or_default()
+    }
     pub fn child_args(&self) -> Vec<String> {
         let mut a = Vec::new();
         for listener in self.effective_listeners() {
@@ -230,6 +240,16 @@ impl Preferences {
         for pac_file in self.effective_pac_files() {
             a.push("--pac-file".into());
             let value = pac_file.to_string_lossy();
+            let source = parse_remote_pac_uri(&value)
+                .ok()
+                .flatten()
+                .map(|uri| uri.to_string())
+                .unwrap_or_else(|| value.into_owned());
+            a.push(source);
+        }
+        for filter_list in self.effective_filter_lists() {
+            a.push("--filter-list".into());
+            let value = filter_list.to_string_lossy();
             let source = parse_remote_pac_uri(&value)
                 .ok()
                 .flatten()
@@ -526,9 +546,11 @@ mod native {
     static STATE: Mutex<Option<Arc<Mutex<State>>>> = Mutex::new(None);
     static EDITOR_LISTENERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static EDITOR_PAC_FILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static EDITOR_FILTER_LISTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static EDITOR_PREFS: Mutex<Option<Preferences>> = Mutex::new(None);
     static LISTENER_TABLE: Mutex<usize> = Mutex::new(0);
     static PAC_FILE_TABLE: Mutex<usize> = Mutex::new(0);
+    static FILTER_LIST_TABLE: Mutex<usize> = Mutex::new(0);
     const SETTINGS_TABLE_ROW_HEIGHT: f64 = 20.0;
     #[derive(Clone, Default)]
     struct TrayStatus {
@@ -1496,10 +1518,10 @@ mod native {
         let _: () = unsafe { msg_send![scroll, setDocumentView:table] };
         let _: () = unsafe { msg_send![table, reloadData] };
         let _: () = unsafe { msg_send![content, addSubview:scroll] };
-        let count = if tag == 1 {
-            EDITOR_LISTENERS.lock().unwrap().len()
-        } else {
-            EDITOR_PAC_FILES.lock().unwrap().len()
+        let count = match tag {
+            1 => EDITOR_LISTENERS.lock().unwrap().len(),
+            2 => EDITOR_PAC_FILES.lock().unwrap().len(),
+            _ => EDITOR_FILTER_LISTS.lock().unwrap().len(),
         };
         if count > 0 {
             let _: () = unsafe {
@@ -1545,6 +1567,22 @@ mod native {
         let path: *mut AnyObject = unsafe { msg_send![url, path] };
         cocoa_text(path)
     }
+    fn choose_filter_list_file() -> Option<String> {
+        let panel: *mut AnyObject = unsafe { msg_send![objc2::class!(NSOpenPanel), openPanel] };
+        let _: () = unsafe { msg_send![panel, setTitle:cocoa_string("Choose a filter-list file")] };
+        let _: () = unsafe { msg_send![panel, setPrompt:cocoa_string("Add")] };
+        let _: () = unsafe { msg_send![panel, setCanChooseFiles:objc2::runtime::Bool::YES] };
+        let _: () = unsafe { msg_send![panel, setCanChooseDirectories:objc2::runtime::Bool::NO] };
+        let _: () =
+            unsafe { msg_send![panel, setAllowsMultipleSelection:objc2::runtime::Bool::NO] };
+        let response: isize = unsafe { msg_send![panel, runModal] };
+        if response != 1 {
+            return None;
+        }
+        let url: *mut AnyObject = unsafe { msg_send![panel, URL] };
+        let path: *mut AnyObject = unsafe { msg_send![url, path] };
+        cocoa_text(path)
+    }
     fn add_remote_pac_file() -> Result<()> {
         let Some(value) = prompt("HTTP or HTTPS PAC URL", "https://") else {
             return Ok(());
@@ -1556,6 +1594,26 @@ mod native {
         drop(values);
 
         let table = *PAC_FILE_TABLE.lock().unwrap() as *mut AnyObject;
+        if !table.is_null() {
+            let _: () = unsafe { msg_send![table, reloadData] };
+            let _: () = unsafe {
+                msg_send![table, selectRowIndexes:index_set(index), byExtendingSelection:objc2::runtime::Bool::NO]
+            };
+            let _: () = unsafe { msg_send![table, scrollRowToVisible:index as isize] };
+        }
+        commit_editor_preferences()
+    }
+    fn add_remote_filter_list() -> Result<()> {
+        let Some(value) = prompt("HTTP or HTTPS filter-list URL", "https://") else {
+            return Ok(());
+        };
+        let uri =
+            parse_remote_pac_uri(&value)?.context("enter a valid HTTP or HTTPS filter-list URL")?;
+        let mut values = EDITOR_FILTER_LISTS.lock().unwrap();
+        values.push(uri.to_string());
+        let index = values.len() - 1;
+        drop(values);
+        let table = *FILTER_LIST_TABLE.lock().unwrap() as *mut AnyObject;
         if !table.is_null() {
             let _: () = unsafe { msg_send![table, reloadData] };
             let _: () = unsafe {
@@ -1675,8 +1733,10 @@ mod native {
         let tag: isize = unsafe { msg_send![table, tag] };
         if tag == 1 {
             EDITOR_LISTENERS.lock().unwrap().len() as isize
-        } else {
+        } else if tag == 2 {
             EDITOR_PAC_FILES.lock().unwrap().len() as isize
+        } else {
+            EDITOR_FILTER_LISTS.lock().unwrap().len() as isize
         }
     }
     unsafe extern "C-unwind" fn list_object_value(
@@ -1690,21 +1750,24 @@ mod native {
             return ptr::null_mut();
         }
         let tag: isize = unsafe { msg_send![table, tag] };
-        if tag == 1 {
-            EDITOR_LISTENERS
+        match tag {
+            1 => EDITOR_LISTENERS
                 .lock()
                 .unwrap()
                 .get(row as usize)
-                .map(|value| cocoa_string(value))
-                .unwrap_or(ptr::null_mut())
-        } else {
-            EDITOR_PAC_FILES
+                .map(|value| cocoa_string(value)),
+            2 => EDITOR_PAC_FILES
                 .lock()
                 .unwrap()
                 .get(row as usize)
-                .map(|value| cocoa_string(value))
-                .unwrap_or(ptr::null_mut())
+                .map(|value| cocoa_string(value)),
+            _ => EDITOR_FILTER_LISTS
+                .lock()
+                .unwrap()
+                .get(row as usize)
+                .map(|value| cocoa_string(value)),
         }
+        .unwrap_or(ptr::null_mut())
     }
     unsafe extern "C-unwind" fn list_set_object_value(
         _this: *mut AnyObject,
@@ -1721,21 +1784,24 @@ mod native {
             return;
         };
         let tag: isize = unsafe { msg_send![table, tag] };
-        let updated = if tag == 1 {
-            EDITOR_LISTENERS
+        let updated = match tag {
+            1 => EDITOR_LISTENERS
                 .lock()
                 .unwrap()
                 .get_mut(row as usize)
-                .map(|slot| *slot = value)
-                .is_some()
-        } else {
-            EDITOR_PAC_FILES
+                .map(|slot| *slot = value),
+            2 => EDITOR_PAC_FILES
                 .lock()
                 .unwrap()
                 .get_mut(row as usize)
-                .map(|slot| *slot = value)
-                .is_some()
-        };
+                .map(|slot| *slot = value),
+            _ => EDITOR_FILTER_LISTS
+                .lock()
+                .unwrap()
+                .get_mut(row as usize)
+                .map(|slot| *slot = value),
+        }
+        .is_some();
         if updated && let Err(error) = commit_editor_preferences() {
             show_message("Could not apply this change", &format!("{error:#}"));
         }
@@ -1748,15 +1814,20 @@ mod native {
         values: &mut Vec<String>,
         operation: isize,
         selected: Option<usize>,
+        require_one: bool,
     ) -> Result<Option<usize>> {
         let mut new_selection = selected;
         match operation {
             3 => {
                 if let Some(index) = selected {
-                    anyhow::ensure!(values.len() > 1, "at least one item is required");
+                    anyhow::ensure!(
+                        !require_one || values.len() > 1,
+                        "at least one item is required"
+                    );
                     if index < values.len() {
                         values.remove(index);
-                        new_selection = Some(index.min(values.len() - 1));
+                        new_selection = (!values.is_empty())
+                            .then_some(index.min(values.len().saturating_sub(1)));
                     }
                 }
             }
@@ -1808,20 +1879,31 @@ mod native {
             }
             return;
         }
+        if action == 1307 {
+            if let Err(error) = add_remote_filter_list() {
+                show_message("Could not add filter-list URL", &format!("{error:#}"));
+            }
+            return;
+        }
         if (3001..=3003).contains(&action) {
             change_editor_checkbox(sender, action);
             return;
         }
-        let (is_pac_files, operation, table) = match action {
+        let (list_kind, operation, table) = match action {
             1102..=1105 => (
-                false,
+                1,
                 action - 1100,
                 *LISTENER_TABLE.lock().unwrap() as *mut AnyObject,
             ),
             1202..=1205 => (
-                true,
+                2,
                 action - 1200,
                 *PAC_FILE_TABLE.lock().unwrap() as *mut AnyObject,
+            ),
+            1302..=1305 => (
+                3,
+                action - 1300,
+                *FILTER_LIST_TABLE.lock().unwrap() as *mut AnyObject,
             ),
             _ => return,
         };
@@ -1834,9 +1916,18 @@ mod native {
         let mut edit_new_row = false;
         let mut new_selection = selected;
         if operation == 2 {
-            if is_pac_files {
-                if let Some(path) = choose_pac_file() {
-                    let mut values = EDITOR_PAC_FILES.lock().unwrap();
+            if list_kind == 2 || list_kind == 3 {
+                let value = if list_kind == 2 {
+                    choose_pac_file()
+                } else {
+                    choose_filter_list_file()
+                };
+                if let Some(path) = value {
+                    let mut values = if list_kind == 2 {
+                        EDITOR_PAC_FILES.lock().unwrap()
+                    } else {
+                        EDITOR_FILTER_LISTS.lock().unwrap()
+                    };
                     values.push(path);
                     new_selection = Some(values.len() - 1);
                 }
@@ -1846,12 +1937,12 @@ mod native {
                 new_selection = Some(append_listener_placeholder(&mut values));
             }
         } else {
-            let mut values = if is_pac_files {
-                EDITOR_PAC_FILES.lock().unwrap()
-            } else {
-                EDITOR_LISTENERS.lock().unwrap()
+            let mut values = match list_kind {
+                1 => EDITOR_LISTENERS.lock().unwrap(),
+                2 => EDITOR_PAC_FILES.lock().unwrap(),
+                _ => EDITOR_FILTER_LISTS.lock().unwrap(),
             };
-            match update_editor_list(&mut values, operation, selected) {
+            match update_editor_list(&mut values, operation, selected, list_kind != 3) {
                 Ok(selection) => new_selection = selection,
                 Err(_) => {
                     drop(values);
@@ -1990,6 +2081,36 @@ mod native {
         updated.listeners = Some(parsed.iter().map(ToString::to_string).collect());
         updated.pac_file = pac_files[0].clone();
         updated.pac_files = Some(pac_files);
+        let filter_values = EDITOR_FILTER_LISTS.lock().unwrap().clone();
+        let mut filter_lists = Vec::with_capacity(filter_values.len());
+        let mut unique_filter_lists = std::collections::HashSet::new();
+        for value in filter_values {
+            let path = if let Some(uri) = parse_remote_pac_uri(&value)? {
+                PathBuf::from(uri.to_string())
+            } else {
+                let path = PathBuf::from(value.trim());
+                anyhow::ensure!(
+                    path.is_absolute(),
+                    "filter-list path must be absolute: {}",
+                    path.display()
+                );
+                anyhow::ensure!(
+                    path.is_file(),
+                    "filter-list file is missing: {}",
+                    path.display()
+                );
+                std::fs::File::open(&path)
+                    .with_context(|| format!("could not read filter list {}", path.display()))?;
+                path
+            };
+            anyhow::ensure!(
+                unique_filter_lists.insert(path.clone()),
+                "filter-list source is listed more than once: {}",
+                path.display()
+            );
+            filter_lists.push(path);
+        }
+        updated.filter_lists = Some(filter_lists);
         Ok(updated)
     }
     fn commit_editor_preferences() -> Result<()> {
@@ -2006,6 +2127,7 @@ mod native {
         }
         let restart_required = updated.effective_listeners() != state.prefs.effective_listeners()
             || updated.effective_pac_files() != state.prefs.effective_pac_files()
+            || updated.effective_filter_lists() != state.prefs.effective_filter_lists()
             || updated.negotiate != state.prefs.negotiate
             || updated.proxytunnel != state.prefs.proxytunnel
             || updated.direct_fallback != state.prefs.direct_fallback;
@@ -2056,6 +2178,7 @@ mod native {
         }
         *LISTENER_TABLE.lock().unwrap() = 0;
         *PAC_FILE_TABLE.lock().unwrap() = 0;
+        *FILTER_LIST_TABLE.lock().unwrap() = 0;
         Ok(())
     }
 
@@ -2066,11 +2189,16 @@ mod native {
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
+        *EDITOR_FILTER_LISTS.lock().unwrap() = prefs
+            .effective_filter_lists()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
         *EDITOR_PREFS.lock().unwrap() = Some(prefs.clone());
 
         let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSWindow), alloc] };
         let window: *mut AnyObject = unsafe {
-            msg_send![allocated, initWithContentRect:rect(0.0, 0.0, 960.0, 660.0), styleMask:3isize, backing:2isize, defer:objc2::runtime::Bool::NO]
+            msg_send![allocated, initWithContentRect:rect(0.0, 0.0, 1000.0, 660.0), styleMask:3isize, backing:2isize, defer:objc2::runtime::Bool::NO]
         };
         anyhow::ensure!(!window.is_null(), "could not create the settings window");
         let _: () = unsafe { msg_send![window, setReleasedWhenClosed:objc2::runtime::Bool::NO] };
@@ -2085,43 +2213,64 @@ mod native {
             "Changes are applied immediately as you edit.",
             24.0,
             612.0,
-            912.0,
+            952.0,
             24.0,
             false,
         );
-        settings_label(content, "Listeners", 24.0, 570.0, 440.0, 24.0, true);
+        settings_label(content, "Listeners", 24.0, 570.0, 300.0, 24.0, true);
         settings_label(
             content,
-            "Numeric IP and port; put IPv6 addresses in brackets.",
+            "Numeric address and port; IPv6 in brackets.",
             24.0,
             542.0,
-            440.0,
+            300.0,
             22.0,
             false,
         );
-        settings_label(content, "PAC files", 490.0, 570.0, 446.0, 24.0, true);
+        settings_label(content, "PAC files", 350.0, 570.0, 300.0, 24.0, true);
         settings_label(
             content,
-            "Files or URLs; first non-DIRECT result wins, top to bottom.",
-            490.0,
+            "PAC files or URLs, checked top to bottom.",
+            350.0,
             542.0,
-            446.0,
+            300.0,
             22.0,
             false,
         );
-        let listener_table = settings_list_table(content, target, 1, 24.0, 204.0, 440.0, 320.0);
-        let pac_table = settings_list_table(content, target, 2, 490.0, 204.0, 446.0, 320.0);
+        settings_label(
+            content,
+            "Ad blocking lists",
+            676.0,
+            570.0,
+            300.0,
+            24.0,
+            true,
+        );
+        settings_label(
+            content,
+            "Optional Pi-hole or hosts-format lists.",
+            676.0,
+            542.0,
+            300.0,
+            22.0,
+            false,
+        );
+        let listener_table = settings_list_table(content, target, 1, 24.0, 204.0, 300.0, 320.0);
+        let pac_table = settings_list_table(content, target, 2, 350.0, 204.0, 300.0, 320.0);
+        let filter_table = settings_list_table(content, target, 3, 676.0, 204.0, 300.0, 320.0);
         *LISTENER_TABLE.lock().unwrap() = listener_table as usize;
         *PAC_FILE_TABLE.lock().unwrap() = pac_table as usize;
+        *FILTER_LIST_TABLE.lock().unwrap() = filter_table as usize;
         settings_toolbar(content, target, 1100, 24.0);
-        settings_toolbar(content, target, 1200, 490.0);
+        settings_toolbar(content, target, 1200, 350.0);
+        settings_toolbar(content, target, 1300, 676.0);
         settings_button(
             content,
             target,
             "Add URL…",
             "Add a remote HTTP or HTTPS PAC URL",
             1207,
-            rect(612.0, 168.0, 100.0, 26.0),
+            rect(350.0, 134.0, 82.0, 26.0),
             None,
         );
         settings_button(
@@ -2130,7 +2279,7 @@ mod native {
             "Open / View",
             "Open the selected local PAC file or view a remote PAC URL",
             1206,
-            rect(720.0, 168.0, 124.0, 26.0),
+            rect(438.0, 134.0, 92.0, 26.0),
             None,
         );
         settings_button(
@@ -2139,7 +2288,16 @@ mod native {
             "Copy Path",
             "Copy the selected PAC file path or URL to the clipboard",
             1208,
-            rect(852.0, 168.0, 84.0, 26.0),
+            rect(536.0, 134.0, 82.0, 26.0),
+            None,
+        );
+        settings_button(
+            content,
+            target,
+            "Add URL…",
+            "Add a remote HTTP or HTTPS filter list",
+            1307,
+            rect(676.0, 134.0, 106.0, 26.0),
             None,
         );
 
@@ -2147,7 +2305,7 @@ mod native {
             content,
             "Connection behavior",
             24.0,
-            125.0,
+            108.0,
             440.0,
             24.0,
             true,
@@ -2368,6 +2526,23 @@ mod native {
             }
             p.pac_files = Some(values);
         }
+        let filter_lists = get("filterLists");
+        if !filter_lists.is_null() {
+            let count: usize = unsafe { msg_send![filter_lists, count] };
+            let mut values = Vec::with_capacity(count);
+            for index in 0..count {
+                let item: *mut AnyObject = unsafe { msg_send![filter_lists, objectAtIndex:index] };
+                let bytes: *const std::ffi::c_char = unsafe { msg_send![item, UTF8String] };
+                if !bytes.is_null() {
+                    values.push(resolve_pac_source(PathBuf::from(
+                        unsafe { std::ffi::CStr::from_ptr(bytes) }
+                            .to_string_lossy()
+                            .into_owned(),
+                    ))?);
+                }
+            }
+            p.filter_lists = Some(values);
+        }
         for (name, field) in [
             ("negotiate", 0u8),
             ("proxytunnel", 1),
@@ -2420,6 +2595,17 @@ mod native {
             let _: () = unsafe { msg_send![d,setObject:array,forKey:cocoa_string("pacFiles")] };
         } else {
             let _: () = unsafe { msg_send![d,removeObjectForKey:cocoa_string("pacFiles")] };
+        }
+        if let Some(filter_lists) = &p.filter_lists {
+            let array: *mut AnyObject = unsafe { msg_send![objc2::class!(NSMutableArray), new] };
+            for filter_list in filter_lists {
+                let _: () = unsafe {
+                    msg_send![array, addObject:cocoa_string(&filter_list.to_string_lossy())]
+                };
+            }
+            let _: () = unsafe { msg_send![d,setObject:array,forKey:cocoa_string("filterLists")] };
+        } else {
+            let _: () = unsafe { msg_send![d,removeObjectForKey:cocoa_string("filterLists")] };
         }
         let _: () = unsafe {
             msg_send![d,setObject:cocoa_string(&p.pac_file.to_string_lossy()),forKey:cocoa_string("pacFile")]
@@ -2711,6 +2897,17 @@ mod native {
             let _: () = unsafe {
                 msg_send![defaults, setObject:native_pac_files, forKey:cocoa_string("pacFiles")]
             };
+            let native_filter_lists: *mut AnyObject =
+                unsafe { msg_send![objc2::class!(NSMutableArray), new] };
+            let _: () = unsafe {
+                msg_send![native_filter_lists, addObject:cocoa_string(&pac_file.to_string_lossy())]
+            };
+            let _: () = unsafe {
+                msg_send![native_filter_lists, addObject:cocoa_string("https://filters.example.test/hosts.txt")]
+            };
+            let _: () = unsafe {
+                msg_send![defaults, setObject:native_filter_lists, forKey:cocoa_string("filterLists")]
+            };
             let loaded = native_preferences_with(defaults, &preferences_path)?;
             anyhow::ensure!(loaded.port == 0 && loaded.effective_port() == 3128);
             anyhow::ensure!(loaded.pac_file == std::env::current_dir()?.join("relative.pac"));
@@ -2719,6 +2916,12 @@ mod native {
             );
             anyhow::ensure!(loaded.effective_pac_files().len() == 2);
             anyhow::ensure!(loaded.effective_pac_files()[1] == pac_file);
+            anyhow::ensure!(loaded.effective_filter_lists().len() == 2);
+            anyhow::ensure!(loaded.effective_filter_lists()[0] == pac_file);
+            anyhow::ensure!(
+                loaded.effective_filter_lists()[1].to_string_lossy()
+                    == "https://filters.example.test/hosts.txt"
+            );
             anyhow::ensure!(loaded.negotiate && loaded.proxytunnel && loaded.direct_fallback);
             anyhow::ensure!(!loaded.autostart);
             let bad_path = support_dir.join("not-a-directory");
@@ -2732,6 +2935,7 @@ mod native {
                 listeners: None,
                 pac_file: pac_file.to_owned(),
                 pac_files: None,
+                filter_lists: None,
                 negotiate: true,
                 proxytunnel: false,
                 direct_fallback: false,
@@ -3050,18 +3254,25 @@ mod native {
             let listener_table = *LISTENER_TABLE.lock().unwrap() as *mut AnyObject;
             let pac_table = *PAC_FILE_TABLE.lock().unwrap() as *mut AnyObject;
             anyhow::ensure!(!listener_table.is_null() && !pac_table.is_null());
+            let filter_table = *FILTER_LIST_TABLE.lock().unwrap() as *mut AnyObject;
+            anyhow::ensure!(
+                !filter_table.is_null(),
+                "settings window has no filter-list table"
+            );
             let content: *mut AnyObject = unsafe { msg_send![window, contentView] };
             let subviews: *mut AnyObject = unsafe { msg_send![content, subviews] };
             let subview_count: usize = unsafe { msg_send![subviews, count] };
             let mut has_open_view = false;
             let mut has_add_url = false;
             let mut has_copy_path = false;
+            let mut has_filter_url = false;
             for index in 0..subview_count {
                 let subview: *mut AnyObject = unsafe { msg_send![subviews, objectAtIndex:index] };
                 let tag: isize = unsafe { msg_send![subview, tag] };
                 has_open_view |= tag == 1206;
                 has_add_url |= tag == 1207;
                 has_copy_path |= tag == 1208;
+                has_filter_url |= tag == 1307;
             }
             anyhow::ensure!(
                 has_open_view,
@@ -3069,15 +3280,24 @@ mod native {
             );
             anyhow::ensure!(has_add_url, "settings window has no Add URL button");
             anyhow::ensure!(has_copy_path, "settings window has no Copy Path button");
+            anyhow::ensure!(
+                has_filter_url,
+                "settings window has no Add filter-list URL button"
+            );
             let original_listeners = prefs.effective_listeners();
 
             let listener_row_height: f64 = unsafe { msg_send![listener_table, rowHeight] };
             let pac_row_height: f64 = unsafe { msg_send![pac_table, rowHeight] };
+            let filter_row_height: f64 = unsafe { msg_send![filter_table, rowHeight] };
             anyhow::ensure!(
                 listener_row_height == SETTINGS_TABLE_ROW_HEIGHT
                     && pac_row_height == SETTINGS_TABLE_ROW_HEIGHT,
                 "settings list rows have unexpected heights: listeners={listener_row_height}, PAC={pac_row_height}"
             );
+            anyhow::ensure!(filter_row_height == SETTINGS_TABLE_ROW_HEIGHT);
+            let filter_rows: isize =
+                unsafe { msg_send![target, numberOfRowsInTableView:filter_table] };
+            anyhow::ensure!(filter_rows == prefs.effective_filter_lists().len() as isize);
 
             let listener_rows: isize =
                 unsafe { msg_send![target, numberOfRowsInTableView:listener_table] };
@@ -3685,17 +3905,17 @@ mod native {
             assert_eq!(values, ["first", "second", ""]);
 
             assert_eq!(
-                update_editor_list(&mut values, 4, Some(2)).unwrap(),
+                update_editor_list(&mut values, 4, Some(2), true).unwrap(),
                 Some(1)
             );
             assert_eq!(values, ["first", "", "second"]);
             assert_eq!(
-                update_editor_list(&mut values, 5, Some(1)).unwrap(),
+                update_editor_list(&mut values, 5, Some(1), true).unwrap(),
                 Some(2)
             );
             assert_eq!(values, ["first", "second", ""]);
             assert_eq!(
-                update_editor_list(&mut values, 3, Some(2)).unwrap(),
+                update_editor_list(&mut values, 3, Some(2), true).unwrap(),
                 Some(1)
             );
             assert_eq!(values, ["first", "second"]);
@@ -3705,24 +3925,37 @@ mod native {
         fn editor_list_actions_handle_boundaries_and_reject_removing_last_item() {
             let mut values = vec!["first".to_owned(), "second".to_owned()];
             assert_eq!(
-                update_editor_list(&mut values, 4, Some(0)).unwrap(),
+                update_editor_list(&mut values, 4, Some(0), true).unwrap(),
                 Some(0)
             );
             assert_eq!(
-                update_editor_list(&mut values, 5, Some(1)).unwrap(),
+                update_editor_list(&mut values, 5, Some(1), true).unwrap(),
                 Some(1)
             );
-            assert_eq!(update_editor_list(&mut values, 3, None).unwrap(), None);
+            assert_eq!(
+                update_editor_list(&mut values, 3, None, true).unwrap(),
+                None
+            );
             assert_eq!(values, ["first", "second"]);
 
             let mut only_item = vec!["only".to_owned()];
             assert!(
-                update_editor_list(&mut only_item, 3, Some(0))
+                update_editor_list(&mut only_item, 3, Some(0), true)
                     .unwrap_err()
                     .to_string()
                     .contains("at least one item")
             );
             assert_eq!(only_item, ["only"]);
+        }
+
+        #[test]
+        fn filter_list_editor_allows_removing_every_optional_source() {
+            let mut values = vec!["/tmp/hosts.txt".to_owned()];
+            assert_eq!(
+                update_editor_list(&mut values, 3, Some(0), false).unwrap(),
+                None
+            );
+            assert!(values.is_empty());
         }
     }
 }

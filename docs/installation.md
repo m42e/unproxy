@@ -64,7 +64,8 @@ Add `-RemoveUserData` to also delete Unproxy preferences and logs.
 3. Click the Unproxy icon in the menu bar. Its status row starts or stops the
    proxy.
 
-Choose **Settings…** to set listeners, ordered PAC files, and proxy behavior.
+Choose **Settings…** to set listeners, ordered PAC files, optional ad blocking
+lists, and proxy behavior.
 Use **Start with Login** to control whether the app opens when you sign in. The
 menu also has actions to open the log and copy the proxy address.
 
