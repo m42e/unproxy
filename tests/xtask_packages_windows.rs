@@ -5,6 +5,10 @@ use std::{
     process::{Command, Output},
 };
 
+fn package_version() -> &'static str {
+    unproxy::VERSION.split('+').next().unwrap()
+}
+
 struct Fixture {
     root: tempfile::TempDir,
     tools: PathBuf,
@@ -216,7 +220,7 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
 
     let archive = root.join(format!(
         "dist/windows package/unproxy-{}-{target}.zip",
-        unproxy::VERSION
+        package_version()
     ));
     let extracted = root.join("expanded Windows package");
     let extraction = fixture.command(&[
@@ -285,7 +289,7 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
     assert!(
         root.join(format!(
             "dist/windows package/unproxy-{}-{target}.zip",
-            unproxy::VERSION
+            package_version()
         ))
         .is_file()
     );
@@ -418,7 +422,7 @@ fn main() {
         String::from_utf8_lossy(&deb.stdout),
         String::from_utf8_lossy(&deb.stderr)
     );
-    let deb_name = format!("unproxy-{}-{debian_target}.deb", unproxy::VERSION);
+    let deb_name = format!("unproxy-{}-{debian_target}.deb", package_version());
     assert!(root.join("dist/deb").join(deb_name).is_file());
     let captured = std::fs::read_to_string(&dpkg_capture).unwrap();
     assert!(captured.contains("--root-owner-group\n--build"));
@@ -446,7 +450,7 @@ fn main() {
         root.join("dist/macos")
             .join(format!(
                 "unproxy-{}-{darwin_target}-staging.zip",
-                unproxy::VERSION
+                package_version()
             ))
             .is_file()
     );
@@ -470,7 +474,7 @@ fn main() {
         root.join("dist/app")
             .join(format!(
                 "unproxy-{}-{darwin_target}-app.zip",
-                unproxy::VERSION
+                package_version()
             ))
             .is_file()
     );
@@ -478,7 +482,7 @@ fn main() {
         root.join("dist/app")
             .join(format!(
                 "unproxy-{}-{darwin_target}-app-pkg-staging.zip",
-                unproxy::VERSION
+                package_version()
             ))
             .is_file()
     );
