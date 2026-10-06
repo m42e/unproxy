@@ -1123,7 +1123,7 @@ async fn handle(
             &events,
             AccessEntry::for_request(
                 peer,
-                Some(Route::Direct),
+                None,
                 &req,
                 start.elapsed(),
                 AccessOutcome::Error(format!("could not connect to {}", destination.endpoint)),
