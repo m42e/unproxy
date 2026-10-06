@@ -117,9 +117,23 @@ impl RotatingLogState {
     }
 
     fn compact(&mut self) -> io::Result<()> {
-        let file = self.file.as_mut().expect("rotating log file is open");
-        trim_open_file_to_limit(file, self.max_bytes / 2)?;
-        self.size = file.metadata()?.len();
+        drop(self.file.take());
+        let compacted = (|| {
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.path)?;
+            trim_open_file_to_limit(&mut file, self.max_bytes / 2)?;
+            file.metadata().map(|metadata| metadata.len())
+        })();
+        self.file = Some(open_log_file(&self.path)?);
+        self.size = self
+            .file
+            .as_ref()
+            .expect("rotating log file is open")
+            .metadata()?
+            .len();
+        compacted?;
         Ok(())
     }
 }
@@ -163,8 +177,11 @@ fn trim_open_file_to_limit(file: &mut fs::File, max_bytes: u64) -> io::Result<()
 
 fn rotate_paths(path: &Path, backups: usize) -> io::Result<()> {
     if backups == 0 {
-        let file = open_log_file(path)?;
-        file.set_len(0)?;
+        let _file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
         return Ok(());
     }
     remove_if_exists(&backup_path(path, backups))?;
@@ -589,6 +606,43 @@ mod tests {
         for log_path in [&path, &backup_path(&path, 1), &backup_path(&path, 2)] {
             assert!(fs::metadata(log_path).unwrap().len() <= 8);
         }
+    }
+
+    #[test]
+    fn logfile_open_trims_oversized_active_and_backup_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unproxy.log");
+        fs::write(&path, b"abcdefghij").unwrap();
+        fs::write(backup_path(&path, 1), b"0123456789").unwrap();
+
+        let _log = RotatingLog::open(&path, 4, 1).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"ghij");
+        assert_eq!(fs::read(backup_path(&path, 1)).unwrap(), b"6789");
+    }
+
+    #[test]
+    fn logfile_without_backups_restarts_the_active_file_at_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unproxy.log");
+        let log = RotatingLog::open(&path, 4, 0).unwrap();
+
+        log.make_writer().write_all(b"abcdefghij").unwrap();
+
+        assert_eq!(fs::read(path).unwrap(), b"ij");
+    }
+
+    #[test]
+    fn logfile_compacts_when_rotation_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unproxy.log");
+        let log = RotatingLog::open(&path, 8, 1).unwrap();
+        fs::create_dir(backup_path(&path, 1)).unwrap();
+
+        log.make_writer().write_all(b"12345678ABCDEFGH").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"ABCDEFGH");
+        assert!(backup_path(&path, 1).is_dir());
     }
 
     #[test]

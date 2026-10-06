@@ -1,0 +1,59 @@
+name: corporate-auth
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      windows_sspi:
+        description: Run SSPI on the controlled domain identity runner
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  kerberos:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install disposable identity fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y krb5-kdc krb5-admin-server krb5-user squid
+          sudo systemctl stop squid.service
+      - name: Authenticate forwarding and CONNECT with MIT Kerberos
+        run: bash scripts/test_corporate_auth.sh
+  windows-sspi:
+    # Domain credentials must never be exposed to pull-request code.
+    if: github.event_name == 'workflow_dispatch' && inputs.windows_sspi && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, unproxy-auth]
+    environment: corporate-auth
+    timeout-minutes: 30
+    env:
+      UNPROXY_AUTH_BACKEND: sspi
+      UNPROXY_AUTH_PROXY_HOST: ${{ vars.UNPROXY_AUTH_PROXY_HOST }}
+      UNPROXY_AUTH_PROXY_PORT: ${{ vars.UNPROXY_AUTH_PROXY_PORT }}
+      UNPROXY_AUTH_ORIGIN_HOST: ${{ vars.UNPROXY_AUTH_ORIGIN_HOST }}
+      UNPROXY_AUTH_ORIGIN_PORT: ${{ vars.UNPROXY_AUTH_ORIGIN_PORT }}
+      UNPROXY_AUTH_EXPECTED_BODY: ${{ vars.UNPROXY_AUTH_EXPECTED_BODY }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify domain identity and service ticket
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:UNPROXY_AUTH_PROXY_HOST)) {
+            throw 'Missing controlled identity proxy host'
+          }
+          $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+          if (-not $identity.IsAuthenticated -or $identity.Name -notlike '*\*') {
+            throw 'Runner must execute as the fixture domain account'
+          }
+          klist get "HTTP/$env:UNPROXY_AUTH_PROXY_HOST"
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture Kerberos service ticket unavailable' }
+      - name: Authenticate forwarding and CONNECT with Windows SSPI
+        run: cargo test --locked --test corporate_auth -- --ignored --test-threads=1

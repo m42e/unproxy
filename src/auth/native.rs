@@ -1450,12 +1450,45 @@ mod tests {
             Err(e) => assert!(e.to_string().contains("localhost"), "{e:#}"),
         }
     }
+}
+
+#[cfg(all(test, feature = "negotiate", windows))]
+mod windows_tests {
+    use super::*;
 
     #[test]
-    #[ignore = "requires a configured native GSS identity or ticket cache"]
-    fn native_gss_context_step_uses_host_based_spnego() {
-        let mut context = NegotiateContext::new("localhost").unwrap();
-        let token = context.step(None).unwrap().expect("initial SPNEGO token");
-        assert!(!token.is_empty());
+    fn native_sspi_context_acquires_credentials_and_attempts_an_initial_token() {
+        let mut context = NegotiateContext::new("localhost")
+            .expect("Windows Negotiate package should acquire the process credentials");
+        assert!(!context.is_complete());
+
+        let token = match context.step(None) {
+            Ok(Some(token)) => {
+                assert!(!token.is_empty());
+                Some(token)
+            }
+            Ok(None) => {
+                assert!(
+                    context.is_complete(),
+                    "completed SSPI exchange has no token"
+                );
+                None
+            }
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("SecurityContext")
+                        || error.to_string().contains("CompleteAuthToken"),
+                    "{error:#}"
+                );
+                None
+            }
+        };
+
+        assert!(context.wrap(b"payload", true).is_err());
+        assert!(context.wrap(b"payload", false).is_err());
+        assert!(context.unwrap(b"fixture token", true).is_err());
+        if let Some(token) = token {
+            let _ = context.step(Some(&token));
+        }
     }
 }
