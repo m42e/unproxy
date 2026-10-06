@@ -3298,6 +3298,12 @@ mod native {
             let filter_rows: isize =
                 unsafe { msg_send![target, numberOfRowsInTableView:filter_table] };
             anyhow::ensure!(filter_rows == prefs.effective_filter_lists().len() as isize);
+            if filter_rows > 0 {
+                let first_filter: *mut AnyObject = unsafe {
+                    msg_send![target, tableView:filter_table, objectValueForTableColumn:ptr::null_mut::<AnyObject>(), row:0isize]
+                };
+                anyhow::ensure!(cocoa_text(first_filter).is_some());
+            }
 
             let listener_rows: isize =
                 unsafe { msg_send![target, numberOfRowsInTableView:listener_table] };
@@ -3600,6 +3606,74 @@ mod native {
                     .contains("more than once")
             );
             *EDITOR_PAC_FILES.lock().unwrap() = vec![valid_pac];
+            let filter_file = support_dir.join("hosts.txt");
+            std::fs::write(&filter_file, "ads.example.test\n")?;
+            let valid_filter = filter_file.to_string_lossy().into_owned();
+            *EDITOR_FILTER_LISTS.lock().unwrap() = Vec::new();
+            let optional_filters = validated_editor_preferences()?;
+            anyhow::ensure!(optional_filters.effective_filter_lists().is_empty());
+            *EDITOR_FILTER_LISTS.lock().unwrap() = vec!["relative-hosts.txt".into()];
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must be absolute")
+            );
+            *EDITOR_FILTER_LISTS.lock().unwrap() = vec![
+                support_dir
+                    .join("missing-hosts.txt")
+                    .to_string_lossy()
+                    .into_owned(),
+            ];
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("is missing")
+            );
+            *EDITOR_FILTER_LISTS.lock().unwrap() = vec![valid_filter.clone()];
+            let local_filter_prefs = validated_editor_preferences()?;
+            anyhow::ensure!(
+                local_filter_prefs.effective_filter_lists() == vec![filter_file.clone()]
+            );
+            *EDITOR_FILTER_LISTS.lock().unwrap() = vec![valid_filter.clone(), valid_filter.clone()];
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("more than once")
+            );
+            *EDITOR_FILTER_LISTS.lock().unwrap() =
+                vec!["HTTPS://filters.example.test/hosts.txt".into()];
+            let remote_filter_prefs = validated_editor_preferences()?;
+            anyhow::ensure!(
+                remote_filter_prefs.effective_filter_lists()[0]
+                    == Path::new("https://filters.example.test/hosts.txt")
+            );
+            *EDITOR_FILTER_LISTS.lock().unwrap() = vec![
+                "https://filters.example.test/hosts.txt".into(),
+                "HTTPS://filters.example.test/hosts.txt".into(),
+            ];
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("more than once")
+            );
+            *EDITOR_FILTER_LISTS.lock().unwrap() = vec![valid_filter.clone()];
+            unsafe {
+                list_set_object_value(
+                    target,
+                    sel!(tableView:setObjectValue:forTableColumn:row:),
+                    filter_table,
+                    cocoa_string(&valid_filter),
+                    ptr::null_mut(),
+                    0,
+                );
+            }
+            anyhow::ensure!(
+                state.lock().unwrap().prefs.effective_filter_lists() == vec![filter_file]
+            );
             *EDITOR_PREFS.lock().unwrap() = None;
             anyhow::ensure!(
                 validated_editor_preferences()

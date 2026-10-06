@@ -92,9 +92,25 @@ async fn blocked_request_is_rejected_before_policy_routing() {
 #[tokio::test]
 async fn unlisted_request_is_not_rejected_by_filter() {
     let list = FilterList::parse("blocked.example.test\n");
-    let policy = Policy::new(Some(
-        "function FindProxyForURL(){return 'PROXY 127.0.0.1:1';}".into(),
-    ))
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0, "upstream proxy closed before receiving a request");
+            request.extend_from_slice(&chunk[..count]);
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let policy = Policy::new(Some(format!(
+        "function FindProxyForURL(){{return 'PROXY {upstream_addr}';}}"
+    )))
     .unwrap();
     let (mut client, server_io) = tokio::io::duplex(4096);
     let context = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
@@ -108,13 +124,14 @@ async fn unlisted_request_is_not_rejected_by_filter() {
     ).await.unwrap();
     let mut response = Vec::new();
     tokio::time::timeout(
-        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(5),
         client.read_to_end(&mut response),
     )
     .await
     .unwrap()
     .unwrap();
-    assert!(!response.starts_with(b"HTTP/1.1 403"));
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    upstream.await.unwrap();
     context.shutdown();
     context.wait().await;
 }
