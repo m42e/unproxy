@@ -140,6 +140,21 @@ def main() -> int:
         )
         for missing, filename in sorted(largest_gaps, reverse=True)[:10]:
             print(f"coverage gap: {filename} has {missing} uncovered lines", file=sys.stderr)
+        desktop = next(
+            (file for file in gated_files if source_path(file["filename"]).endswith("/src/desktop.rs")),
+            None,
+        )
+        if desktop:
+            line_coverage: dict[int, bool] = {}
+            for line, _column, count, has_count, _region_entry in desktop["segments"]:
+                if has_count:
+                    line_coverage[line] = line_coverage.get(line, False) or count > 0
+            uncovered = [line for line, covered in sorted(line_coverage.items()) if not covered]
+            print(
+                "coverage detail: src/desktop.rs uncovered lines: "
+                + ", ".join(map(str, uncovered)),
+                file=sys.stderr,
+            )
         return 1
     return 0
 
