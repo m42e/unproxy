@@ -72,6 +72,8 @@ fn process_with_log(
             &address.to_string(),
             "--pac-file",
             pac,
+            "--connect-timeout",
+            "1",
             "--graceful-shutdown-timeout",
             "1",
             "--netrc-file",
