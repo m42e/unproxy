@@ -10,7 +10,7 @@ use std::{
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc::{SyncSender, sync_channel},
+        mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
     },
     time::{Duration, Instant},
 };
@@ -28,6 +28,8 @@ const PAC_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 const MAX_PAC_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
 const DNS_RESOLVE_BUDGET: usize = 4;
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_millis(100);
+const DNS_RESOLVER_WORKERS: usize = 4;
+const DNS_RESOLVER_QUEUE_PER_WORKER: usize = 4;
 
 #[derive(Clone, Debug)]
 struct CacheEntry {
@@ -51,6 +53,7 @@ pub struct Pac {
     ip: Arc<Mutex<IpAddr>>,
     ip_string: Rc<RefCell<JsString>>,
     source: Option<String>,
+    dns_resolver: Arc<DnsResolver>,
     route_cache: HashMap<JsString, Rc<Routes>>,
     last_routes: Option<(JsString, Rc<Routes>)>,
     route_cache_order: VecDeque<JsString>,
@@ -65,6 +68,13 @@ impl Pac {
         Self::new_with_ip(source, "127.0.0.1".parse().unwrap())
     }
     pub fn new_with_ip(source: Option<&str>, ip: IpAddr) -> Result<Self> {
+        Self::new_with_ip_and_resolver(source, ip, system_dns_resolver())
+    }
+    fn new_with_ip_and_resolver(
+        source: Option<&str>,
+        ip: IpAddr,
+        dns_resolver: Arc<DnsResolver>,
+    ) -> Result<Self> {
         let mut context = limited_context();
         let evaluation_script = Script::parse(
             Source::from_bytes("FindProxyForURL(__unproxyUrl, __unproxyHost)"),
@@ -78,6 +88,7 @@ impl Pac {
             ip: Arc::new(Mutex::new(ip)),
             ip_string: Rc::new(RefCell::new(JsString::from(ip.to_string()))),
             source: None,
+            dns_resolver,
             cache: Arc::new(Mutex::new(HashMap::new())),
             glob_cache: Rc::new(RefCell::new(HashMap::new())),
             route_cache: HashMap::new(),
@@ -103,6 +114,7 @@ impl Pac {
             ip: self.ip.clone(),
             ip_string: self.ip_string.clone(),
             source: None,
+            dns_resolver: self.dns_resolver.clone(),
             cache: Arc::new(Mutex::new(HashMap::new())),
             glob_cache: Rc::new(RefCell::new(HashMap::new())),
             route_cache: HashMap::new(),
@@ -127,6 +139,7 @@ impl Pac {
         self.source = source.map(str::to_owned);
         let dns_cache = self.cache.clone();
         let dns_budget = self.dns_budget.clone();
+        let dns_resolver = self.dns_resolver.clone();
         let dns = unsafe {
             NativeFunction::from_closure(move |_this, args, ctx| {
                 let Some(arg) = args.first() else {
@@ -149,7 +162,7 @@ impl Pac {
                     } else if dns_budget.fetch_add(1, Ordering::Relaxed) >= DNS_RESOLVE_BUDGET {
                         None
                     } else {
-                        let ip = resolve_hostname(&host);
+                        let ip = dns_resolver.resolve(&host, DNS_RESOLVE_TIMEOUT);
                         c.insert(host, CacheEntry { value: ip, at: now });
                         ip
                     }
@@ -480,6 +493,13 @@ impl Policy {
         Self::new_scripts_with_ip(scripts, "127.0.0.1".parse().unwrap())
     }
     pub fn new_scripts_with_ip(scripts: Vec<String>, ip: IpAddr) -> Result<Self> {
+        Self::new_scripts_with_resolver(scripts, ip, system_dns_resolver())
+    }
+    fn new_scripts_with_resolver(
+        scripts: Vec<String>,
+        ip: IpAddr,
+        dns_resolver: Arc<DnsResolver>,
+    ) -> Result<Self> {
         let (tx, mut rx) = tokio::sync::mpsc::channel(PAC_QUEUE_CAPACITY);
         let loaded = Arc::new(AtomicBool::new(!scripts.is_empty()));
         let worker_loaded = loaded.clone();
@@ -491,7 +511,7 @@ impl Policy {
                 let mut active_ip = ip;
                 let mut pacs = match scripts
                     .iter()
-                    .map(|s| Pac::new_with_ip(Some(s), ip))
+                    .map(|s| Pac::new_with_ip_and_resolver(Some(s), ip, dns_resolver.clone()))
                     .collect::<Result<Vec<_>>>()
                 {
                     Ok(pacs) => {
@@ -510,6 +530,9 @@ impl Policy {
                 while let Some(job) = rx.blocking_recv() {
                     match job {
                         Job::Eval(u, h, strict, r) => {
+                            if r.is_closed() {
+                                continue;
+                            }
                             let result = if strict && !worker_loaded.load(Ordering::Acquire) {
                                 Err(anyhow!("routing policy is unavailable"))
                             } else {
@@ -518,6 +541,9 @@ impl Policy {
                             let _ = r.send(result);
                         }
                         Job::EvalEach(u, h, r) => {
+                            if r.is_closed() {
+                                continue;
+                            }
                             let results = pacs
                                 .iter_mut()
                                 .map(|pac| {
@@ -532,7 +558,13 @@ impl Policy {
                             worker_loaded.store(false, Ordering::Release);
                             let replacement = scripts
                                 .iter()
-                                .map(|s| Pac::new_with_ip(Some(s), active_ip))
+                                .map(|s| {
+                                    Pac::new_with_ip_and_resolver(
+                                        Some(s),
+                                        active_ip,
+                                        dns_resolver.clone(),
+                                    )
+                                })
                                 .collect::<Result<Vec<_>>>();
                             match replacement {
                                 Ok(new_pacs) => {
@@ -752,38 +784,415 @@ fn compile_shell_pattern(source: &str) -> std::result::Result<glob::Pattern, She
         .map_err(|error| ShellPatternError::InvalidPattern(error.to_string()))
 }
 
-fn resolve_hostname(host: &str) -> Option<IpAddr> {
-    static RESOLVER: OnceLock<SyncSender<(String, SyncSender<Option<IpAddr>>)>> = OnceLock::new();
-    let resolver = RESOLVER.get_or_init(|| {
-        let (tx, rx) = sync_channel::<(String, SyncSender<Option<IpAddr>>)>(1);
-        std::thread::Builder::new()
-            .name("pac-dns-resolver".into())
-            .spawn(move || {
-                while let Ok((host, reply)) = rx.recv() {
-                    let value = (host.as_str(), 0)
+type HostLookup = dyn Fn(&str) -> Option<IpAddr> + Send + Sync;
+
+struct DnsRequest {
+    host: String,
+    reply: SyncSender<Option<IpAddr>>,
+}
+
+struct DnsWorker {
+    tx: SyncSender<DnsRequest>,
+}
+
+struct DnsResolver {
+    workers: Vec<DnsWorker>,
+    next_worker: AtomicUsize,
+}
+impl DnsResolver {
+    fn new(worker_count: usize, queue_per_worker: usize, lookup: Arc<HostLookup>) -> Arc<Self> {
+        assert!(worker_count > 0);
+        let mut workers = Vec::with_capacity(worker_count);
+        for index in 0..worker_count {
+            let (tx, rx) = sync_channel::<DnsRequest>(queue_per_worker);
+            let lookup = lookup.clone();
+            std::thread::Builder::new()
+                .name(format!("pac-dns-resolver-{index}"))
+                .spawn(move || resolver_worker(rx, lookup))
+                .expect("start bounded PAC DNS resolver");
+            workers.push(DnsWorker { tx });
+        }
+        Arc::new(Self {
+            workers,
+            next_worker: AtomicUsize::new(0),
+        })
+    }
+
+    fn enqueue(&self, host: &str) -> Option<Receiver<Option<IpAddr>>> {
+        let (reply_tx, reply_rx) = sync_channel(1);
+        let mut request = Some(DnsRequest {
+            host: host.to_owned(),
+            reply: reply_tx,
+        });
+        let first = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
+        for offset in 0..self.workers.len() {
+            let worker = &self.workers[(first + offset) % self.workers.len()];
+            match worker
+                .tx
+                .try_send(request.take().expect("request remains until sent"))
+            {
+                Ok(()) => return Some(reply_rx),
+                Err(TrySendError::Full(unsent) | TrySendError::Disconnected(unsent)) => {
+                    request = Some(unsent);
+                }
+            }
+        }
+        None
+    }
+
+    fn resolve(&self, host: &str, timeout: Duration) -> Option<IpAddr> {
+        self.enqueue(host)?.recv_timeout(timeout).ok().flatten()
+    }
+}
+
+fn resolver_worker(rx: Receiver<DnsRequest>, lookup: Arc<HostLookup>) {
+    while let Ok(request) = rx.recv() {
+        let value = lookup(&request.host);
+        let _ = request.reply.send(value);
+    }
+}
+
+fn system_dns_resolver() -> Arc<DnsResolver> {
+    static RESOLVER: OnceLock<Arc<DnsResolver>> = OnceLock::new();
+    RESOLVER
+        .get_or_init(|| {
+            DnsResolver::new(
+                DNS_RESOLVER_WORKERS,
+                DNS_RESOLVER_QUEUE_PER_WORKER,
+                Arc::new(|host| {
+                    (host, 0)
                         .to_socket_addrs()
                         .ok()
-                        .and_then(|ips| preferred_ip(ips.map(|addr| addr.ip())));
-                    let _ = reply.send(value);
-                }
-            })
-            .expect("start bounded PAC resolver");
-        tx
-    });
-    let (reply_tx, reply_rx) = sync_channel(1);
-    resolver.try_send((host.to_owned(), reply_tx)).ok()?;
-    reply_rx.recv_timeout(DNS_RESOLVE_TIMEOUT).ok().flatten()
+                        .and_then(|ips| preferred_ip(ips.map(|addr| addr.ip())))
+                }),
+            )
+        })
+        .clone()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheEntry, Pac, Policy, preferred_ip};
+    use super::{CacheEntry, DnsResolver, Job, Pac, Policy, preferred_ip};
     use std::{
         collections::HashMap,
         net::IpAddr,
-        sync::{Arc, atomic::AtomicBool},
+        sync::{
+            Arc, Barrier, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc::{self, sync_channel},
+        },
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn blocked_dns_lookup_does_not_block_another_worker() {
+        let (blocked_tx, blocked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = sync_channel(0);
+        let release_rx = Mutex::new(release_rx);
+        let resolver = DnsResolver::new(
+            2,
+            1,
+            Arc::new(move |host| {
+                if host == "blocked.test" {
+                    blocked_tx.send(()).unwrap();
+                    release_rx.lock().unwrap().recv().unwrap();
+                }
+                Some("192.0.2.1".parse().unwrap())
+            }),
+        );
+        let blocked = resolver.enqueue("blocked.test").unwrap();
+        blocked_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("blocked lookup starts");
+
+        let fast = resolver.enqueue("fast.test").unwrap();
+        assert_eq!(
+            fast.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Some("192.0.2.1".parse().unwrap())
+        );
+
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            blocked.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Some("192.0.2.1".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn dns_worker_count_and_queued_work_are_bounded() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let gate = Arc::new(Barrier::new(3));
+        let resolver = DnsResolver::new(
+            2,
+            1,
+            Arc::new({
+                let active = active.clone();
+                let maximum = maximum.clone();
+                let gate = gate.clone();
+                move |host| {
+                    if host.starts_with("blocked") {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximum.fetch_max(current, Ordering::SeqCst);
+                        started_tx.send(()).unwrap();
+                        gate.wait();
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    Some("192.0.2.2".parse().unwrap())
+                }
+            }),
+        );
+
+        let first = resolver.enqueue("blocked-a.test").unwrap();
+        let second = resolver.enqueue("blocked-b.test").unwrap();
+        for _ in 0..2 {
+            started_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("each DNS worker starts one lookup");
+        }
+        assert_eq!(active.load(Ordering::SeqCst), 2);
+
+        let queued_first = resolver.enqueue("queued-a.test").unwrap();
+        let queued_second = resolver.enqueue("queued-b.test").unwrap();
+        assert!(resolver.enqueue("over-capacity.test").is_none());
+        assert_eq!(maximum.load(Ordering::SeqCst), 2);
+
+        gate.wait();
+        for reply in [first, second, queued_first, queued_second] {
+            assert_eq!(
+                reply.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Some("192.0.2.2".parse().unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn dns_timeout_does_not_cancel_the_underlying_lookup() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let (release_tx, release_rx) = sync_channel(0);
+        let release_rx = Mutex::new(release_rx);
+        let resolver = DnsResolver::new(
+            1,
+            1,
+            Arc::new(move |_| {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+                finished_tx.send(()).unwrap();
+                Some("192.0.2.3".parse().unwrap())
+            }),
+        );
+        let worker_resolver = resolver.clone();
+        let lookup = std::thread::spawn(move || {
+            worker_resolver.resolve("slow.test", Duration::from_millis(20))
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("lookup starts before the caller times out");
+        assert_eq!(lookup.join().unwrap(), None);
+        assert!(matches!(
+            finished_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        release_tx.send(()).unwrap();
+        finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("timed out caller leaves the blocking lookup running");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pac_dns_timeout_caches_negative_while_lookup_continues() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let (release_tx, release_rx) = sync_channel(0);
+        let release_rx = Mutex::new(release_rx);
+        let resolver = DnsResolver::new(
+            1,
+            1,
+            Arc::new(move |_| {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+                finished_tx.send(()).unwrap();
+                Some("192.0.2.5".parse().unwrap())
+            }),
+        );
+        let policy = Policy::new_scripts_with_resolver(
+            vec!["function FindProxyForURL(){ return dnsResolve('slow.test')===null ? 'DIRECT' : 'PROXY wrong.test:80'; }".into()],
+            "127.0.0.1".parse().unwrap(),
+            resolver,
+        )
+        .unwrap();
+
+        assert_eq!(
+            policy
+                .evaluate("x".into(), "x".into())
+                .await
+                .unwrap()
+                .to_string(),
+            "DIRECT"
+        );
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("DNS lookup started before the PAC timeout");
+        assert_eq!(
+            policy.cache_snapshot().await.unwrap().get("slow.test"),
+            Some(&None)
+        );
+        assert_eq!(
+            policy
+                .evaluate("x".into(), "x".into())
+                .await
+                .unwrap()
+                .to_string(),
+            "DIRECT"
+        );
+        assert!(matches!(
+            started_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            finished_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        release_tx.send(()).unwrap();
+        finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the underlying blocking lookup is still running after PAC timeout");
+    }
+
+    #[test]
+    fn injected_resolver_preserves_positive_and_negative_dns_caching() {
+        let calls = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+        let resolver = DnsResolver::new(
+            2,
+            2,
+            Arc::new({
+                let calls = calls.clone();
+                move |host| {
+                    *calls.lock().unwrap().entry(host.to_owned()).or_default() += 1;
+                    (host == "positive.test").then(|| "192.0.2.44".parse().unwrap())
+                }
+            }),
+        );
+        let mut pac = Pac::new_with_ip_and_resolver(
+            Some("function FindProxyForURL(){ let a=dnsResolve('positive.test'); let b=dnsResolve('positive.test'); let c=dnsResolve('negative.test'); let d=dnsResolve('negative.test'); return a===b && a==='192.0.2.44' && c===null && d===null ? 'DIRECT' : 'PROXY wrong.test:80'; }"),
+            "127.0.0.1".parse().unwrap(),
+            resolver,
+        )
+        .unwrap();
+        for _ in 0..2 {
+            assert_eq!(pac.evaluate("x", "x").unwrap().to_string(), "DIRECT");
+        }
+        assert_eq!(calls.lock().unwrap().get("positive.test"), Some(&1));
+        assert_eq!(calls.lock().unwrap().get("negative.test"), Some(&1));
+        let cache = pac.cache_snapshot();
+        assert_eq!(
+            cache.get("positive.test"),
+            Some(&Some("192.0.2.44".parse().unwrap()))
+        );
+        assert_eq!(cache.get("negative.test"), Some(&None));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canceled_queued_evaluations_are_skipped_and_live_state_stays_ordered() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = sync_channel(0);
+        let release_rx = Mutex::new(release_rx);
+        let resolver = DnsResolver::new(
+            1,
+            1,
+            Arc::new(move |_| {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+                None
+            }),
+        );
+        let policy = Policy::new_scripts_with_resolver(
+            vec!["let n=0; function FindProxyForURL(url,host){ n++; if(host==='block.test') dnsResolve('hold.test'); return 'PROXY state'+n+'.test:80'; }".into()],
+            "127.0.0.1".parse().unwrap(),
+            resolver,
+        )
+        .unwrap();
+        let blocking_policy = policy.clone();
+        let blocking = tokio::spawn(async move {
+            blocking_policy
+                .evaluate("x".into(), "block.test".into())
+                .await
+                .unwrap()
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first evaluation is holding the PAC worker in DNS");
+
+        let (canceled_eval_tx, canceled_eval_rx) = tokio::sync::oneshot::channel();
+        policy
+            .tx
+            .send(Job::Eval(
+                "x".into(),
+                "canceled-eval.test".into(),
+                false,
+                canceled_eval_tx,
+            ))
+            .await
+            .unwrap();
+        drop(canceled_eval_rx);
+
+        let (canceled_each_tx, canceled_each_rx) = tokio::sync::oneshot::channel();
+        policy
+            .tx
+            .send(Job::EvalEach(
+                "x".into(),
+                "canceled-each.test".into(),
+                canceled_each_tx,
+            ))
+            .await
+            .unwrap();
+        drop(canceled_each_rx);
+
+        let (live_eval_tx, live_eval_rx) = tokio::sync::oneshot::channel();
+        policy
+            .tx
+            .send(Job::Eval(
+                "x".into(),
+                "live-eval.test".into(),
+                false,
+                live_eval_tx,
+            ))
+            .await
+            .unwrap();
+        let (live_each_tx, live_each_rx) = tokio::sync::oneshot::channel();
+        policy
+            .tx
+            .send(Job::EvalEach(
+                "x".into(),
+                "live-each.test".into(),
+                live_each_tx,
+            ))
+            .await
+            .unwrap();
+
+        release_tx.send(()).unwrap();
+        assert_eq!(blocking.await.unwrap().to_string(), "HTTP state1.test:80");
+        assert_eq!(
+            live_eval_rx.await.unwrap().unwrap().to_string(),
+            "HTTP state2.test:80"
+        );
+        assert_eq!(
+            live_each_rx.await.unwrap()[0].as_ref().unwrap().to_string(),
+            "HTTP state3.test:80"
+        );
+        assert_eq!(
+            policy
+                .evaluate("x".into(), "last.test".into())
+                .await
+                .unwrap()
+                .to_string(),
+            "HTTP state4.test:80"
+        );
+    }
 
     #[tokio::test]
     async fn policy_can_report_each_pac_without_short_circuiting() {
@@ -1063,6 +1472,155 @@ mod tests {
                 "warm DNS cache ({size} entries, 32 hits): median {:?}, mean {:?}",
                 samples[250],
                 samples.iter().sum::<Duration>() / 500
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "performance measurement; run with cargo xtask perf"]
+    fn slow_dns_queue_and_execution_performance() {
+        const SAMPLES: usize = 10;
+        for worker_count in [1, super::DNS_RESOLVER_WORKERS] {
+            let (slow_started_tx, slow_started_rx) = mpsc::channel();
+            let (fast_timing_tx, fast_timing_rx) = mpsc::channel();
+            let resolver = DnsResolver::new(
+                worker_count,
+                1,
+                Arc::new(move |host| {
+                    let started = Instant::now();
+                    if host.starts_with("slow") {
+                        slow_started_tx.send(()).unwrap();
+                        std::thread::sleep(Duration::from_millis(35));
+                    } else {
+                        fast_timing_tx.send((started, Instant::now())).unwrap();
+                    }
+                    Some("192.0.2.9".parse().unwrap())
+                }),
+            );
+            let mut queue_latency = Vec::with_capacity(SAMPLES);
+            let mut execution_time = Vec::with_capacity(SAMPLES);
+            for sample in 0..SAMPLES {
+                let slow = resolver.enqueue(&format!("slow-{sample}.test")).unwrap();
+                slow_started_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("slow lookup starts");
+                let submitted = Instant::now();
+                let fast = resolver.enqueue(&format!("fast-{sample}.test")).unwrap();
+                let (started, finished) = fast_timing_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("fast lookup starts");
+                assert_eq!(
+                    fast.recv_timeout(Duration::from_secs(2)).unwrap(),
+                    Some("192.0.2.9".parse().unwrap())
+                );
+                assert_eq!(
+                    slow.recv_timeout(Duration::from_secs(2)).unwrap(),
+                    Some("192.0.2.9".parse().unwrap())
+                );
+                queue_latency.push(started.duration_since(submitted));
+                execution_time.push(finished.duration_since(started));
+            }
+            queue_latency.sort_unstable();
+            execution_time.sort_unstable();
+            println!(
+                "PAC slow DNS ({worker_count} resolver workers): fast lookup queue latency median {:?}, execution median {:?}",
+                queue_latency[SAMPLES / 2],
+                execution_time[SAMPLES / 2]
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "performance measurement; run with cargo xtask perf"]
+    async fn canceled_queue_workload_performance() {
+        const QUEUED: usize = super::PAC_QUEUE_CAPACITY;
+        const SAMPLES: usize = 5;
+        for canceled in [true, false] {
+            let mut queue_latency = Vec::with_capacity(SAMPLES);
+            let mut execution_time = Vec::with_capacity(SAMPLES);
+            for _ in 0..SAMPLES {
+                let (started_tx, started_rx) = mpsc::channel();
+                let gate = Arc::new(Barrier::new(2));
+                let resolver = DnsResolver::new(
+                    1,
+                    1,
+                    Arc::new({
+                        let gate = gate.clone();
+                        move |_| {
+                            started_tx.send(()).unwrap();
+                            gate.wait();
+                            None
+                        }
+                    }),
+                );
+                let policy = Policy::new_scripts_with_resolver(
+                    vec!["let n=0; function FindProxyForURL(url,host){ n++; if(host==='block.test') dnsResolve('hold.test'); return n===-1 ? 'PROXY impossible.test:80' : 'DIRECT'; }".into()],
+                    "127.0.0.1".parse().unwrap(),
+                    resolver,
+                )
+                .unwrap();
+                let blocking_policy = policy.clone();
+                let blocker = tokio::spawn(async move {
+                    blocking_policy
+                        .evaluate("x".into(), "block.test".into())
+                        .await
+                        .unwrap()
+                });
+                started_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("blocking DNS lookup starts");
+
+                let mut live_replies = Vec::new();
+                for index in 0..QUEUED {
+                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                    policy
+                        .tx
+                        .send(Job::Eval(
+                            format!("request-{index}"),
+                            format!("queued-{index}.test"),
+                            false,
+                            reply_tx,
+                        ))
+                        .await
+                        .unwrap();
+                    if canceled {
+                        drop(reply_rx);
+                    } else {
+                        live_replies.push(reply_rx);
+                    }
+                }
+
+                let tail_policy = policy.clone();
+                let tail = tokio::spawn(async move {
+                    tail_policy
+                        .evaluate("tail".into(), "tail.test".into())
+                        .await
+                        .unwrap()
+                });
+                let released = Instant::now();
+                gate.wait();
+                assert_eq!(tail.await.unwrap().to_string(), "DIRECT");
+                let total_after_release = released.elapsed();
+                blocker.await.unwrap();
+                for reply in live_replies {
+                    assert_eq!(reply.await.unwrap().unwrap().to_string(), "DIRECT");
+                }
+                let isolated_start = Instant::now();
+                policy
+                    .evaluate("idle".into(), "idle.test".into())
+                    .await
+                    .unwrap();
+                let isolated_execution = isolated_start.elapsed();
+                queue_latency.push(total_after_release.saturating_sub(isolated_execution));
+                execution_time.push(isolated_execution);
+            }
+            queue_latency.sort_unstable();
+            execution_time.sort_unstable();
+            let workload = if canceled { "canceled" } else { "live" };
+            println!(
+                "PAC {workload} queue ({QUEUED} requests): queue drain after DNS release median {:?}, isolated evaluation median {:?}",
+                queue_latency[SAMPLES / 2],
+                execution_time[SAMPLES / 2]
             );
         }
     }

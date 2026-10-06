@@ -177,6 +177,15 @@ fn main() -> Result<()> {
             run(Command::new("cargo").args([
                 "test",
                 "--locked",
+                "--lib",
+                "pac::tests::",
+                "--",
+                "--ignored",
+                "--nocapture",
+            ]))?;
+            run(Command::new("cargo").args([
+                "test",
+                "--locked",
                 "--test",
                 "pac_performance",
                 "--",
