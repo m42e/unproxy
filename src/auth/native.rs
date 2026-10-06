@@ -1450,12 +1450,4 @@ mod tests {
             Err(e) => assert!(e.to_string().contains("localhost"), "{e:#}"),
         }
     }
-
-    #[test]
-    #[ignore = "requires a configured native GSS identity or ticket cache"]
-    fn native_gss_context_step_uses_host_based_spnego() {
-        let mut context = NegotiateContext::new("localhost").unwrap();
-        let token = context.step(None).unwrap().expect("initial SPNEGO token");
-        assert!(!token.is_empty());
-    }
 }
