@@ -287,6 +287,7 @@ function Prompt-RemoteUrl([string]$title, $owner) {
 }
 
 function Show-Settings {
+    $preferences = $script:p
     $form = [Windows.Forms.Form]::new()
     $form.Text = 'Unproxy Settings'
     $form.StartPosition = [Windows.Forms.FormStartPosition]::CenterScreen
@@ -529,6 +530,8 @@ function Show-Settings {
     }).GetNewClosure()
     $addFilterRow = ({
         param([string]$value)
+        $filterRowCollection = $filterRows
+        $filterRowRenderer = $renderFilterRows
         $row = [Windows.Forms.Panel]::new()
         $row.Size = [Drawing.Size]::new(635, 32)
         $sourceBox = [Windows.Forms.TextBox]::new()
@@ -560,8 +563,8 @@ function Show-Settings {
             $picker.Dispose()
         }).GetNewClosure())
         $remove.add_Click(({
-            [void]$filterRows.Remove($entry)
-            & $renderFilterRows
+            [void]$filterRowCollection.Remove($entry)
+            & $filterRowRenderer
         }).GetNewClosure())
         [void]$filterRows.Add($entry)
         & $renderFilterRows
@@ -733,27 +736,27 @@ function Show-Settings {
             $filterLists += $source
         }
 
-        $previousAutostart = [bool]$script:p.autostart
+        $previousAutostart = [bool]$preferences.autostart
         $firstListener = Parse-ListenerAddress ([string]$listenerAddresses[0])
         $previous = [pscustomobject]@{
-            port = $script:p.port
-            listeners = @($script:p.listeners)
-            pacFiles = @($script:p.pacFiles)
-            pacFile = $script:p.pacFile
-            filterLists = @($script:p.filterLists)
-            proxytunnel = $script:p.proxytunnel
-            directFallback = $script:p.directFallback
-            negotiate = $script:p.negotiate
+            port = $preferences.port
+            listeners = @($preferences.listeners)
+            pacFiles = @($preferences.pacFiles)
+            pacFile = $preferences.pacFile
+            filterLists = @($preferences.filterLists)
+            proxytunnel = $preferences.proxytunnel
+            directFallback = $preferences.directFallback
+            negotiate = $preferences.negotiate
         }
-        $script:p.listeners = $listenerAddresses
-        $script:p.port = [long]$firstListener.Port
-        $script:p.pacFiles = $pacFiles
-        $script:p.pacFile = $pacFiles[0]
-        $script:p.filterLists = $filterLists
-        $script:p.proxytunnel = [bool]$tunnel.Checked
-        $script:p.directFallback = [bool]$direct.Checked
+        $preferences.listeners = $listenerAddresses
+        $preferences.port = [long]$firstListener.Port
+        $preferences.pacFiles = $pacFiles
+        $preferences.pacFile = $pacFiles[0]
+        $preferences.filterLists = $filterLists
+        $preferences.proxytunnel = [bool]$tunnel.Checked
+        $preferences.directFallback = [bool]$direct.Checked
         if ($script:negotiateAvailable) {
-            $script:p.negotiate = [bool]$negotiate.Checked
+            $preferences.negotiate = [bool]$negotiate.Checked
         }
         try {
             Save-Prefs
@@ -764,14 +767,14 @@ function Show-Settings {
             if ([bool]$autostart.Checked -ne $previousAutostart) {
                 try { Set-Login $previousAutostart } catch { }
             }
-            $script:p.port = $previous.port
-            $script:p.listeners = $previous.listeners
-            $script:p.pacFiles = $previous.pacFiles
-            $script:p.pacFile = $previous.pacFile
-            $script:p.filterLists = $previous.filterLists
-            $script:p.proxytunnel = $previous.proxytunnel
-            $script:p.directFallback = $previous.directFallback
-            $script:p.negotiate = $previous.negotiate
+            $preferences.port = $previous.port
+            $preferences.listeners = $previous.listeners
+            $preferences.pacFiles = $previous.pacFiles
+            $preferences.pacFile = $previous.pacFile
+            $preferences.filterLists = $previous.filterLists
+            $preferences.proxytunnel = $previous.proxytunnel
+            $preferences.directFallback = $previous.directFallback
+            $preferences.negotiate = $previous.negotiate
             try { Save-Prefs } catch { }
             [Windows.Forms.MessageBox]::Show(
                 "Could not save Unproxy settings: $_", 'Unproxy Settings') | Out-Null

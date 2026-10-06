@@ -206,7 +206,10 @@ fn pac_helper_surface_covers_globs_masks_ranges_and_dns_cache_hook() {
       function FindProxyForURL(){
         const d=new Date(), wd=['SUN','MON','TUE','WED','THU','FRI','SAT'][d.getUTCDay()];
         const day=d.getUTCDate(), month=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][d.getUTCMonth()];
-        return shExpMatch('proxy7.corp','proxy[0-9].*') && dnsDomainLevels('a.b.c')===2 &&
+                return shExpMatch('proxy7.corp','proxy[0-9].*') &&
+                    shExpMatch('https://example.test/a/b','https://example.test/*') &&
+                    shExpMatch('ab','a**') && shExpMatch('a','[^b]') && !shExpMatch('b','[^b]') &&
+                    dnsDomainLevels('a.b.c')===2 &&
           isPlainHostName('node') && localHostOrDomainIs('foo','foo.example') &&
           isValidIpAddress('001.2.3.255') && !isValidIpAddress('256.2.3.4') &&
           convert_addr('192.168.1.2')===-1062731518 &&

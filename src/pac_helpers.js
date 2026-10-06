@@ -1,27 +1,7 @@
 if (typeof String.prototype.substr !== 'function') {
-  String.prototype.substr = function(start, length) {
-    const value = String(this);
-    const size = value.length;
-    const offset = Number(start) || 0;
-    const from = offset < 0
-      ? Math.max(size + Math.ceil(offset), 0)
-      : Math.min(Math.floor(offset), size);
-    if (length === undefined) return value.slice(from);
-    const count = Number(length);
-    return count <= 0 ? '' : value.slice(from, from + Math.floor(count));
-  };
+  String.prototype.substr = __unproxySubstr;
 }
 
-function shExpMatch(value, pattern) {
-  if (typeof value !== 'string' || typeof pattern !== 'string') throw new TypeError('shExpMatch expects strings');
-  let re='^';
-  for(let i=0;i<pattern.length;i++) { const c=pattern[i];
-    if(c==='*') re+='.*'; else if(c==='?') re+='.';
-    else if(c==='[') { let j=pattern.indexOf(']',i+1); if(j<0) throw new Error('invalid glob'); let cl=pattern.slice(i+1,j); if(!cl) throw new Error('invalid glob'); re+='['+cl.replace(/^!/, '^')+']'; i=j; }
-    else re+=c.replace(/[\\^$+?.()|{}]/g,'\\$&');
-  }
-  return new RegExp(re+'$').test(value);
-}
 function dnsDomainIs(host, domain) { return host.endsWith(domain); }
 function dnsDomainLevels(host) { return (host.match(/\./g)||[]).length; }
 function isPlainHostName(host) { return !host.includes('.'); }

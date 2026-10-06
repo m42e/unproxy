@@ -28,6 +28,23 @@ async fn loads_local_hosts_file_and_reports_missing_sources() {
 }
 
 #[tokio::test]
+async fn best_effort_loading_keeps_available_lists_when_another_source_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let available = dir.path().join("available.txt");
+    tokio::fs::write(&available, "blocked.example.test\n")
+        .await
+        .unwrap();
+    let missing = dir.path().join("missing.txt");
+    let list = FilterList::load_best_effort(&[
+        missing.to_string_lossy().into_owned(),
+        available.to_string_lossy().into_owned(),
+    ])
+    .await;
+
+    assert!(list.contains("blocked.example.test"));
+}
+
+#[tokio::test]
 async fn loads_remote_filter_list_over_http() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -53,6 +70,59 @@ async fn loads_remote_filter_list_over_http() {
         .unwrap();
     assert!(list.contains("remote-block.example.test"));
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn loads_remote_filter_list_through_pac_routing() {
+    let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let body = "blocked-by-pac-route.example.test\n";
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0);
+            request.extend_from_slice(&chunk[..count]);
+        }
+        assert!(request.starts_with(b"GET http://filters.example.test/hosts.txt HTTP/1.1\r\n"));
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    drop(proxy);
+    let policy = Policy::new(Some(format!(
+        "function FindProxyForURL() {{ return 'PROXY {upstream_addr}'; }}"
+    )))
+    .unwrap();
+    let context = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
+        .listen(proxy_addr)
+        .bind()
+        .await
+        .unwrap();
+
+    let text = unproxy::net::fetch_remote_text_via_proxy(
+        "http://filters.example.test/hosts.txt",
+        proxy_addr,
+    )
+    .await
+    .unwrap();
+    assert!(FilterList::parse(&text).contains("blocked-by-pac-route.example.test"));
+    server.await.unwrap();
+    context.shutdown();
+    context.wait().await;
 }
 
 #[tokio::test]

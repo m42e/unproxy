@@ -17,6 +17,7 @@ use tokio::sync::oneshot;
 const DEFAULT_SCRIPT: &str = "function FindProxyForURL(url, host) { return 'DIRECT'; }";
 const PAC_LOOP_LIMIT: u64 = 100_000;
 const PAC_QUEUE_CAPACITY: usize = 64;
+const SH_EXP_MATCH_CACHE_CAPACITY: usize = 512;
 const PAC_EVAL_BUDGET: u32 = 256;
 const PAC_EVAL_TIMEOUT: Duration = Duration::from_secs(2);
 const PAC_RECURSION_LIMIT: usize = 64;
@@ -46,6 +47,7 @@ pub struct Pac {
     ip: Arc<Mutex<IpAddr>>,
     source: Option<String>,
     cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    glob_cache: Arc<Mutex<HashMap<String, std::result::Result<glob::Pattern, ShellPatternError>>>>,
     last_prune: Instant,
     dns_budget: Arc<AtomicUsize>,
 }
@@ -59,6 +61,7 @@ impl Pac {
             ip: Arc::new(Mutex::new(ip)),
             source: None,
             cache: Arc::new(Mutex::new(HashMap::new())),
+            glob_cache: Arc::new(Mutex::new(HashMap::new())),
             last_prune: Instant::now(),
             dns_budget: Arc::new(AtomicUsize::new(0)),
         };
@@ -71,6 +74,7 @@ impl Pac {
             ip: self.ip.clone(),
             source: None,
             cache: Arc::new(Mutex::new(HashMap::new())),
+            glob_cache: Arc::new(Mutex::new(HashMap::new())),
             last_prune: Instant::now(),
             dns_budget: Arc::new(AtomicUsize::new(0)),
         };
@@ -121,6 +125,51 @@ impl Pac {
         self.context
             .register_global_builtin_callable(JsString::from("dnsResolve"), 1, dns)
             .map_err(|e| anyhow!("register dnsResolve: {e}"))?;
+        let glob_cache = self.glob_cache.clone();
+        let sh_exp_match = unsafe {
+            NativeFunction::from_closure(move |_, args, _| {
+                let value = args
+                    .first()
+                    .and_then(JsValue::as_string)
+                    .ok_or_else(|| {
+                        boa_engine::JsNativeError::typ().with_message("shExpMatch expects strings")
+                    })?
+                    .to_std_string_escaped();
+                let pattern = args
+                    .get(1)
+                    .and_then(JsValue::as_string)
+                    .ok_or_else(|| {
+                        boa_engine::JsNativeError::typ().with_message("shExpMatch expects strings")
+                    })?
+                    .to_std_string_escaped();
+                let compiled = {
+                    let mut cache = glob_cache.lock().unwrap();
+                    if let Some(compiled) = cache.get(&pattern) {
+                        compiled.clone()
+                    } else {
+                        let compiled = compile_shell_pattern(&pattern);
+                        if cache.len() < SH_EXP_MATCH_CACHE_CAPACITY {
+                            cache.insert(pattern, compiled.clone());
+                        }
+                        compiled
+                    }
+                };
+                let compiled = compiled.map_err(|error| match error {
+                    ShellPatternError::InvalidGlob => {
+                        boa_engine::JsNativeError::error().with_message("invalid glob")
+                    }
+                    ShellPatternError::InvalidPattern(message) => {
+                        boa_engine::JsNativeError::syntax().with_message(message)
+                    }
+                })?;
+                Ok(JsValue::from(
+                    compiled.matches_with(&value, glob::MatchOptions::new()),
+                ))
+            })
+        };
+        self.context
+            .register_global_builtin_callable(JsString::from("shExpMatch"), 2, sh_exp_match)
+            .map_err(|e| anyhow!("register shExpMatch: {e}"))?;
         let ip = self.ip.clone();
         let ipfn = unsafe {
             NativeFunction::from_closure(move |_, _, _| {
@@ -158,6 +207,47 @@ impl Pac {
                 }),
             )
             .map_err(|e| anyhow!("register alert: {e}"))?;
+        let substr = unsafe {
+            NativeFunction::from_closure(move |this, args, context| {
+                let value = this.to_string(context)?;
+                let size = value.len();
+                let start = args
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(JsValue::undefined)
+                    .to_numeric_number(context)?;
+                let offset = if start.is_nan() || start == 0.0 {
+                    0.0
+                } else {
+                    start
+                };
+                let from = if offset < 0.0 {
+                    (size as f64 + offset.ceil()).max(0.0) as usize
+                } else {
+                    offset.floor().min(size as f64) as usize
+                };
+                let end = match args.get(1) {
+                    None => size,
+                    Some(length) if length.is_undefined() => size,
+                    Some(length) => {
+                        let count = length.to_numeric_number(context)?;
+                        if count <= 0.0 {
+                            return Ok(JsValue::from(JsString::from("")));
+                        }
+                        let end = from as f64 + count.floor();
+                        if end.is_nan() {
+                            0
+                        } else {
+                            end.max(0.0).min(size as f64) as usize
+                        }
+                    }
+                };
+                Ok(JsValue::from(value.slice(from, end)))
+            })
+        };
+        self.context
+            .register_global_builtin_callable(JsString::from("__unproxySubstr"), 2, substr)
+            .map_err(|e| anyhow!("register substr: {e}"))?;
         eval_script_sync(include_str!("pac_helpers.js"), &mut self.context)
             .map_err(|e| anyhow!("PAC helper initialization: {e}"))?;
         let script = source.unwrap_or(DEFAULT_SCRIPT);
@@ -462,6 +552,64 @@ fn limited_context() -> Context {
     context
 }
 
+#[derive(Clone)]
+enum ShellPatternError {
+    InvalidGlob,
+    InvalidPattern(String),
+}
+
+fn compile_shell_pattern(source: &str) -> std::result::Result<glob::Pattern, ShellPatternError> {
+    let chars = source.chars().collect::<Vec<_>>();
+    let mut normalized = String::with_capacity(source.len());
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '*' => {
+                normalized.push('*');
+                while index + 1 < chars.len() && chars[index + 1] == '*' {
+                    index += 1;
+                }
+                index += 1;
+            }
+            '[' => {
+                let Some(offset) = chars[index + 1..].iter().position(|ch| *ch == ']') else {
+                    return Err(ShellPatternError::InvalidGlob);
+                };
+                let end = index + 1 + offset;
+                let class = &chars[index + 1..end];
+                if class.is_empty() {
+                    return Err(ShellPatternError::InvalidGlob);
+                }
+                let negated = matches!(class[0], '!' | '^');
+                let contents = if negated { &class[1..] } else { class };
+                if contents
+                    .windows(3)
+                    .any(|range| range[1] == '-' && range[0] > range[2])
+                {
+                    return Err(ShellPatternError::InvalidGlob);
+                }
+                if contents.is_empty() {
+                    normalized.push('?');
+                } else {
+                    normalized.push('[');
+                    if negated {
+                        normalized.push('!');
+                    }
+                    normalized.extend(contents);
+                    normalized.push(']');
+                }
+                index = end + 1;
+            }
+            ch => {
+                normalized.push(ch);
+                index += 1;
+            }
+        }
+    }
+    glob::Pattern::new(&normalized)
+        .map_err(|error| ShellPatternError::InvalidPattern(error.to_string()))
+}
+
 fn resolve_hostname(host: &str) -> Option<IpAddr> {
     static RESOLVER: OnceLock<SyncSender<(String, SyncSender<Option<IpAddr>>)>> = OnceLock::new();
     let resolver = RESOLVER.get_or_init(|| {
@@ -514,10 +662,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn timed_out_evaluation_does_not_poison_pac_context() {
+        let mut pac = Pac::new(Some(
+            "function FindProxyForURL(url, host) { if (host === 'slow.test') { while (true) {} } return 'DIRECT'; }",
+        ))
+        .unwrap();
+        pac.context
+            .runtime_limits_mut()
+            .set_loop_iteration_limit(u64::MAX);
+
+        let error = pac
+            .evaluate_bounded("http://slow.test/", "slow.test")
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("deadline has elapsed"));
+
+        for _ in 0..super::PAC_RECURSION_LIMIT + 1 {
+            assert_eq!(
+                pac.evaluate_bounded("http://example.test/", "example.test")
+                    .await
+                    .unwrap()
+                    .to_string(),
+                "DIRECT"
+            );
+        }
+    }
+
     #[test]
     fn pac_substr_supports_standard_start_and_length_semantics() {
         let mut pac = Pac::new(Some(
-            "function FindProxyForURL(url, host) { return host.substr(host.length - 3, 3) === 'com' && host.substr(-3) === 'com' && host.substr(0, 0) === '' && host.substr(0, -1) === '' ? 'PROXY substr.test:80' : 'DIRECT'; }",
+            "function FindProxyForURL(url, host) { const value='A\\uD83D\\uDE00B'; return host.substr(host.length - 3, 3) === 'com' && host.substr(-3) === 'com' && host.substr(0, 0) === '' && host.substr(0, -1) === '' && value.substr(1, 1) === value.slice(1, 2) && value.substr('3.9') === value.slice(3) && value.substr(1, 2.9) === value.slice(1, 3) && value.substr(0, NaN) === '' ? 'PROXY substr.test:80' : 'DIRECT'; }",
         ))
         .unwrap();
         assert_eq!(

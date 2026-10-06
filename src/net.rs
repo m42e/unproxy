@@ -2,7 +2,7 @@
 
 use std::{
     future::Future,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
         Arc,
@@ -472,7 +472,7 @@ async fn read_crlf_line(io: &mut BoxedIo) -> Result<Vec<u8>> {
         }
     }
 }
-async fn read_pac_body(io: &mut BoxedIo, header: &str) -> Result<Vec<u8>> {
+async fn read_pac_body(io: &mut BoxedIo, header: &str, max_bytes: usize) -> Result<Vec<u8>> {
     let value = |name: &str| {
         header.lines().skip(1).find_map(|line| {
             let (k, v) = line.split_once(':')?;
@@ -483,8 +483,8 @@ async fn read_pac_body(io: &mut BoxedIo, header: &str) -> Result<Vec<u8>> {
         .map(|length| length.parse::<usize>())
         .transpose()
         .context("invalid Content-Length")?;
-    if content_length.is_some_and(|length| length > MAX_PAC_BYTES) {
-        bail!("PAC response exceeds 8 MiB")
+    if content_length.is_some_and(|length| length > max_bytes) {
+        bail!("remote response exceeds {} MiB", max_bytes / (1024 * 1024))
     }
     if value("transfer-encoding").is_some_and(|v| {
         v.split(',')
@@ -505,8 +505,8 @@ async fn read_pac_body(io: &mut BoxedIo, header: &str) -> Result<Vec<u8>> {
                 }
                 return Ok(body);
             }
-            if body.len().saturating_add(size) > MAX_PAC_BYTES {
-                bail!("PAC response exceeds 8 MiB")
+            if body.len().saturating_add(size) > max_bytes {
+                bail!("remote response exceeds {} MiB", max_bytes / (1024 * 1024))
             };
             let old = body.len();
             body.resize(old + size, 0);
@@ -530,8 +530,8 @@ async fn read_pac_body(io: &mut BoxedIo, header: &str) -> Result<Vec<u8>> {
         if n == 0 {
             break;
         }
-        if body.len().saturating_add(n) > MAX_PAC_BYTES {
-            bail!("PAC response exceeds 8 MiB")
+        if body.len().saturating_add(n) > max_bytes {
+            bail!("remote response exceeds {} MiB", max_bytes / (1024 * 1024))
         };
         body.extend_from_slice(&chunk[..n])
     }
@@ -551,26 +551,80 @@ pub async fn fetch_remote_pac(uri: &str) -> Result<String> {
     Ok(fetch_remote_pac_cached(uri, None).await?.script)
 }
 
+/// Download a remote text resource without a conditional request.
+pub async fn fetch_remote_text(uri: &str) -> Result<String> {
+    Ok(fetch_remote_pac_cached(uri, None).await?.script)
+}
+
+/// Download remote text through the local proxy so its PAC policy selects the route.
+pub async fn fetch_remote_text_via_proxy(uri: &str, proxy: SocketAddr) -> Result<String> {
+    Ok(
+        fetch_remote_resource(uri, None, Some(proxy), 64 * 1024 * 1024)
+            .await?
+            .script,
+    )
+}
+
 /// Download a PAC representation using its cached ETag when available.
 pub async fn fetch_remote_pac_cached(
     uri: &str,
     cached: Option<&CachedRemotePac>,
 ) -> Result<CachedRemotePac> {
+    fetch_remote_resource(uri, cached, None, MAX_PAC_BYTES).await
+}
+
+async fn fetch_remote_resource(
+    uri: &str,
+    cached: Option<&CachedRemotePac>,
+    proxy: Option<SocketAddr>,
+    max_bytes: usize,
+) -> Result<CachedRemotePac> {
     let requested = uri.to_owned();
     time::timeout(Duration::from_secs(15), async move {
-        let mut current = http::Uri::try_from(uri).context("invalid PAC URI")?;
+        let mut current = http::Uri::try_from(uri).context("invalid remote URI")?;
         for redirects in 0..=9 {
-            let scheme = current.scheme_str().ok_or_else(|| anyhow!("PAC URI has no scheme"))?;
-            if scheme != "http" && scheme != "https" { bail!("unsupported PAC URI scheme {scheme}"); }
-            let host = current.host().ok_or_else(|| anyhow!("PAC URI has no host"))?.trim_start_matches('[').trim_end_matches(']').to_owned();
+            let scheme = current.scheme_str().ok_or_else(|| anyhow!("remote URI has no scheme"))?;
+            if scheme != "http" && scheme != "https" { bail!("unsupported remote URI scheme {scheme}"); }
+            let host = current.host().ok_or_else(|| anyhow!("remote URI has no host"))?.trim_start_matches('[').trim_end_matches(']').to_owned();
             let port = current.port_u16().unwrap_or(if scheme == "https" { 443 } else { 80 });
             let endpoint = Endpoint { host: host.clone(), port };
             let options = ConnectionOptions::default();
-            let stream = tcp(&endpoint, &options, Duration::from_secs(15)).await?;
-            let mut io: BoxedIo = Box::new(stream);
+            let mut io: BoxedIo = if let Some(proxy) = proxy {
+                let stream = time::timeout(Duration::from_secs(15), TcpStream::connect(proxy))
+                    .await
+                    .context("local proxy connection timed out")??;
+                configure_keepalive(&stream, &options.keepalive)?;
+                Box::new(stream)
+            } else {
+                Box::new(tcp(&endpoint, &options, Duration::from_secs(15)).await?)
+            };
+            if proxy.is_some() && scheme == "https" {
+                let authority = endpoint.authority();
+                let request = format!(
+                    "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nConnection: keep-alive\r\n\r\n"
+                );
+                io.write_all(request.as_bytes()).await?;
+                let raw_header = read_http_head(&mut io).await?;
+                let header = std::str::from_utf8(&raw_header)
+                    .context("invalid local proxy response headers")?;
+                let status = header
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .ok_or_else(|| anyhow!("invalid local proxy CONNECT status"))?;
+                if !(200..300).contains(&status) {
+                    bail!("local proxy rejected CONNECT with HTTP {status}");
+                }
+            }
             if scheme == "https" { io = secure(io, &host, &options.tls).await?; }
             let path = current.path_and_query().map(|v| v.as_str()).unwrap_or("/");
             let host_header = current.authority().unwrap().as_str();
+            let request_target = if proxy.is_some() && scheme == "http" {
+                current.to_string()
+            } else {
+                path.to_owned()
+            };
             let current_string = current.to_string();
             let validator = cached
                 .filter(|entry| entry.etag_uri.as_deref() == Some(current_string.as_str()))
@@ -578,16 +632,16 @@ pub async fn fetch_remote_pac_cached(
             let conditional = validator
                 .map(|etag| format!("If-None-Match: {etag}\r\n"))
                 .unwrap_or_default();
-            let request = format!("GET {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\nAccept: */*\r\n{conditional}\r\n");
+            let request = format!("GET {request_target} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\nAccept: */*\r\n{conditional}\r\n");
             io.write_all(request.as_bytes()).await?;
             let raw_header=read_http_head(&mut io).await?;
-            let header = std::str::from_utf8(&raw_header).context("invalid PAC response headers")?;
-            let status = header.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u16>().ok()).ok_or_else(|| anyhow!("invalid PAC response status"))?;
+            let header = std::str::from_utf8(&raw_header).context("invalid remote response headers")?;
+            let status = header.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u16>().ok()).ok_or_else(|| anyhow!("invalid remote response status"))?;
             if matches!(status, 301 | 302 | 307 | 308) {
-                if redirects == 9 { bail!("too many PAC redirects"); }
-                let location = header.lines().skip(1).find_map(|l| { let (k,v)=l.split_once(':')?; k.eq_ignore_ascii_case("location").then(||v.trim()) }).ok_or_else(|| anyhow!("PAC redirect has no Location"))?;
-                let next = http::Uri::try_from(location).context("invalid PAC redirect Location")?;
-                validate_pac_redirect(scheme, &next)?;
+                if redirects == 9 { bail!("too many remote redirects"); }
+                let location = header.lines().skip(1).find_map(|l| { let (k,v)=l.split_once(':')?; k.eq_ignore_ascii_case("location").then(||v.trim()) }).ok_or_else(|| anyhow!("remote redirect has no Location"))?;
+                let next = http::Uri::try_from(location).context("invalid remote redirect Location")?;
+                validate_remote_redirect(scheme, &next)?;
                 current = next;
                 continue;
             }
@@ -597,32 +651,32 @@ pub async fn fetch_remote_pac_cached(
                 {
                     return Ok(cached.clone());
                 }
-                bail!("PAC server returned 304 without a matching cached validator");
+                bail!("remote server returned 304 without a matching cached validator");
             }
-            if status != 200 { bail!("PAC download returned HTTP {status}"); }
+            if status != 200 { bail!("remote download returned HTTP {status}"); }
             let etag = header.lines().skip(1).find_map(|line| {
                 let (name, value) = line.split_once(':')?;
                 name.eq_ignore_ascii_case("etag").then(|| value.trim().to_owned())
             }).filter(|value| !value.chars().any(char::is_control));
-            let body=read_pac_body(&mut io,header).await?;
-            let script = String::from_utf8(body).context("PAC response is not UTF-8")?;
+            let body=read_pac_body(&mut io,header,max_bytes).await?;
+            let script = String::from_utf8(body).context("remote response is not UTF-8")?;
             let etag_uri = etag.as_ref().map(|_| current_string);
             return Ok(CachedRemotePac { script, etag, etag_uri });
         }
-        bail!("too many PAC redirects")
-    }).await.context("remote PAC download timed out")?.with_context(||format!("downloading PAC from {requested}"))
+        bail!("too many remote redirects")
+    }).await.context("remote download timed out")?.with_context(||format!("downloading remote content from {requested}"))
 }
 
-fn validate_pac_redirect(previous_scheme: &str, next: &http::Uri) -> Result<()> {
+fn validate_remote_redirect(previous_scheme: &str, next: &http::Uri) -> Result<()> {
     if next.authority().is_none() {
-        bail!("PAC redirect Location must have authority");
+        bail!("remote redirect Location must have authority");
     }
     match next.scheme_str() {
         Some("http") | Some("https") => {}
-        _ => bail!("PAC redirect Location must use HTTP or HTTPS"),
+        _ => bail!("remote redirect Location must use HTTP or HTTPS"),
     }
     if previous_scheme == "https" && next.scheme_str() != Some("https") {
-        bail!("HTTPS PAC redirect cannot downgrade to HTTP");
+        bail!("HTTPS remote redirect cannot downgrade to HTTP");
     }
     Ok(())
 }
@@ -635,9 +689,9 @@ mod pac_redirect_tests {
     fn https_pac_redirects_cannot_downgrade() {
         let http: http::Uri = "http://pac.example/script.pac".parse().unwrap();
         let https: http::Uri = "https://pac.example/script.pac".parse().unwrap();
-        assert!(validate_pac_redirect("https", &http).is_err());
-        assert!(validate_pac_redirect("https", &https).is_ok());
-        assert!(validate_pac_redirect("http", &https).is_ok());
+        assert!(validate_remote_redirect("https", &http).is_err());
+        assert!(validate_remote_redirect("https", &https).is_ok());
+        assert!(validate_remote_redirect("http", &https).is_ok());
     }
 }
 
@@ -701,7 +755,8 @@ mod pac_body_tests {
         assert_eq!(
             read_pac_body(
                 &mut io,
-                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+                MAX_PAC_BYTES,
             )
             .await
             .unwrap(),
@@ -718,6 +773,7 @@ mod pac_body_tests {
             let error = read_pac_body(
                 &mut io,
                 "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+                MAX_PAC_BYTES,
             )
             .await
             .unwrap_err()
@@ -733,7 +789,7 @@ mod pac_body_tests {
     async fn pac_body_without_framing_reads_until_clean_eof() {
         let mut io = input(b"function FindProxyForURL(){return 'DIRECT';}").await;
         assert_eq!(
-            read_pac_body(&mut io, "HTTP/1.1 200 OK\r\n\r\n")
+            read_pac_body(&mut io, "HTTP/1.1 200 OK\r\n\r\n", MAX_PAC_BYTES)
                 .await
                 .unwrap(),
             b"function FindProxyForURL(){return 'DIRECT';}"
@@ -743,7 +799,8 @@ mod pac_body_tests {
         assert!(
             read_pac_body(
                 &mut io,
-                "HTTP/1.1 200 OK\r\nContent-Length: 8388609\r\nTransfer-Encoding: chunked\r\n\r\n"
+                "HTTP/1.1 200 OK\r\nContent-Length: 8388609\r\nTransfer-Encoding: chunked\r\n\r\n",
+                MAX_PAC_BYTES,
             )
             .await
             .unwrap_err()
@@ -756,18 +813,23 @@ mod pac_body_tests {
     async fn pac_body_content_length_is_validated_before_reading() {
         let mut io = input(b"").await;
         assert!(
-            read_pac_body(&mut io, "HTTP/1.1 200 OK\r\nContent-Length: nope\r\n\r\n")
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("invalid Content-Length")
+            read_pac_body(
+                &mut io,
+                "HTTP/1.1 200 OK\r\nContent-Length: nope\r\n\r\n",
+                MAX_PAC_BYTES,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("invalid Content-Length")
         );
 
         let mut io = input(b"").await;
         assert!(
             read_pac_body(
                 &mut io,
-                "HTTP/1.1 200 OK\r\nContent-Length: 8388609\r\n\r\n"
+                "HTTP/1.1 200 OK\r\nContent-Length: 8388609\r\n\r\n",
+                MAX_PAC_BYTES,
             )
             .await
             .unwrap_err()
@@ -927,6 +989,47 @@ mod pac_body_tests {
                 .to_string()
                 .contains("a read 5, wrote 0; b read 0, wrote 2")
         );
+    }
+}
+
+#[cfg(test)]
+mod proxied_fetch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn https_fetch_uses_connect_before_tls() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(count, 0);
+                request.extend_from_slice(&chunk[..count]);
+            }
+            assert!(request.starts_with(b"CONNECT example.test:443 HTTP/1.1\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+            let mut tls_record_type = [0];
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                stream.read_exact(&mut tls_record_type),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(tls_record_type[0], 0x16);
+        });
+
+        let error = fetch_remote_text_via_proxy("https://example.test/list.txt", proxy)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("TLS to example.test"));
+        server.await.unwrap();
     }
 }
 

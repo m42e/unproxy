@@ -56,13 +56,14 @@ async fn await_status(proxy: std::net::SocketAddr, origin: std::net::SocketAddr,
     .unwrap_or_else(|_| panic!("proxy did not return HTTP {desired} within {STATUS_TIMEOUT:?}"));
 }
 fn process(address: std::net::SocketAddr, pac: &str, netrc: &std::path::Path) -> Child {
-    process_with_log(address, pac, netrc, None)
+    process_with_log(address, pac, netrc, None, &[])
 }
 fn process_with_log(
     address: std::net::SocketAddr,
     pac: &str,
     netrc: &std::path::Path,
     logfile: Option<&std::path::Path>,
+    filter_lists: &[String],
 ) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_unproxy"));
     command
@@ -83,6 +84,9 @@ fn process_with_log(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    for filter_list in filter_lists {
+        command.arg("--filter-list").arg(filter_list);
+    }
     if let Some(logfile) = logfile {
         command.arg("--logfile").arg(logfile);
     }
@@ -237,6 +241,54 @@ async fn startup_waits_for_remote_policy_before_accepting_connections() {
 }
 
 #[tokio::test]
+async fn unavailable_filter_list_does_not_prevent_proxy_startup() {
+    let temp = tempfile::tempdir().unwrap();
+    let netrc = temp.path().join("netrc");
+    std::fs::write(&netrc, "").unwrap();
+    let pac = temp.path().join("proxy.pac");
+    std::fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+    let logfile = temp.path().join("unproxy.log");
+
+    let remote = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let remote_address = remote.local_addr().unwrap();
+    let fetch_task = tokio::spawn(async move {
+        let (mut client, _) = remote.accept().await.unwrap();
+        let mut request = [0; 1024];
+        let _ = client.read(&mut request).await.unwrap();
+        client
+            .write_all(
+                b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+    });
+
+    let address = reserve_address();
+    let filter_lists = vec![format!("http://{remote_address}/hosts.txt")];
+    let mut child = process_with_log(
+        address,
+        pac.to_str().unwrap(),
+        &netrc,
+        Some(&logfile),
+        &filter_lists,
+    );
+    wait_for_listener(address, &mut child).await;
+    fetch_task.await.unwrap();
+    let (origin_address, origin_task) = origin().await;
+    await_status(address, origin_address, 200).await;
+    stop_child(&mut child).await;
+    origin_task.abort();
+
+    let log = std::fs::read_to_string(logfile).unwrap();
+    assert!(
+        log.contains("filter list unavailable; skipping it for this attempt"),
+        "{log}"
+    );
+    assert!(log.contains("downloading filter list from"), "{log}");
+    assert!(!log.contains("downloading PAC from"), "{log}");
+}
+
+#[tokio::test]
 async fn logfile_is_preserved_and_receives_runtime_startup_messages() {
     let temp = tempfile::tempdir().unwrap();
     let netrc = temp.path().join("netrc");
@@ -247,13 +299,13 @@ async fn logfile_is_preserved_and_receives_runtime_startup_messages() {
     std::fs::write(&logfile, "previous diagnostic history\n").unwrap();
     let (origin_address, origin_task) = origin().await;
     let address = reserve_address();
-    let mut child = process_with_log(address, pac.to_str().unwrap(), &netrc, Some(&logfile));
+    let mut child = process_with_log(address, pac.to_str().unwrap(), &netrc, Some(&logfile), &[]);
     wait_for_listener(address, &mut child).await;
     await_status(address, origin_address, 200).await;
     stop_child(&mut child).await;
 
     let address = reserve_address();
-    let mut child = process_with_log(address, pac.to_str().unwrap(), &netrc, Some(&logfile));
+    let mut child = process_with_log(address, pac.to_str().unwrap(), &netrc, Some(&logfile), &[]);
     wait_for_listener(address, &mut child).await;
     await_status(address, origin_address, 200).await;
     stop_child(&mut child).await;

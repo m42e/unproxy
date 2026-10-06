@@ -8,6 +8,7 @@ use tokio::{
 };
 use unproxy::{
     auth::{AuthFactory, CredentialStore},
+    filter_list::FilterList,
     net::ConnectionOptions,
     pac::Policy,
     proxy::ContextBuilder,
@@ -96,7 +97,50 @@ async fn access_page_renders_untrusted_event_text_as_text() {
     let mut response = String::new();
     client.read_to_string(&mut response).await.unwrap();
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-    assert!(response.contains("p.textContent=e.data"), "{response}");
+    assert!(response.contains("Live access log"), "{response}");
+    assert!(response.contains("role=\"log\""), "{response}");
+    assert!(
+        response.contains("new EventSource('/access.log')"),
+        "{response}"
+    );
+    assert!(
+        response.contains("line.textContent = event.data"),
+        "{response}"
+    );
+    assert!(
+        response.contains("Connection interrupted; reconnecting"),
+        "{response}"
+    );
+    assert!(!response.contains("innerHTML"), "{response}");
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
+async fn application_log_page_renders_log_stream_as_text() {
+    let proxy = start(Policy::new(None).unwrap()).await;
+    let addr = proxy.local_addrs()[0];
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(
+            format!("GET /log.html HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("new EventSource('/log')"), "{response}");
+    assert!(
+        response.contains("renderAnsi(line, event.data)"),
+        "{response}"
+    );
+    assert!(
+        response.contains("code === 38 || code === 48"),
+        "{response}"
+    );
+    assert!(response.contains("span.textContent = text"), "{response}");
     assert!(!response.contains("innerHTML"), "{response}");
     proxy.shutdown();
     proxy.wait().await;
@@ -120,6 +164,15 @@ async fn status_page_explains_upstream_authentication_negotiation() {
         "{response}"
     );
     assert!(response.contains("Authorization token sent"), "{response}");
+    assert!(response.contains("<h2>Blocked domains</h2>"), "{response}");
+    assert!(
+        response.contains("id=\"blocked-domain-count\""),
+        "{response}"
+    );
+    assert!(response.contains("Filter list: Blocked"), "{response}");
+    assert!(response.contains("Filter list: Not blocked"), "{response}");
+    assert!(response.contains("Application log"), "{response}");
+    assert!(response.contains("href=\"/log.html\""), "{response}");
 
     let mut client = TcpStream::connect(addr).await.unwrap();
     client
@@ -145,7 +198,14 @@ async fn resolve_endpoint_validates_urls_and_returns_policy_results() {
         "function FindProxyForURL(url, host) { return 'PROXY proxy.example:8080'; }".into(),
     ))
     .unwrap();
-    let proxy = start(policy).await;
+    let proxy = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
+        .listen("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .filter_list(FilterList::parse(
+            "0.0.0.0 ads.example.test\n||tracker.example.test^\nads.example.test\n",
+        ))
+        .bind()
+        .await
+        .unwrap();
     let addr = proxy.local_addrs()[0];
 
     async fn get(addr: SocketAddr, target: &str) -> String {
@@ -188,9 +248,23 @@ async fn resolve_endpoint_validates_urls_and_returns_policy_results() {
         "{invalid_destination}"
     );
 
-    let result = get(addr, "/resolve.json?url=http%3A%2F%2Fexample.test%2Fpath").await;
+    let status_response = get(addr, "/status.json").await;
+    let status_body = status_response.split_once("\r\n\r\n").unwrap().1;
+    let status: serde_json::Value = serde_json::from_str(status_body).unwrap();
+    assert_eq!(status["blocked_domain_count"], 2);
+
+    let result = get(
+        addr,
+        "/resolve.json?url=http%3A%2F%2Fsub.ads.example.test%2Fpath",
+    )
+    .await;
     assert!(result.starts_with("HTTP/1.1 200"), "{result}");
     assert!(result.contains("proxy.example:8080"), "{result}");
+    let result_body = result.split_once("\r\n\r\n").unwrap().1;
+    let result: serde_json::Value = serde_json::from_str(result_body).unwrap();
+    assert_eq!(result["filter_list"]["host"], "sub.ads.example.test");
+    assert_eq!(result["filter_list"]["blocked"], true);
+    assert_eq!(result["results"][0]["routes"], "HTTP proxy.example:8080");
     proxy.shutdown();
     proxy.wait().await;
 
