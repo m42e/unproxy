@@ -324,6 +324,7 @@ async fn local_errors_and_self_loop_are_rejected() {
             .contains("content-type: text/html; charset=utf-8")
     );
     assert!(html.contains("<title>Unproxy status</title>"));
+    assert!(html.contains("grid-template-columns: repeat(5, minmax(0, 1fr))"));
     let browser_root = get(
         addr,
         format!(

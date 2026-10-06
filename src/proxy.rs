@@ -1808,7 +1808,7 @@ fn status_html() -> String {
     body { max-width: 90rem; margin: 3rem auto; padding: 0 1.25rem; }
     h1 { margin-bottom: .25rem; }
     .muted, small { color: GrayText; }
-    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin: 2rem 0; }
+    .grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1rem; margin: 2rem 0; }
     article { min-width: 0; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: .75rem; padding: 1rem; }
     @media (max-width: 60rem) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 36rem) { .grid { grid-template-columns: 1fr; } }
