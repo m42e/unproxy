@@ -103,6 +103,23 @@ are saved and applied immediately. Add a listener for each numeric IP address
 and port; write IPv6 addresses in brackets, such as
 `[::1]:3128`. Both desktop apps start with IPv4 and IPv6 loopback listeners on
 port 3128.
+
+## Block domains with filter lists
+
+Filter lists are optional. Repeat `--filter-list` with a local hosts-format
+file or an HTTP(S) URL; the format accepts Pi-hole lists with `0.0.0.0` or
+`127.0.0.1` mappings, as well as plain domain-per-line lists:
+
+```sh
+unproxy --filter-list /path/to/hosts.txt --filter-list https://example.org/hosts.txt
+```
+
+Blocked domains and their subdomains receive an HTTP 403 response before any
+upstream connection is opened. Lists are loaded once at startup and stored in
+a hash set, so each request checks only the hostname and its parent domains.
+Lists larger than 64 MiB total are rejected. Add the same `--filter-list`
+options to `~/.config/unproxy/unproxyrc` to use them with the desktop app.
+
 **Copy Proxy Address** copies the first listener. On Linux, create
 `~/.config/unproxy/unproxyrc` and put this in it:
 
