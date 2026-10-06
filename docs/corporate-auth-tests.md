@@ -13,15 +13,17 @@ On Ubuntu 24.04, run:
 
 ```sh
 sudo apt-get install krb5-kdc krb5-admin-server krb5-user squid
+sudo systemctl stop squid.service
 bash scripts/test_corporate_auth.sh
 ```
 
 The script creates a temporary `UNPROXY.TEST` realm, client and `HTTP/localhost`
 principals, keytabs, ticket cache, a Squid proxy, and an HTTP origin. All runtime
 files are under a temporary directory and removed on exit. It starts isolated
-listeners on loopback ports 61088, 61880, and 63128 without changing system
-service settings. It verifies that the client can obtain a service ticket before
-running the ignored integration tests. The test command
+listeners on loopback ports 61088, 61880, and 63128. Stop any package-managed
+Squid service first because Squid instances share a system-wide shared-memory
+name; CI does this on its ephemeral runner. It verifies that the client can
+obtain a service ticket before running the ignored integration tests. The test command
 can be replaced by appending a command to the script, for example:
 
 ```sh

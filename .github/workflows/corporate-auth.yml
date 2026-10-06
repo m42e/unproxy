@@ -1,6 +1,7 @@
 name: corporate-auth
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -22,6 +23,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y krb5-kdc krb5-admin-server krb5-user squid
+          sudo systemctl stop squid.service
       - name: Authenticate forwarding and CONNECT with MIT Kerberos
         run: bash scripts/test_corporate_auth.sh
   windows-sspi:

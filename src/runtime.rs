@@ -592,6 +592,43 @@ mod tests {
     }
 
     #[test]
+    fn logfile_open_trims_oversized_active_and_backup_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unproxy.log");
+        fs::write(&path, b"abcdefghij").unwrap();
+        fs::write(backup_path(&path, 1), b"0123456789").unwrap();
+
+        let _log = RotatingLog::open(&path, 4, 1).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"ghij");
+        assert_eq!(fs::read(backup_path(&path, 1)).unwrap(), b"6789");
+    }
+
+    #[test]
+    fn logfile_without_backups_restarts_the_active_file_at_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unproxy.log");
+        let log = RotatingLog::open(&path, 4, 0).unwrap();
+
+        log.make_writer().write_all(b"abcdefghij").unwrap();
+
+        assert_eq!(fs::read(path).unwrap(), b"ij");
+    }
+
+    #[test]
+    fn logfile_compacts_when_rotation_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unproxy.log");
+        let log = RotatingLog::open(&path, 8, 1).unwrap();
+        fs::create_dir(backup_path(&path, 1)).unwrap();
+
+        log.make_writer().write_all(b"12345678ABCDEFGH").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"ABCDEFGH");
+        assert!(backup_path(&path, 1).is_dir());
+    }
+
+    #[test]
     fn effective_ip_prefers_override_and_detects_only_when_needed() {
         for ip in ["192.0.2.42", "2001:db8::42"] {
             let ip = ip.parse().unwrap();
