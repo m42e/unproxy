@@ -278,6 +278,60 @@ impl Pac {
         self.context
             .register_global_builtin_callable(JsString::from("__unproxySubstr"), 2, substr)
             .map_err(|e| anyhow!("register substr: {e}"))?;
+        // Register before evaluating pac_helpers.js. Accept only a primitive string
+        // containing four 1–3 digit ASCII decimal octets in [0, 255]. Return the
+        // unsigned value as a JS number, or null when the input is not an IPv4 literal.
+        self.context
+            .register_global_builtin_callable(
+                JsString::from("__unproxyParseIPv4"),
+                1,
+                NativeFunction::from_copy_closure(|_, args, _| {
+                    let Some(input) = args.first().and_then(JsValue::as_string) else {
+                        return Ok(JsValue::null());
+                    };
+                    if input.len() > 15 {
+                        return Ok(JsValue::null());
+                    }
+                    let input = input.to_std_string_escaped();
+                    let bytes = input.as_bytes();
+                    let mut value = 0u32;
+                    let mut octet = 0u16;
+                    let mut digits = 0u8;
+                    let mut parts = 0u8;
+                    for byte in bytes.iter().copied().chain(std::iter::once(b'.')) {
+                        if byte == b'.' {
+                            if digits == 0 || digits > 3 || octet > 255 {
+                                return Ok(JsValue::null());
+                            }
+                            value = (value << 8) | u32::from(octet);
+                            parts += 1;
+                            if parts > 4 {
+                                return Ok(JsValue::null());
+                            }
+                            octet = 0;
+                            digits = 0;
+                        } else if byte.is_ascii_digit() {
+                            digits += 1;
+                            if digits > 3 {
+                                return Ok(JsValue::null());
+                            }
+                            octet = octet * 10 + u16::from(byte - b'0');
+                            if octet > 255 {
+                                return Ok(JsValue::null());
+                            }
+                        } else {
+                            return Ok(JsValue::null());
+                        }
+                    }
+                    if parts == 4 {
+                        Ok(JsValue::from(f64::from(value)))
+                    } else {
+                        Ok(JsValue::null())
+                    }
+                }),
+            )
+            .map_err(|e| anyhow!("register __unproxyParseIPv4: {e}"))?;
+
         eval_script_sync(include_str!("pac_helpers.js"), &mut self.context)
             .map_err(|e| anyhow!("PAC helper initialization: {e}"))?;
         let script = source.unwrap_or(DEFAULT_SCRIPT);

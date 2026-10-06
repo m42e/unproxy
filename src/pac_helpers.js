@@ -7,9 +7,30 @@ function dnsDomainLevels(host) { return (host.match(/\./g)||[]).length; }
 function isPlainHostName(host) { return !host.includes('.'); }
 function isResolvable(host) { return dnsResolve(host) !== null; }
 function localHostOrDomainIs(host, hostdom) { return host===hostdom || hostdom.startsWith(host+'.'); }
-function isValidIpAddress(s) { return typeof s==='string' && /^(\d{1,3}\.){3}\d{1,3}$/.test(s) && s.split('.').every(x=>+x<=255); }
-function convert_addr(s) { if(!isValidIpAddress(s)) return 0; let n=0; for(const x of s.split('.')) n=(n<<8)|(+x); return n|0; }
-function isInNet(host, pattern, mask) { if(!isValidIpAddress(pattern)||!isValidIpAddress(mask)) return false; let ip=isValidIpAddress(host)?host:dnsResolve(host); return ip!==null && ip!==undefined && isValidIpAddress(ip) && ((convert_addr(ip)&convert_addr(mask))===(convert_addr(pattern)&convert_addr(mask))); }
+function isValidIpAddress(s) { return __unproxyParseIPv4(s) !== null; }
+function convert_addr(s) {
+  if (!isValidIpAddress(s)) return 0;
+  const value = __unproxyParseIPv4(s);
+  // Retain the former coercion behavior when a PAC script overrides validation.
+  if (value === null) { let n=0; for(const x of s.split('.')) n=(n<<8)|(+x); return n|0; }
+  return value | 0;
+}
+const __originalIsValidIpAddress = isValidIpAddress;
+const __originalConvertAddr = convert_addr;
+const __originalParseIPv4 = __unproxyParseIPv4;
+const __originalDnsResolve = dnsResolve;
+function isInNet(host, pattern, mask) {
+  if (typeof host === 'string' && dnsResolve === __originalDnsResolve && isValidIpAddress === __originalIsValidIpAddress && convert_addr === __originalConvertAddr && __unproxyParseIPv4 === __originalParseIPv4) {
+    const network = __unproxyParseIPv4(pattern), subnet = __unproxyParseIPv4(mask);
+    if (network === null || subnet === null) return false;
+    let address = __unproxyParseIPv4(host);
+    if (address === null) address = __unproxyParseIPv4(dnsResolve(host));
+    return address !== null && ((address & subnet) === (network & subnet));
+  }
+  if (!isValidIpAddress(pattern)||!isValidIpAddress(mask)) return false;
+  let ip=isValidIpAddress(host)?host:dnsResolve(host);
+  return ip!==null && ip!==undefined && isValidIpAddress(ip) && ((convert_addr(ip)&convert_addr(mask))===(convert_addr(pattern)&convert_addr(mask)));
+}
 const _wd=['SUN','MON','TUE','WED','THU','FRI','SAT'], _mo=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 function weekdayRange(...a) { let g=a[a.length-1]==='GMT'; if(g)a.pop(); if(a.length<1||a.length>2||a.some(x=>!_wd.includes(x)))return false; let d=new Date(),v=g?d.getUTCDay():d.getDay(); let x=_wd.indexOf(a[0]),y=_wd.indexOf(a[a.length-1]); return a.length===1?v===x:(x<=y?v>=x&&v<=y:v===x||v===y); }
 function dateRange(...a) {
