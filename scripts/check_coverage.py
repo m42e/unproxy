@@ -146,7 +146,8 @@ def main() -> int:
         )
         if desktop:
             line_coverage: dict[int, bool] = {}
-            for line, _column, count, has_count, _region_entry in desktop["segments"]:
+            for segment in desktop["segments"]:
+                line, count, has_count = segment[0], segment[2], segment[3]
                 if has_count:
                     line_coverage[line] = line_coverage.get(line, False) or count > 0
             uncovered = [line for line, covered in sorted(line_coverage.items()) if not covered]
