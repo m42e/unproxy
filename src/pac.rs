@@ -1331,6 +1331,38 @@ mod tests {
     }
 
     #[test]
+    fn shell_match_cache_falls_back_when_full_and_keeps_the_wildcard_fast_path() {
+        let mut pac = Pac::new(Some(
+            "function FindProxyForURL(url, host) { return shExpMatch(url, host) ? 'DIRECT' : 'PROXY miss.test:80'; }",
+        ))
+        .unwrap();
+        for index in 0..super::SH_EXP_MATCH_CACHE_CAPACITY {
+            let pattern = format!("cached-{index}*");
+            pac.glob_cache.borrow_mut().insert(
+                boa_engine::JsString::from(pattern.clone()),
+                super::compile_shell_pattern(&pattern),
+            );
+        }
+
+        assert_eq!(
+            pac.evaluate("example.test", "*.test").unwrap().to_string(),
+            "DIRECT"
+        );
+        assert_eq!(
+            pac.glob_cache.borrow().len(),
+            super::SH_EXP_MATCH_CACHE_CAPACITY
+        );
+        assert_eq!(
+            pac.evaluate("example.test", "*").unwrap().to_string(),
+            "DIRECT"
+        );
+        assert_eq!(
+            pac.glob_cache.borrow().len(),
+            super::SH_EXP_MATCH_CACHE_CAPACITY
+        );
+    }
+
+    #[test]
     fn pac_substr_supports_standard_start_and_length_semantics() {
         let mut pac = Pac::new(Some(
             "function FindProxyForURL(url, host) { const value='A\\uD83D\\uDE00B'; return host.substr(host.length - 3, 3) === 'com' && host.substr(-3) === 'com' && host.substr(0, 0) === '' && host.substr(0, -1) === '' && value.substr(1, 1) === value.slice(1, 2) && value.substr('3.9') === value.slice(3) && value.substr(1, 2.9) === value.slice(1, 3) && value.substr(0, NaN) === '' ? 'PROXY substr.test:80' : 'DIRECT'; }",
