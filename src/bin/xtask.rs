@@ -35,7 +35,7 @@ enum Task {
     },
     Check,
     Test,
-    /// Run the PAC routing and filter-list performance tests.
+    /// Run the PAC evaluation, matching, and filter-list performance tests.
     #[command(alias = "perf")]
     Performance,
     Docs {
@@ -188,9 +188,12 @@ fn main() -> Result<()> {
                 "--locked",
                 "--test",
                 "pac_performance",
+                "--test",
+                "pac_matching_performance",
                 "--",
                 "--ignored",
                 "--nocapture",
+                "--test-threads=1",
             ]))?;
             run(Command::new("cargo").args([
                 "test",

@@ -4,6 +4,7 @@ Run the ignored measurements in release mode, with one test at a time:
 
 ```sh
 cargo test --release --locked --test pac_performance -- --ignored --nocapture --test-threads=1
+cargo test --release --locked --test pac_matching_performance -- --ignored --nocapture --test-threads=1
 cargo test --release --locked --lib performance -- --ignored --nocapture --test-threads=1
 ```
 
@@ -14,6 +15,37 @@ latency. The internal DNS case measures individual synchronous evaluations with
 seeded caches, so it does not depend on network DNS service performance. The
 parser case compares the previous string conversion/parsing path with reuse of
 an already parsed result, excluding JavaScript and worker scheduling.
+
+## Matching with unique hostnames
+
+`tests/pac_matching_performance.rs` separates substring calls, warm wildcard
+matching, and substring-plus-cold-wildcard pairs. Each evaluation performs 96
+calls or pairs and returns one route. All 620 inputs, including warmup requests,
+have unique hostnames, URLs, and returned proxy directives. Changing the returned
+directive is necessary because the route cache is keyed by that string, rather
+than the hostname. This prevents both the last-result shortcut and the parsed
+route map from hitting.
+
+These cases use synchronous `Pac` evaluation to exclude policy-worker dispatch.
+Inputs and warm wildcard patterns are prepared before timing, and route
+assertions run afterward. The cold case fills the 512-pattern glob cache with
+unrelated patterns during initialization; every measured dynamic pattern then
+requires compilation. Its pairs contain one substring call and one wildcard
+call. No DNS resolution or proxy connection occurs. Reported per-call and
+per-pair costs are amortized: they still include JavaScript execution and one
+uncached route parse per evaluation. The ordinary regression test exercises the
+same workload scripts and checks input uniqueness and matching results.
+
+Local release medians for these workloads:
+
+| Workload | Per evaluation (96 calls or pairs) | Amortized per call or pair |
+| --- | ---: | ---: |
+| Substring calls | 13.28 µs | 138 ns / call |
+| Warm wildcard matching | 36.33 µs | 378 ns / call |
+| Substring plus cold wildcard compilation | 103.06 µs | 1.07 µs / pair |
+
+`cargo xtask perf` includes these cases and runs the PAC integration benchmarks
+one at a time. Use the release command above for comparable timing results.
 
 ## Measurements on 2026-10-06
 
