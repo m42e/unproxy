@@ -127,7 +127,12 @@ impl Pac {
                 let now = Instant::now();
                 let value = {
                     let mut c = dns_cache.lock().unwrap();
-                    c.retain(|_, v| now.duration_since(v.at) < Duration::from_secs(300));
+                    // Expire only this hostname; bulk pruning runs periodically.
+                    if c.get(&host)
+                        .is_some_and(|v| now.duration_since(v.at) >= Duration::from_secs(300))
+                    {
+                        c.remove(&host);
+                    }
                     if let Some(v) = c.get(&host) {
                         v.value
                     } else if dns_budget.fetch_add(1, Ordering::Relaxed) >= DNS_RESOLVE_BUDGET {
@@ -853,6 +858,79 @@ mod tests {
             "DIRECT"
         );
         assert_eq!(pac.cache_snapshot().len(), super::DNS_RESOLVE_BUDGET);
+    }
+
+    #[test]
+    #[ignore = "performance measurement; run release ignored PAC tests"]
+    fn warm_dns_cache_performance() {
+        for size in [64, 4096] {
+            let mut pac = Pac::new(Some(
+                "function FindProxyForURL(){ for(var i=0;i<32;i++) dnsResolve('warm.test'); return 'DIRECT'; }",
+            )).unwrap();
+            let now = Instant::now();
+            for index in 0..size {
+                pac.cache.lock().unwrap().insert(
+                    format!("entry{index}.test"),
+                    CacheEntry {
+                        value: None,
+                        at: now,
+                    },
+                );
+            }
+            pac.cache.lock().unwrap().insert(
+                "warm.test".into(),
+                CacheEntry {
+                    value: Some("192.0.2.1".parse().unwrap()),
+                    at: now,
+                },
+            );
+            for _ in 0..20 {
+                pac.evaluate("x", "x").unwrap();
+            }
+            let mut samples = Vec::new();
+            for _ in 0..500 {
+                let start = Instant::now();
+                assert_eq!(pac.evaluate("x", "x").unwrap().to_string(), "DIRECT");
+                samples.push(start.elapsed());
+            }
+            samples.sort_unstable();
+            println!(
+                "warm DNS cache ({size} entries, 32 hits): median {:?}, mean {:?}",
+                samples[250],
+                samples.iter().sum::<Duration>() / 500
+            );
+        }
+    }
+
+    #[test]
+    fn dns_lookup_expires_requested_entry_without_scanning_cache() {
+        let mut pac = Pac::new(Some(
+            "function FindProxyForURL(){ return dnsResolve('stale.invalid')===null && dnsResolve('positive.test')==='192.0.2.9' && dnsResolve('negative.test')===null ? 'DIRECT' : 'PROXY wrong:80'; }",
+        )).unwrap();
+        let now = Instant::now();
+        for (host, value, expired) in [
+            ("stale.invalid", Some("192.0.2.1".parse().unwrap()), true),
+            ("unrequested.test", None, true),
+            ("positive.test", Some("192.0.2.9".parse().unwrap()), false),
+            ("negative.test", None, false),
+        ] {
+            pac.cache.lock().unwrap().insert(
+                host.into(),
+                CacheEntry {
+                    value,
+                    at: if expired {
+                        now - Duration::from_secs(301)
+                    } else {
+                        now
+                    },
+                },
+            );
+        }
+        assert_eq!(pac.evaluate("x", "x").unwrap().to_string(), "DIRECT");
+        let cache = pac.cache.lock().unwrap();
+        assert!(cache["stale.invalid"].at >= now);
+        assert!(cache["stale.invalid"].value.is_none());
+        assert!(cache["unrequested.test"].at < now);
     }
 
     #[test]
