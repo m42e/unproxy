@@ -117,9 +117,23 @@ impl RotatingLogState {
     }
 
     fn compact(&mut self) -> io::Result<()> {
-        let file = self.file.as_mut().expect("rotating log file is open");
-        trim_open_file_to_limit(file, self.max_bytes / 2)?;
-        self.size = file.metadata()?.len();
+        drop(self.file.take());
+        let compacted = (|| {
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.path)?;
+            trim_open_file_to_limit(&mut file, self.max_bytes / 2)?;
+            file.metadata().map(|metadata| metadata.len())
+        })();
+        self.file = Some(open_log_file(&self.path)?);
+        self.size = self
+            .file
+            .as_ref()
+            .expect("rotating log file is open")
+            .metadata()?
+            .len();
+        compacted?;
         Ok(())
     }
 }
@@ -163,8 +177,11 @@ fn trim_open_file_to_limit(file: &mut fs::File, max_bytes: u64) -> io::Result<()
 
 fn rotate_paths(path: &Path, backups: usize) -> io::Result<()> {
     if backups == 0 {
-        let file = open_log_file(path)?;
-        file.set_len(0)?;
+        let _file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
         return Ok(());
     }
     remove_if_exists(&backup_path(path, backups))?;

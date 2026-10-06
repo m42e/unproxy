@@ -33,6 +33,7 @@ cat > "$KRB5_CONFIG" <<'CONFIG'
  dns_lookup_kdc = false
  dns_lookup_realm = false
  dns_canonicalize_hostname = false
+ qualify_shortname = ""
  rdns = false
 [realms]
  UNPROXY.TEST = {
