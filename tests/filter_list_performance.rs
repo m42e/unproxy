@@ -46,10 +46,13 @@ fn report(host: &str, matched: bool, durations: &[Duration]) {
     let total: Duration = durations.iter().sum();
     let count = LOOKUPS_PER_SAMPLE * durations.len();
     let mean = total / count as u32;
-    let min = durations.iter().min().unwrap();
-    let max = durations.iter().max().unwrap();
+    let min = *durations.iter().min().unwrap() / LOOKUPS_PER_SAMPLE as u32;
+    let max = *durations.iter().max().unwrap() / LOOKUPS_PER_SAMPLE as u32;
+    let mut ordered = durations.to_vec();
+    ordered.sort_unstable();
+    let median = ordered[ordered.len() / 2] / LOOKUPS_PER_SAMPLE as u32;
     println!(
-        "Filter-list {kind} lookup: {count} checks against {DOMAINS} domains ({host}); min {min:.2?}, max {max:.2?}, mean {mean:.2?} per check",
+        "Filter-list {kind} lookup: {count} checks against {DOMAINS} domains ({host}); min {min:.2?}, median {median:.2?}, mean {mean:.2?}, max {max:.2?} per check",
         kind = if matched { "blocked" } else { "unblocked" },
     );
 }
