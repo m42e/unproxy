@@ -243,15 +243,19 @@ async fn logfile_is_preserved_and_receives_runtime_startup_messages() {
     std::fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
     let logfile = temp.path().join("unproxy.log");
     std::fs::write(&logfile, "previous diagnostic history\n").unwrap();
+    let (origin_address, origin_task) = origin().await;
     let address = reserve_address();
     let mut child = process_with_log(address, pac.to_str().unwrap(), &netrc, Some(&logfile));
     wait_for_listener(address, &mut child).await;
+    await_status(address, origin_address, 200).await;
     stop_child(&mut child).await;
 
     let address = reserve_address();
     let mut child = process_with_log(address, pac.to_str().unwrap(), &netrc, Some(&logfile));
     wait_for_listener(address, &mut child).await;
+    await_status(address, origin_address, 200).await;
     stop_child(&mut child).await;
+    origin_task.abort();
 
     let log = std::fs::read_to_string(logfile).unwrap();
     assert!(log.contains("previous diagnostic history"));
