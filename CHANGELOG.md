@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.2
+
+- Add optional ad blocking filter lists, with runtime enforcement and desktop
+  settings for managing sources.
+- Support SOCKS4/4a and SOCKS5 upstream proxies, including SOCKS5 GSSAPI
+  authentication.
+- Improve corporate authentication reliability, bounded log rotation, and
+  proxy routing coverage.
+
 ## 0.2.1
 
 - Bound PAC initialization and evaluation, resolver work, DoH bodies, proxy
