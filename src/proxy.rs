@@ -1960,6 +1960,189 @@ fn status_text(cfg: &ContextBuilder) -> String {
 }
 
 #[cfg(test)]
+mod management_coverage_tests {
+    use super::*;
+    use crate::logging::CapturedWriter;
+    use std::io::Write as _;
+    use tracing_subscriber::fmt::writer::MakeWriter as _;
+
+    fn builder(authenticated: bool) -> ContextBuilder {
+        let mut options = ConnectionOptions::default();
+        if authenticated {
+            options.auth = crate::auth::AuthFactory::basic(
+                crate::auth::CredentialStore::parse("default login proxy password secret").unwrap(),
+            );
+        }
+        ContextBuilder::new(
+            Arc::new(
+                Policy::new(Some("function FindProxyForURL(){return 'DIRECT';}".into())).unwrap(),
+            ),
+            options,
+        )
+    }
+
+    #[test]
+    fn status_text_reports_policy_and_upstream_authentication_states() {
+        let cfg = builder(true);
+        cfg.runtime_status.set_pac_files(vec!["local.pac".into()]);
+        assert!(status_text(&cfg).contains("PAC files: local.pac"));
+        assert!(status_text(&cfg).contains("No upstream result yet"));
+        assert!(status_text(&cfg).contains("Configured, not verified"));
+
+        let route = Route::Http(Endpoint {
+            host: "proxy.test".into(),
+            port: 8080,
+        });
+        cfg.runtime_status.observe(&route, true, true, None);
+        let status = status_text(&cfg);
+        assert!(status.contains("Last request succeeded"));
+        assert!(status.contains("Authenticated"));
+
+        cfg.runtime_status
+            .observe(&route, false, false, Some("upstream returned HTTP 407"));
+        let status = status_text(&cfg);
+        assert!(status.contains("Last request failed"));
+        assert!(status.contains("Rejected by upstream"));
+
+        let inline = builder(false);
+        inline.runtime_status.set_pac_files(Vec::new());
+        assert!(status_text(&inline).contains("PAC files: (inline policy)"));
+        assert!(status_text(&inline).contains("Not configured"));
+    }
+
+    #[tokio::test]
+    async fn log_response_replays_history_then_closes_when_its_source_is_dropped() {
+        let logs = LogStream::new();
+        let writer = CapturedWriter::new(std::io::sink, logs.clone()).make_writer();
+        let mut writer = writer;
+        writer.write_all(b"startup complete\n").unwrap();
+        drop(writer);
+
+        let response = log_response(logs.clone());
+        drop(logs);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body, "data:startup complete\n\n");
+    }
+
+    #[test]
+    fn runtime_status_recovers_safely_from_a_poisoned_lock() {
+        let status = RuntimeStatus::new(true);
+        let shared = status.0.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = shared.lock().unwrap();
+            panic!("poison the test status lock");
+        });
+
+        let snapshot = status.snapshot();
+        assert_eq!(snapshot.upstream_state, "unknown");
+        assert_eq!(snapshot.authentication_state, "unknown");
+        assert!(snapshot.pac_files.is_empty());
+        status.set_pac_files(vec!["ignored.pac".into()]);
+        status.observe(
+            &Route::Http(Endpoint {
+                host: "proxy.test".into(),
+                port: 8080,
+            }),
+            true,
+            true,
+            None,
+        );
+        assert_eq!(status.snapshot().upstream_state, "unknown");
+    }
+
+    #[tokio::test]
+    async fn route_selection_exhausts_failed_candidates_in_policy_order() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Endpoint {
+            host: "127.0.0.1".into(),
+            port: listener.local_addr().unwrap().port(),
+        };
+        drop(listener);
+        let routes = Routes(vec![
+            Route::Http(endpoint.clone()),
+            Route::Http(endpoint.clone()),
+            Route::Http(endpoint.clone()),
+        ]);
+        let status = RuntimeStatus::new(false);
+
+        let selected = select_route(
+            &routes,
+            &Endpoint {
+                host: "example.test".into(),
+                port: 80,
+            },
+            false,
+            false,
+            &ConnectionOptions::default(),
+            &status,
+            Duration::from_secs(1),
+            1,
+            false,
+        )
+        .await;
+        assert!(selected.is_none());
+        assert_eq!(status.snapshot().upstream_state, "error");
+    }
+
+    #[tokio::test]
+    async fn pac_source_loader_reports_local_file_errors_with_source_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let valid = directory.path().join("valid.pac");
+        std::fs::write(&valid, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
+        let sources = vec![PathOrUri::Path(valid.clone())];
+        assert_eq!(load_pac_sources(&sources).await.unwrap().len(), 1);
+        assert!(load_pac_sources(&[]).await.unwrap().is_empty());
+
+        let invalid = directory.path().join("invalid.pac");
+        std::fs::write(&invalid, [0xff, 0xfe]).unwrap();
+        let error = load_pac_sources(&[PathOrUri::Path(invalid.clone())])
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("not UTF-8"));
+
+        let missing = PathOrUri::Path(directory.path().join("missing.pac"));
+        let error = load_pac_sources(&[missing]).await.unwrap_err();
+        assert!(format!("{error:#}").contains("loading PAC source"));
+    }
+
+    #[tokio::test]
+    async fn filter_retry_stops_when_the_proxy_shuts_down_before_its_delay() {
+        let context = builder(false)
+            .listen("127.0.0.1:0".parse().unwrap())
+            .bind()
+            .await
+            .unwrap();
+        context.retry_filter_lists_after(
+            vec!["http://127.0.0.1:1/hosts.txt".into()],
+            Duration::from_secs(60),
+        );
+        context.shutdown();
+        context.wait().await;
+    }
+
+    #[test]
+    fn connect_destination_requires_an_authority_and_nonzero_port() {
+        let valid: Uri = "proxy.test:8443".parse().unwrap();
+        let destination = connect_destination(&valid).unwrap();
+        assert_eq!(destination.endpoint.host, "proxy.test");
+        assert_eq!(destination.endpoint.port, 8443);
+        assert!(destination.pac_url.starts_with("http://"));
+
+        let https: Uri = "proxy.test:443".parse().unwrap();
+        assert!(
+            connect_destination(&https)
+                .unwrap()
+                .pac_url
+                .starts_with("https://")
+        );
+        let zero: Uri = "proxy.test:0".parse().unwrap();
+        assert!(connect_destination(&zero).is_none());
+        let missing_authority: Uri = "/path".parse().unwrap();
+        assert!(connect_destination(&missing_authority).is_none());
+    }
+}
+
+#[cfg(test)]
 mod wait_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

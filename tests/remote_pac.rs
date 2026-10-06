@@ -119,6 +119,17 @@ async fn revalidates_cached_pac_with_etag_and_keeps_cached_body_on_not_modified(
 }
 
 #[tokio::test]
+async fn rejects_not_modified_response_without_a_cached_validator() {
+    let (addr, task) = one_shot(response("304 Not Modified", "Connection: close\r\n", b"")).await;
+    let error = fetch_error(format!("http://{addr}/policy.pac")).await;
+    assert!(
+        error.contains("without a matching cached validator"),
+        "{error}"
+    );
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn decodes_chunked_response_without_content_length() {
     let body = b"function FindProxyForURL(){return 'DIRECT';}";
     let mut chunks = Vec::new();

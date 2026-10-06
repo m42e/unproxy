@@ -511,6 +511,28 @@ mod tests {
         assert!(format!("{auth:?}").contains("proxy.corp.test"));
     }
 
+    #[test]
+    #[cfg(feature = "negotiate")]
+    fn socks_negotiate_context_rejects_unlisted_hosts_before_native_setup() {
+        let auth = AuthFactory::negotiate(vec!["proxy.corp.test".into()]);
+        assert!(
+            auth.socks_gss_context("proxy.public.test")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "negotiate")]
+    fn socks_negotiate_context_attempts_native_setup_for_allowed_hosts() {
+        let auth = AuthFactory::negotiate(vec!["proxy.corp.test".into()]);
+        match auth.socks_gss_context("proxy.corp.test") {
+            Ok(Some(context)) => assert!(!context.is_complete()),
+            Err(error) => assert!(!format!("{error:#}").is_empty()),
+            Ok(None) => panic!("allowed SOCKS host should attempt native setup"),
+        }
+    }
+
     #[tokio::test]
     #[cfg(feature = "negotiate")]
     async fn negotiate_factory_uses_injected_token_provider_after_host_check() {

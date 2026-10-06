@@ -263,7 +263,7 @@ fn helper_ranges_cover_valid_arity_wrap_gmt_and_empty_cases() {
         const wd=['SUN','MON','TUE','WED','THU','FRI','SAT'][d.getDay()], gday=d.getUTCDate(), gmon=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][d.getUTCMonth()], gy=d.getUTCFullYear(), gwd=['SUN','MON','TUE','WED','THU','FRI','SAT'][d.getUTCDay()];
         return dateRange(day) && dateRange(day,day) && dateRange(mon) && dateRange(mon,mon) && dateRange(year) && dateRange(year,year) && dateRange(day,mon) && dateRange(mon,year) && dateRange(day,mon,day,mon) && dateRange(mon,year,mon,year) && dateRange(day,mon,year,day,mon,year) &&
           dateRange(gday,'GMT') && dateRange(gmon,'GMT') && dateRange(gy,'GMT') && dateRange(gday,gmon,'GMT') && dateRange(gmon,gy,'GMT') && dateRange(gday,gmon,gday,gmon,'GMT') && dateRange(gday,gmon,gy,gday,gmon,gy,'GMT') &&
-          weekdayRange(wd) && weekdayRange(wd,wd) && weekdayRange(wd,wd,'GMT') && weekdayRange('bad')===false && dateRange()===false && weekdayRange()===false && timeRange()===false &&
+          weekdayRange(wd) && weekdayRange(wd,wd) && weekdayRange(gwd,gwd,'GMT') && weekdayRange('bad')===false && dateRange()===false && weekdayRange()===false && timeRange()===false &&
           (function(){try{timeRange(1,2,3);return false}catch(_){return true}})() ? 'DIRECT':'PROXY fail.invalid:1';
       }
     "#)).unwrap();

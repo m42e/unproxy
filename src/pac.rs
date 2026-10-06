@@ -726,7 +726,7 @@ fn limited_context() -> Context {
     context
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum ShellPatternError {
     InvalidGlob,
     InvalidPattern(String),
@@ -1260,6 +1260,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(coverage))]
     #[ignore = "performance measurement; run release ignored PAC tests"]
     fn repeated_route_parser_performance() {
         const ITERATIONS: u32 = 20_000;
@@ -1360,6 +1361,43 @@ mod tests {
             pac.glob_cache.borrow().len(),
             super::SH_EXP_MATCH_CACHE_CAPACITY
         );
+    }
+
+    #[test]
+    fn shell_match_reports_invalid_patterns_from_cached_and_full_cache_paths() {
+        let mut pac = Pac::new(Some(
+            "function FindProxyForURL(url, host) { return shExpMatch(url, host) ? 'DIRECT' : 'PROXY miss.test:80'; }",
+        ))
+        .unwrap();
+        assert!(pac.evaluate("value", "[").is_err());
+        assert!(pac.evaluate("value", "[").is_err());
+        pac.glob_cache.borrow_mut().clear();
+
+        for index in 0..super::SH_EXP_MATCH_CACHE_CAPACITY {
+            let pattern = format!("cached-{index}*");
+            pac.glob_cache.borrow_mut().insert(
+                boa_engine::JsString::from(pattern.clone()),
+                super::compile_shell_pattern(&pattern),
+            );
+        }
+        assert!(pac.evaluate("value", "[").is_err());
+        assert_eq!(
+            pac.glob_cache.borrow().len(),
+            super::SH_EXP_MATCH_CACHE_CAPACITY
+        );
+    }
+
+    #[test]
+    fn shell_patterns_normalize_empty_classes_and_reject_malformed_ranges() {
+        assert_eq!(
+            super::compile_shell_pattern("file[!].txt")
+                .unwrap()
+                .as_str(),
+            "file?.txt"
+        );
+        assert!(super::compile_shell_pattern("[z-a]").is_err());
+        assert!(super::compile_shell_pattern("[]").is_err());
+        assert!(super::compile_shell_pattern("[abc").is_err());
     }
 
     #[test]
@@ -1467,6 +1505,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(coverage))]
     #[ignore = "performance measurement; run release ignored PAC tests"]
     fn warm_dns_cache_performance() {
         for size in [64, 4096] {
@@ -1509,6 +1548,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(coverage))]
     #[ignore = "performance measurement; run with cargo xtask perf"]
     fn slow_dns_queue_and_execution_performance() {
         const SAMPLES: usize = 10;
@@ -1563,6 +1603,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[cfg(not(coverage))]
     #[ignore = "performance measurement; run with cargo xtask perf"]
     async fn canceled_queue_workload_performance() {
         const QUEUED: usize = super::PAC_QUEUE_CAPACITY;

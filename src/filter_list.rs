@@ -157,6 +157,27 @@ fn insert_domain(set: &mut HashSet<String>, raw: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn best_effort_loaders_preserve_their_empty_and_local_source_status() {
+        assert_eq!(FilterList::load_best_effort(&[]).await.domain_count(), 0);
+        let (empty, complete) = FilterList::load_best_effort_with_status(&[]).await;
+        assert!(complete);
+        assert_eq!(empty.domain_count(), 0);
+        let (via_proxy, complete) =
+            FilterList::load_best_effort_via_proxy(&[], "127.0.0.1:3128".parse().unwrap()).await;
+        assert!(complete);
+        assert_eq!(via_proxy.domain_count(), 0);
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hosts.txt");
+        std::fs::write(&path, "blocked.example.test\n").unwrap();
+        let source = path.to_string_lossy().into_owned();
+        let (loaded, complete) = FilterList::load_best_effort_with_status(&[source]).await;
+        assert!(complete);
+        assert!(loaded.contains("blocked.example.test"));
+    }
+
     #[test]
     fn parses_hosts_and_pihole_domain_lists_and_matches_subdomains() {
         let list = FilterList::parse(

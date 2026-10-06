@@ -1,4 +1,5 @@
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(coverage)");
     for key in [
         "UNPROXY_VERSION",
         "UNPROXY_REVISION",

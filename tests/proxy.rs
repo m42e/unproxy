@@ -390,6 +390,32 @@ async fn management_requires_a_trusted_authority_even_for_loopback_peers() {
 }
 
 #[tokio::test]
+async fn unsupported_absolute_requests_return_local_errors() {
+    let proxy = start(Policy::new(None).unwrap()).await;
+    let addr = proxy.local_addrs()[0];
+
+    for (target, status) in [
+        ("https://example.test/path", "HTTP/1.1 400"),
+        ("ftp://example.test/path", "HTTP/1.1 502"),
+    ] {
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(
+                format!("GET {target} HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with(status), "{response}");
+    }
+
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
 async fn strict_policy_blocks_when_no_script_is_loaded() {
     let proxy = ContextBuilder::new(
         Arc::new(Policy::new(None).unwrap()),

@@ -689,9 +689,13 @@ mod pac_redirect_tests {
     fn https_pac_redirects_cannot_downgrade() {
         let http: http::Uri = "http://pac.example/script.pac".parse().unwrap();
         let https: http::Uri = "https://pac.example/script.pac".parse().unwrap();
+        let unsupported: http::Uri = "ftp://pac.example/script.pac".parse().unwrap();
+        let missing_authority: http::Uri = "/script.pac".parse().unwrap();
         assert!(validate_remote_redirect("https", &http).is_err());
         assert!(validate_remote_redirect("https", &https).is_ok());
         assert!(validate_remote_redirect("http", &https).is_ok());
+        assert!(validate_remote_redirect("http", &unsupported).is_err());
+        assert!(validate_remote_redirect("http", &missing_authority).is_err());
     }
 }
 
