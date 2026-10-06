@@ -272,9 +272,16 @@ async fn direct_signal_reload_and_failed_reload_preserve_service() {
     let netrc = temp.path().join("netrc");
     std::fs::write(&netrc, "").unwrap();
     let pac = temp.path().join("proxy.pac");
+    let failed_upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let failed_upstream_address = failed_upstream.local_addr().unwrap();
+    let failed_upstream_task = tokio::spawn(async move {
+        while let Ok((stream, _)) = failed_upstream.accept().await {
+            drop(stream);
+        }
+    });
     std::fs::write(
         &pac,
-        "function FindProxyForURL(){return 'PROXY 127.0.0.1:1';}",
+        format!("function FindProxyForURL(){{return 'PROXY {failed_upstream_address}';}}"),
     )
     .unwrap();
     let address = reserve_address();
@@ -297,6 +304,7 @@ async fn direct_signal_reload_and_failed_reload_preserve_service() {
     await_status(address, origin_address, 200).await;
     stop_child(&mut child).await;
     origin_task.abort();
+    failed_upstream_task.abort();
 }
 
 #[tokio::test]

@@ -429,7 +429,7 @@ printf 'fixture pkg' > "$out"
     assert_ok(output);
     let versioned = format!(
         "unproxy-{}-{}-{}",
-        unproxy::VERSION,
+        unproxy::VERSION.split('+').next().unwrap(),
         unproxy::ARCH,
         unproxy::PLATFORM
     );
