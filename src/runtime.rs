@@ -281,6 +281,7 @@ async fn run_until(
             .collect::<Result<_>>()?
     };
     let effective_ip = select_pac_ip(a.my_ip_address, crate::platform::default_interface_ipv4);
+    let filter_list = crate::filter_list::FilterList::load(&a.filter_list).await?;
     let policy = Arc::new(Policy::new_scripts_with_ip(vec![], effective_ip)?);
     let auth = load_auth(&a)?;
     let options = ConnectionOptions {
@@ -319,6 +320,7 @@ async fn run_until(
         .server_keepalive(server_keepalive)
         .shutdown_timeout(Duration::from_secs(a.graceful_shutdown_timeout))
         .pac_sources(sources.clone());
+    builder = builder.filter_list(filter_list);
     if let Some(name) = a.activate_socket.as_deref() {
         builder = builder.listeners(crate::platform::activated_listeners(name)?)
     } else {

@@ -45,7 +45,10 @@ async fn generated_pac_substr_and_shell_match_throughput() {
     let min = durations.iter().min().unwrap();
     let max = durations.iter().max().unwrap();
     let mean = total / ITERATIONS as u32;
+    let mut ordered = durations.clone();
+    ordered.sort_unstable();
+    let median = ordered[ordered.len() / 2];
     println!(
-        "PAC performance: {ITERATIONS} evaluations, {MATCHES} substr/shExpMatch pairs per evaluation; min {min:.2?}, max {max:.2?}, mean {mean:.2?}"
+        "PAC performance: {ITERATIONS} evaluations, {MATCHES} substr/shExpMatch pairs per evaluation; min {min:.2?}, median {median:.2?}, mean {mean:.2?}, max {max:.2?}"
     );
 }

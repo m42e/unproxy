@@ -5,6 +5,7 @@ pub mod config;
 pub mod connection;
 pub mod desktop;
 pub mod dns;
+pub mod filter_list;
 pub mod net;
 pub mod network_notifications;
 pub mod pac;

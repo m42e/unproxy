@@ -140,6 +140,9 @@ pub struct MainArgs {
     /// Load a PAC script from a local path or HTTP(S) URL; may be repeated.
     #[arg(short = 'p', long = "pac-file", action = clap::ArgAction::Append)]
     pub pac_file: Vec<String>,
+    /// Load optional Pi-hole/hosts-format ad blocking lists from paths or HTTP(S) URLs.
+    #[arg(long = "filter-list", action = clap::ArgAction::Append)]
+    pub filter_list: Vec<String>,
     /// Reload remote PAC sources after the default network address changes.
     #[arg(long = "reload-pac-on-network-change")]
     pub reload_pac_on_network_change: bool,
@@ -390,6 +393,23 @@ mod tests {
             MainArgs::try_parse_from(["x", "--direct-fallback", "--proxytunnel"]).unwrap();
         assert!(enabled.direct_fallback);
         assert!(enabled.proxytunnel);
+    }
+    #[test]
+    fn filter_lists_are_optional_and_repeatable() {
+        let defaults = MainArgs::try_parse_from(["x"]).unwrap();
+        assert!(defaults.filter_list.is_empty());
+        let args = MainArgs::try_parse_from([
+            "x",
+            "--filter-list",
+            "blocked.txt",
+            "--filter-list",
+            "https://example.test/list",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.filter_list,
+            ["blocked.txt", "https://example.test/list"]
+        );
     }
     #[test]
     fn repeated_listeners_keep_input_order() {

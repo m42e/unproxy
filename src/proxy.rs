@@ -145,6 +145,7 @@ pub struct ContextBuilder {
     strict_policy: bool,
     runtime_status: RuntimeStatus,
     pac_cache: Arc<tokio::sync::Mutex<HashMap<String, net::CachedRemotePac>>>,
+    filter_list: crate::filter_list::FilterList,
 }
 impl Clone for ContextBuilder {
     fn clone(&self) -> Self {
@@ -173,6 +174,7 @@ impl Clone for ContextBuilder {
             strict_policy: self.strict_policy,
             runtime_status: self.runtime_status.clone(),
             pac_cache: self.pac_cache.clone(),
+            filter_list: self.filter_list.clone(),
         }
     }
 }
@@ -204,10 +206,15 @@ impl ContextBuilder {
             strict_policy: false,
             runtime_status,
             pac_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            filter_list: crate::filter_list::FilterList::default(),
         }
     }
     pub fn listen(mut self, addr: SocketAddr) -> Self {
         self.listens.push(addr);
+        self
+    }
+    pub fn filter_list(mut self, list: crate::filter_list::FilterList) -> Self {
+        self.filter_list = list;
         self
     }
     /// Trust an additional Host authority for local management resources.
@@ -1022,6 +1029,12 @@ async fn handle(
     };
     {
         let host = destination.endpoint.host.trim_matches(['[', ']']);
+        if cfg.filter_list.contains(host) {
+            return Ok(error_response(
+                StatusCode::FORBIDDEN,
+                "Blocked by filter list",
+            ));
+        }
         let candidates = cfg.bound_addrs.iter().copied().chain(local);
         let port = destination.endpoint.port;
         let loops_back = host.parse::<std::net::IpAddr>().ok().is_some_and(|ip| {
