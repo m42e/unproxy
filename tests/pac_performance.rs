@@ -34,15 +34,18 @@ async fn generated_pac_substr_and_shell_match_throughput() {
         assert_eq!(routes.to_string(), "HTTP proxy.example:8080");
     }
 
-    let started = Instant::now();
+    let mut durations = Vec::with_capacity(ITERATIONS);
     for _ in 0..ITERATIONS {
+        let started = Instant::now();
         let routes = policy.evaluate(url.clone(), host.clone()).await.unwrap();
+        durations.push(started.elapsed());
         assert_eq!(routes.to_string(), "HTTP proxy.example:8080");
     }
-    let elapsed = started.elapsed();
+    let total: std::time::Duration = durations.iter().sum();
+    let min = durations.iter().min().unwrap();
+    let max = durations.iter().max().unwrap();
+    let mean = total / ITERATIONS as u32;
     println!(
-        "PAC performance: {ITERATIONS} evaluations, {MATCHES} substr/shExpMatch pairs per evaluation, {:.2?} total, {:.0} evaluations/s",
-        elapsed,
-        ITERATIONS as f64 / elapsed.as_secs_f64()
+        "PAC performance: {ITERATIONS} evaluations, {MATCHES} substr/shExpMatch pairs per evaluation; min {min:.2?}, max {max:.2?}, mean {mean:.2?}"
     );
 }
