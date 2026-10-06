@@ -1462,17 +1462,33 @@ mod windows_tests {
             .expect("Windows Negotiate package should acquire the process credentials");
         assert!(!context.is_complete());
 
-        match context.step(None) {
-            Ok(Some(token)) => assert!(!token.is_empty()),
-            Ok(None) => assert!(
-                context.is_complete(),
-                "completed SSPI exchange has no token"
-            ),
-            Err(error) => assert!(
-                error.to_string().contains("SecurityContext")
-                    || error.to_string().contains("CompleteAuthToken"),
-                "{error:#}"
-            ),
+        let token = match context.step(None) {
+            Ok(Some(token)) => {
+                assert!(!token.is_empty());
+                Some(token)
+            }
+            Ok(None) => {
+                assert!(
+                    context.is_complete(),
+                    "completed SSPI exchange has no token"
+                );
+                None
+            }
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("SecurityContext")
+                        || error.to_string().contains("CompleteAuthToken"),
+                    "{error:#}"
+                );
+                None
+            }
+        };
+
+        assert!(context.wrap(b"payload", true).is_err());
+        assert!(context.wrap(b"payload", false).is_err());
+        assert!(context.unwrap(b"fixture token", true).is_err());
+        if let Some(token) = token {
+            let _ = context.step(Some(&token));
         }
     }
 }
