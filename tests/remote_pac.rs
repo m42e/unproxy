@@ -216,7 +216,7 @@ async fn follows_nine_redirects_but_rejects_the_tenth() {
 
     let (uri, task) = redirect_chain(10, false).await;
     let error = fetch_error(uri).await;
-    assert!(error.contains("too many PAC redirects"), "{error}");
+    assert!(error.contains("too many remote redirects"), "{error}");
     assert_eq!(task.await.unwrap(), 10);
 }
 

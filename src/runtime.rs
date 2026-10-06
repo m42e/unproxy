@@ -2,6 +2,7 @@
 use crate::{
     auth::{AuthFactory, CredentialStore},
     config::{self, MainArgs},
+    logging::{CapturedWriter, LogStream},
     net::{ConnectionOptions, Keepalive},
     pac::Policy,
     proxy::ContextBuilder,
@@ -241,6 +242,7 @@ async fn run_until(
     shutdown: impl std::future::Future<Output = ()>,
     on_ready: impl FnOnce(),
 ) -> Result<()> {
+    let log_stream = LogStream::new();
     let filter = std::env::var("UNPROXY_LOG")
         .ok()
         .and_then(|s| tracing_subscriber::EnvFilter::try_new(s).ok())
@@ -258,7 +260,7 @@ async fn run_until(
             .compact()
             .with_timer(tracing_subscriber::fmt::time::uptime())
             .with_env_filter(filter)
-            .with_writer(log)
+            .with_writer(CapturedWriter::new(log, log_stream.clone()))
             .try_init()
             .ok();
     } else {
@@ -266,6 +268,7 @@ async fn run_until(
             .compact()
             .with_timer(tracing_subscriber::fmt::time::uptime())
             .with_env_filter(filter)
+            .with_writer(CapturedWriter::new(std::io::stderr, log_stream.clone()))
             .try_init()
             .ok();
     }
@@ -281,7 +284,8 @@ async fn run_until(
             .collect::<Result<_>>()?
     };
     let effective_ip = select_pac_ip(a.my_ip_address, crate::platform::default_interface_ipv4);
-    let filter_list = crate::filter_list::FilterList::load(&a.filter_list).await?;
+    let (filter_list, filter_lists_complete) =
+        crate::filter_list::FilterList::load_best_effort_with_status(&a.filter_list).await;
     let policy = Arc::new(Policy::new_scripts_with_ip(vec![], effective_ip)?);
     let auth = load_auth(&a)?;
     let options = ConnectionOptions {
@@ -307,6 +311,7 @@ async fn run_until(
     #[cfg(unix)]
     let mut term = signal(SignalKind::terminate())?;
     let mut builder = ContextBuilder::new(policy.clone(), options)
+        .log_stream(log_stream)
         .connect_timeout(a.connect_timeout)
         .direct_fallback(a.direct_fallback)
         .strict_policy(a.strict_policy)
@@ -329,6 +334,9 @@ async fn run_until(
         }
     }
     let context = builder.bind().await?;
+    if !filter_lists_complete {
+        context.retry_filter_lists_after(a.filter_list.clone(), Duration::from_secs(5));
+    }
     on_ready();
     for addr in context.local_addrs() {
         tracing::info!(%addr,"proxy listening")
@@ -573,6 +581,25 @@ mod tests {
     use super::*;
     use clap::Parser;
     use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[test]
+    fn captured_log_lines_are_written_to_file_and_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unproxy.log");
+        let stream = LogStream::new();
+        let writer = CapturedWriter::new(RotatingLog::open(&path, 128, 2).unwrap(), stream.clone());
+        writer
+            .make_writer()
+            .write_all(b"INFO startup\nWARN request failed\n")
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "INFO startup\nWARN request failed\n"
+        );
+        let (history, _) = stream.subscribe_with_history();
+        assert_eq!(history, ["INFO startup", "WARN request failed"]);
+    }
 
     #[test]
     fn logfile_appends_across_restarts() {

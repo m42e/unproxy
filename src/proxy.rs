@@ -29,6 +29,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::{
     access::{AccessEntry, AccessOutcome},
+    logging::LogStream,
     net::{self, BoxedIo, ConnectionOptions},
     pac::Policy,
     route::{Destination, Endpoint, PathOrUri, Route, Routes},
@@ -120,6 +121,8 @@ impl RuntimeStatus {
     }
 }
 
+type SharedFilterList = Arc<std::sync::RwLock<crate::filter_list::FilterList>>;
+
 pub struct ContextBuilder {
     policy: Arc<Policy>,
     options: ConnectionOptions,
@@ -144,8 +147,9 @@ pub struct ContextBuilder {
     idle_timeout: Duration,
     strict_policy: bool,
     runtime_status: RuntimeStatus,
+    log_stream: LogStream,
     pac_cache: Arc<tokio::sync::Mutex<HashMap<String, net::CachedRemotePac>>>,
-    filter_list: crate::filter_list::FilterList,
+    filter_list: SharedFilterList,
 }
 impl Clone for ContextBuilder {
     fn clone(&self) -> Self {
@@ -173,6 +177,7 @@ impl Clone for ContextBuilder {
             idle_timeout: self.idle_timeout,
             strict_policy: self.strict_policy,
             runtime_status: self.runtime_status.clone(),
+            log_stream: self.log_stream.clone(),
             pac_cache: self.pac_cache.clone(),
             filter_list: self.filter_list.clone(),
         }
@@ -205,16 +210,23 @@ impl ContextBuilder {
             idle_timeout: Duration::from_secs(60),
             strict_policy: false,
             runtime_status,
+            log_stream: LogStream::new(),
             pac_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            filter_list: crate::filter_list::FilterList::default(),
+            filter_list: Arc::new(std::sync::RwLock::new(
+                crate::filter_list::FilterList::default(),
+            )),
         }
     }
     pub fn listen(mut self, addr: SocketAddr) -> Self {
         self.listens.push(addr);
         self
     }
+    pub(crate) fn log_stream(mut self, log_stream: LogStream) -> Self {
+        self.log_stream = log_stream;
+        self
+    }
     pub fn filter_list(mut self, list: crate::filter_list::FilterList) -> Self {
-        self.filter_list = list;
+        self.filter_list = Arc::new(std::sync::RwLock::new(list));
         self
     }
     /// Trust an additional Host authority for local management resources.
@@ -371,6 +383,7 @@ impl ContextBuilder {
             runtime_status: self.runtime_status.clone(),
             pac_cache: self.pac_cache.clone(),
             relay_handles: self.relay_handles.clone(),
+            filter_list: self.filter_list.clone(),
         })
     }
     /// Serve one already-connected client stream. The returned context exposes
@@ -388,6 +401,7 @@ impl ContextBuilder {
         let inline_scripts = self.inline_scripts.clone();
         let runtime_status = self.runtime_status.clone();
         let pac_cache = self.pac_cache.clone();
+        let filter_list = self.filter_list.clone();
         let shutdown_timeout = self.shutdown_timeout;
         let relay_handles = self.relay_handles.clone();
         let cfg = self;
@@ -409,6 +423,7 @@ impl ContextBuilder {
             runtime_status,
             pac_cache,
             relay_handles,
+            filter_list,
         })
     }
 
@@ -430,6 +445,7 @@ impl ContextBuilder {
         let inline_scripts = self.inline_scripts.clone();
         let runtime_status = self.runtime_status.clone();
         let pac_cache = self.pac_cache.clone();
+        let filter_list = self.filter_list.clone();
         let relay_handles = self.relay_handles.clone();
         let join = tokio::spawn(async move {
             let mut sessions = tokio::task::JoinSet::new();
@@ -451,6 +467,7 @@ impl ContextBuilder {
             runtime_status,
             pac_cache,
             relay_handles,
+            filter_list,
         })
     }
 }
@@ -468,6 +485,7 @@ pub struct Context {
     runtime_status: RuntimeStatus,
     pac_cache: Arc<tokio::sync::Mutex<HashMap<String, net::CachedRemotePac>>>,
     relay_handles: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
+    filter_list: SharedFilterList,
 }
 
 async fn load_pac_source(source: &PathOrUri) -> Result<String> {
@@ -555,6 +573,65 @@ impl Context {
     }
     pub fn policy(&self) -> Arc<Policy> {
         self.policy.clone()
+    }
+    pub(crate) fn retry_filter_lists_after(&self, sources: Vec<String>, initial_delay: Duration) {
+        let Some(proxy) = self.local_addrs.first().copied() else {
+            return;
+        };
+        tracing::info!(
+            sources = ?sources,
+            %proxy,
+            retry_after = ?initial_delay,
+            "filter list load incomplete; scheduling PAC-routed retry"
+        );
+        let filter_list = self.filter_list.clone();
+        let mut shutdown = self.shutdown.subscribe();
+        tokio::spawn(async move {
+            let mut delay = initial_delay;
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            return;
+                        }
+                    }
+                }
+                tracing::info!(
+                    sources = ?sources,
+                    %proxy,
+                    "retrying filter list download through PAC"
+                );
+                let (loaded, complete) = tokio::select! {
+                    result = crate::filter_list::FilterList::load_best_effort_via_proxy(&sources, proxy) => result,
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            return;
+                        }
+                        continue;
+                    }
+                };
+                let Ok(mut current) = filter_list.write() else {
+                    return;
+                };
+                if complete {
+                    *current = loaded;
+                } else {
+                    *current = current.union(&loaded);
+                }
+                drop(current);
+                if complete {
+                    tracing::info!(sources = ?sources, "filter list retry completed successfully");
+                    return;
+                }
+                delay = delay.saturating_mul(2).min(Duration::from_secs(300));
+                tracing::info!(
+                    sources = ?sources,
+                    retry_after = ?delay,
+                    "filter list retry incomplete; scheduling another PAC-routed retry"
+                );
+            }
+        });
     }
     pub async fn set_script(&self, script: Option<String>) -> Result<()> {
         self.policy.set_script(script).await?;
@@ -918,15 +995,27 @@ async fn handle(
                 "text/html; charset=utf-8",
                 access_html().into(),
             ),
+            "/log.html" => full(
+                StatusCode::OK,
+                "text/html; charset=utf-8",
+                log_html().into(),
+            ),
+            "/log" => log_response(cfg.log_stream.clone()),
             "/status.json" => {
                 let status = cfg.runtime_status.snapshot();
                 let pac_loaded = cfg.policy.is_loaded();
+                let blocked_domain_count = cfg
+                    .filter_list
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .domain_count();
                 full(
                     StatusCode::OK,
                     "application/json; charset=utf-8",
                     serde_json::json!({
                         "pac_loaded": pac_loaded,
                         "pac_files": if pac_loaded { status.pac_files } else { Vec::new() },
+                        "blocked_domain_count": blocked_domain_count,
                         "authentication_configured": status.authentication_configured,
                         "upstream_state": status.upstream_state,
                         "authentication_state": status.authentication_state,
@@ -967,10 +1056,16 @@ async fn handle(
                         ));
                     }
                 };
+                let host = destination.endpoint.host;
+                let filter_list_blocked = cfg
+                    .filter_list
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .contains(&host);
                 let status = cfg.runtime_status.snapshot();
                 let results = match cfg
                     .policy
-                    .evaluate_each(destination.pac_url, destination.endpoint.host.clone())
+                    .evaluate_each(destination.pac_url, host.clone())
                     .await
                 {
                     Ok(results) => results,
@@ -1001,7 +1096,15 @@ async fn handle(
                 full(
                     StatusCode::OK,
                     "application/json; charset=utf-8",
-                    serde_json::json!({"url": url, "results": pacs}).to_string(),
+                    serde_json::json!({
+                        "url": url,
+                        "filter_list": {
+                            "host": host,
+                            "blocked": filter_list_blocked,
+                        },
+                        "results": pacs,
+                    })
+                    .to_string(),
                 )
             }
             "/access.log" => event_response(events),
@@ -1029,7 +1132,12 @@ async fn handle(
     };
     {
         let host = destination.endpoint.host.trim_matches(['[', ']']);
-        if cfg.filter_list.contains(host) {
+        if cfg
+            .filter_list
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(host)
+        {
             return Ok(error_response(
                 StatusCode::FORBIDDEN,
                 "Blocked by filter list",
@@ -1486,8 +1594,207 @@ fn event_response(events: broadcast::Sender<String>) -> Response<OutBody> {
         .body(body)
         .unwrap()
 }
+fn log_response(log_stream: LogStream) -> Response<OutBody> {
+    let (history, mut rx) = log_stream.subscribe_with_history();
+    let stream = async_stream::stream! {
+        for line in history {
+            yield Ok::<hyper::body::Frame<Bytes>, hyper::Error>(hyper::body::Frame::data(Bytes::from(format!("data:{line}\n\n"))));
+        }
+        loop {
+            match rx.recv().await {
+                Ok(line) => yield Ok(hyper::body::Frame::data(Bytes::from(format!("data:{line}\n\n")))),
+                Err(broadcast::error::RecvError::Lagged(n)) => yield Ok(hyper::body::Frame::data(Bytes::from(format!("event:lagged\ndata:{n}\n\n")))),
+                Err(_) => break,
+            }
+        }
+    };
+    let body = http_body_util::BodyExt::boxed(http_body_util::StreamBody::new(stream));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(http::header::CONTENT_TYPE, "text/event-stream")
+        .header("cache-control", "no-store")
+        .body(body)
+        .unwrap()
+}
 fn access_html() -> &'static str {
-    "<!doctype html><meta charset=utf-8><title>unproxy access log</title><h1>Access log</h1><button id=stop>Stop</button><pre id=log></pre><script>const s=new EventSource('access.log');s.onmessage=e=>{const p=document.createElement('div');p.textContent=e.data;document.querySelector('#log').append(p)};s.addEventListener('lagged',e=>console.warn('access events dropped',e.data));s.onerror=e=>console.warn('access stream error',e);document.querySelector('#stop').onclick=()=>s.close();</script>"
+    r#"<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Unproxy live access log</title>
+    <style>
+        :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+        body { max-width: 80rem; margin: 2rem auto; padding: 0 1rem; }
+        header { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem 1.5rem; }
+        h1 { margin: 0; font-size: 1.5rem; }
+        #state { color: GrayText; }
+        #log { height: min(70vh, 48rem); min-height: 12rem; margin-top: 1rem; padding: .75rem; overflow: auto; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: .25rem; font: .82rem/1.45 ui-monospace, monospace; }
+        #log div { white-space: pre-wrap; overflow-wrap: anywhere; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Live access log</h1>
+        <span id="state" aria-live="polite">Connecting…</span>
+        <button id="stop" type="button">Stop</button>
+        <a href="/">Status</a>
+    </header>
+    <div id="log" role="log" aria-label="Live access log"></div>
+    <script>
+        const output = document.querySelector('#log');
+        const state = document.querySelector('#state');
+        const source = new EventSource('/access.log');
+        source.onopen = () => { state.textContent = 'Connected'; };
+        source.onmessage = event => {
+            const line = document.createElement('div');
+            line.textContent = event.data;
+            output.append(line);
+            while (output.childElementCount > 500) output.firstElementChild.remove();
+            output.scrollTop = output.scrollHeight;
+        };
+        source.addEventListener('lagged', event => {
+            state.textContent = 'Some access messages were skipped (' + event.data + ').';
+        });
+        source.onerror = () => { state.textContent = 'Connection interrupted; reconnecting…'; };
+        document.querySelector('#stop').onclick = () => {
+            source.close();
+            state.textContent = 'Stopped';
+        };
+    </script>
+</body>
+</html>"#
+}
+fn log_html() -> &'static str {
+    r#"<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Unproxy application log</title>
+    <style>
+        :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+        body { max-width: 80rem; margin: 2rem auto; padding: 0 1rem; }
+        header { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem 1.5rem; }
+        h1 { margin: 0; font-size: 1.5rem; }
+        #state { color: GrayText; }
+        #log { height: min(70vh, 48rem); min-height: 12rem; margin-top: 1rem; padding: .75rem; overflow: auto; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: .25rem; font: .82rem/1.45 ui-monospace, monospace; }
+        #log div { white-space: pre-wrap; overflow-wrap: anywhere; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Application log</h1>
+        <span id="state" aria-live="polite">Connecting…</span>
+        <button id="stop" type="button">Stop</button>
+        <a href="/">Status</a>
+    </header>
+    <div id="log" role="log" aria-label="Application log"></div>
+    <script>
+        const output = document.querySelector('#log');
+        const state = document.querySelector('#state');
+        const palette = [
+            '#000000', '#cd0000', '#00cd00', '#cdcd00', '#0000ee', '#cd00cd', '#00cdcd', '#e5e5e5',
+            '#7f7f7f', '#ff0000', '#00ff00', '#ffff00', '#5c5cff', '#ff00ff', '#00ffff', '#ffffff'
+        ];
+        const colors = Array.from({length: 256}, (_, index) => {
+            if (index < 16) return palette[index];
+            if (index < 232) {
+                const levels = [0, 95, 135, 175, 215, 255];
+                const cube = index - 16;
+                return `rgb(${levels[Math.floor(cube / 36)]}, ${levels[Math.floor(cube / 6) % 6]}, ${levels[cube % 6]})`;
+            }
+            const gray = 8 + (index - 232) * 10;
+            return `rgb(${gray}, ${gray}, ${gray})`;
+        });
+        const style = {};
+        function applySgr(parameters) {
+            for (let index = 0; index < parameters.length; index++) {
+                const code = parameters[index];
+                if (code === 0) {
+                    Object.assign(style, {foreground: null, background: null, bold: false, dim: false, italic: false, underline: false, strike: false, inverse: false});
+                } else if (code === 1) style.bold = true;
+                else if (code === 2) style.dim = true;
+                else if (code === 3) style.italic = true;
+                else if (code === 4) style.underline = true;
+                else if (code === 7) style.inverse = true;
+                else if (code === 9) style.strike = true;
+                else if (code === 22) { style.bold = false; style.dim = false; }
+                else if (code === 23) style.italic = false;
+                else if (code === 24) style.underline = false;
+                else if (code === 27) style.inverse = false;
+                else if (code === 29) style.strike = false;
+                else if (code === 39) style.foreground = null;
+                else if (code === 49) style.background = null;
+                else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+                    style.foreground = palette[code >= 90 ? code - 90 + 8 : code - 30];
+                } else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
+                    style.background = palette[code >= 100 ? code - 100 + 8 : code - 40];
+                } else if (code === 38 || code === 48) {
+                    const property = code === 38 ? 'foreground' : 'background';
+                    const mode = parameters[++index];
+                    if (mode === 5 && parameters[index + 1] !== undefined) {
+                        const color = parameters[++index];
+                        if (color >= 0 && color < colors.length) style[property] = colors[color];
+                    } else if (mode === 2 && parameters.length > index + 3) {
+                        const rgb = parameters.slice(index + 1, index + 4);
+                        index += 3;
+                        if (rgb.every(value => value >= 0 && value <= 255)) {
+                            style[property] = `rgb(${rgb.join(', ')})`;
+                        }
+                    }
+                }
+            }
+        }
+        function appendAnsiText(element, text) {
+            if (!text) return;
+            const span = document.createElement('span');
+            span.textContent = text;
+            const foreground = style.inverse ? (style.background || 'Canvas') : style.foreground;
+            const background = style.inverse ? (style.foreground || 'CanvasText') : style.background;
+            if (foreground || style.inverse) span.style.color = foreground || 'CanvasText';
+            if (background) span.style.backgroundColor = background;
+            if (style.bold) span.style.fontWeight = '700';
+            if (style.dim) span.style.opacity = '0.7';
+            if (style.italic) span.style.fontStyle = 'italic';
+            const decorations = [];
+            if (style.underline) decorations.push('underline');
+            if (style.strike) decorations.push('line-through');
+            if (decorations.length) span.style.textDecorationLine = decorations.join(' ');
+            element.append(span);
+        }
+        function renderAnsi(element, text) {
+            Object.assign(style, {foreground: null, background: null, bold: false, dim: false, italic: false, underline: false, strike: false, inverse: false});
+            const sgr = /\x1b\[([0-9;]*)m/g;
+            let start = 0;
+            for (const match of text.matchAll(sgr)) {
+                appendAnsiText(element, text.slice(start, match.index));
+                const parameters = match[1] ? match[1].split(';').map(Number) : [0];
+                applySgr(parameters);
+                start = match.index + match[0].length;
+            }
+            appendAnsiText(element, text.slice(start));
+        }
+        const source = new EventSource('/log');
+        source.onopen = () => { state.textContent = 'Connected'; };
+        source.onmessage = event => {
+            const line = document.createElement('div');
+            renderAnsi(line, event.data);
+            output.append(line);
+            while (output.childElementCount > 500) output.firstElementChild.remove();
+            output.scrollTop = output.scrollHeight;
+        };
+        source.addEventListener('lagged', event => {
+            state.textContent = 'Some log messages were skipped (' + event.data + ').';
+        });
+        source.onerror = () => { state.textContent = 'Connection interrupted; reconnecting…'; };
+        document.querySelector('#stop').onclick = () => {
+            source.close();
+            state.textContent = 'Stopped';
+        };
+    </script>
+</body>
+</html>"#
 }
 fn status_html() -> String {
     const PAGE: &str = r#"<!doctype html>
@@ -1517,6 +1824,7 @@ fn status_html() -> String {
   <section class="grid" aria-live="polite">
     <article><h2>Proxy</h2><p>Running</p><small>This page is served by the active proxy.</small></article>
     <article><h2>PAC policy</h2><p id="pac">Loading…</p><small>Whether a PAC policy is currently loaded. Loaded PAC files:</small><ul id="pac-files" aria-label="Loaded PAC files"><li>Loading…</li></ul></article>
+    <article><h2>Blocked domains</h2><p id="blocked-domain-count">Loading…</p><small>Unique domains in the active filter lists.</small></article>
     <article><h2>Upstream</h2><p id="upstream">Loading…</p><small id="checked">Checking latest request…</small></article>
     <article><h2>Authentication negotiation</h2><p id="auth">Loading…</p><small>Negotiate creates an OS-backed token for an eligible upstream proxy. Unproxy sends the initial token with CONNECT; the token itself is never displayed.</small><ul id="negotiation-details"><li>Loading…</li></ul></article>
   </section>
@@ -1527,6 +1835,7 @@ fn status_html() -> String {
   </section>
   <nav aria-label="Proxy resources">
     <a href="/access.html">Live access log</a>
+        <a href="/log.html">Application log</a>
     <a href="/status.json">Status JSON</a>
     <a href="/proxy.pac">Generated PAC file</a>
   </nav>
@@ -1537,6 +1846,8 @@ fn status_html() -> String {
         if (!response.ok) throw new Error('HTTP ' + response.status);
         const status = await response.json();
         document.querySelector('#pac').textContent = status.pac_loaded ? 'Loaded' : 'Not loaded';
+                document.querySelector('#blocked-domain-count').textContent = Number.isInteger(status.blocked_domain_count)
+                    ? status.blocked_domain_count.toLocaleString() : 'Unavailable';
         const pacFiles = document.querySelector('#pac-files');
         pacFiles.replaceChildren();
         const files = Array.isArray(status.pac_files) ? status.pac_files : [];
@@ -1572,6 +1883,7 @@ fn status_html() -> String {
           'Authentication is disabled');
       } catch (_) {
         document.querySelector('#pac').textContent = 'Unavailable';
+            document.querySelector('#blocked-domain-count').textContent = 'Unavailable';
         document.querySelector('#pac-files').replaceChildren();
         document.querySelector('#upstream').textContent = 'Status unavailable';
         document.querySelector('#checked').textContent = 'Could not read status.json';
@@ -1592,6 +1904,11 @@ fn status_html() -> String {
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
         output.replaceChildren();
+                const filterListRow = document.createElement('li');
+                filterListRow.textContent = data.filter_list.blocked
+                    ? 'Filter list: Blocked (' + data.filter_list.host + ')'
+                    : 'Filter list: Not blocked (' + data.filter_list.host + ')';
+                output.append(filterListRow);
         if (!data.results.length) { const empty = document.createElement('li'); empty.textContent = 'No PACs are loaded.'; output.append(empty); }
         for (const result of data.results) {
           const row = document.createElement('li');
