@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3
+
+- Correct Windows tray proxy status and lifecycle updates.
+- Report failed upstream proxy routes as errors instead of direct connections.
+- Publish stable versioned package names with SHA-256 checksums.
+
 ## 0.2.2
 
 - Add optional ad blocking filter lists, with runtime enforcement and desktop
