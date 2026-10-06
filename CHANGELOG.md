@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- Add resilient ad blocking filter lists and live diagnostics.
+- Correct PAC helper matching and Windows tray proxy status, settings callbacks,
+  and lifecycle updates.
+- Report failed upstream proxy routes as errors instead of direct connections.
+
 ## 0.2.3
 
 - Correct Windows tray proxy status and lifecycle updates.
