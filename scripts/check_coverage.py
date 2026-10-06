@@ -128,6 +128,18 @@ def main() -> int:
     if failures:
         for failure in failures:
             print(f"coverage gate failed: {failure}", file=sys.stderr)
+        largest_gaps = sorted(
+            (
+                file["summary"]["lines"]["count"]
+                - file["summary"]["lines"]["covered"],
+                source_path(file["filename"]),
+            )
+            for file in gated_files
+            if file["summary"]["lines"]["count"]
+            > file["summary"]["lines"]["covered"]
+        )
+        for missing, filename in sorted(largest_gaps, reverse=True)[:10]:
+            print(f"coverage gap: {filename} has {missing} uncovered lines", file=sys.stderr)
         return 1
     return 0
 
