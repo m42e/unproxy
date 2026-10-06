@@ -829,6 +829,35 @@ async fn access_sse_emits_records_and_reports_lag() {
 }
 
 #[tokio::test]
+async fn failed_proxy_route_is_not_logged_as_direct() {
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = closed.local_addr().unwrap();
+    drop(closed);
+    let policy = Policy::new(Some(format!(
+        "function FindProxyForURL() {{ return 'PROXY {upstream}'; }}"
+    )))
+    .unwrap();
+    let proxy = start(policy).await;
+    let mut events = proxy.subscribe();
+    let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
+    client
+        .write_all(
+            b"GET http://example.test/resource HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 502"));
+    let entry = events.recv().await.unwrap();
+    assert!(entry.contains(" - \"GET http://example.test/resource HTTP/1.1\""));
+    assert!(entry.contains("error: \"could not connect to example.test:80\""));
+    assert!(!entry.contains(" DIRECT "));
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
 async fn forwards_stream_and_removes_hop_headers() {
     let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin_addr = origin.local_addr().unwrap();

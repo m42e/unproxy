@@ -312,6 +312,9 @@ fn parse_listener(value: &str) -> Result<std::net::SocketAddr> {
     Ok(address)
 }
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 pub struct ChildLifecycle {
     child: Option<Child>,
     pub last_exit: Option<String>,
@@ -415,6 +418,11 @@ impl ChildLifecycle {
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(CREATE_NO_WINDOW);
+        }
         self.child = Some(
             c.spawn()
                 .with_context(|| format!("start {}", exe.display()))?,

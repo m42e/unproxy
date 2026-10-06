@@ -1,4 +1,6 @@
-use super::{ChildLifecycle, Preferences, default_pac_path, log_path, support_dir};
+use super::{
+    CREATE_NO_WINDOW, ChildLifecycle, Preferences, default_pac_path, log_path, support_dir,
+};
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::{
@@ -27,9 +29,6 @@ const MENU_OPEN_LOG: &str = "open-log";
 const MENU_COPY_ADDRESS: &str = "copy-address";
 const MENU_SETTINGS: &str = "settings";
 const MENU_QUIT: &str = "quit";
-const TRAY_GUID: u128 = 0x4D3432452D554E50524F585954524159;
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
 struct KernelHandle(HANDLE);
 
 impl Drop for KernelHandle {
@@ -107,7 +106,6 @@ pub(super) fn run() -> Result<()> {
         &preferences,
     );
     let tray = TrayIconBuilder::new()
-        .with_guid(TRAY_GUID)
         .with_icon(load_icon(&icon_directory, &initial_icon_key)?)
         .with_tooltip(tooltip_for(&initial_icon_key))
         .with_menu(Box::new(menu))
@@ -276,6 +274,7 @@ impl Controller {
         if key != self.last_icon_key {
             self.tray
                 .set_icon(Some(load_icon(&self.icon_directory, &key)?))?;
+            self.tray.set_tooltip(Some(tooltip_for(&key)))?;
             self.last_icon_key = key.clone();
         }
         self.proxy_item.set_text(proxy_menu_text(running, failed));
@@ -393,7 +392,14 @@ fn load_icon(directory: &Path, key: &str) -> Result<Icon> {
 }
 
 fn read_runtime_status(preferences: &Preferences) -> Option<RuntimeStatus> {
-    let address = preferences.primary_listener().parse::<SocketAddr>().ok()?;
+    preferences
+        .effective_listeners()
+        .iter()
+        .filter_map(|listener| listener.parse::<SocketAddr>().ok())
+        .find_map(read_runtime_status_at)
+}
+
+fn read_runtime_status_at(address: SocketAddr) -> Option<RuntimeStatus> {
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(200)).ok()?;
     stream
         .set_read_timeout(Some(Duration::from_millis(200)))
@@ -594,6 +600,62 @@ pub(super) fn show_startup_error(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_status_uses_configured_listeners() {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+
+        let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+        let unavailable_address = unused.local_addr().unwrap();
+        drop(unused);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept status request: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            let mut request = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            request.read_line(&mut request_line).unwrap();
+            assert!(request_line.starts_with("GET /status.json "));
+            loop {
+                let mut header = String::new();
+                request.read_line(&mut header).unwrap();
+                if header == "\r\n" || header.is_empty() {
+                    break;
+                }
+            }
+            let body = r#"{"pac_loaded":true}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+        let preferences = Preferences {
+            listeners: Some(vec![unavailable_address.to_string(), address.to_string()]),
+            ..Preferences::default()
+        };
+
+        let status = read_runtime_status(&preferences).expect("configured listener status");
+        server.join().unwrap();
+        assert_eq!(status.pac_loaded, Some(true));
+    }
 
     #[test]
     fn icon_key_reflects_proxy_and_runtime_status() {
