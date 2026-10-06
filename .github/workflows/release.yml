@@ -176,7 +176,16 @@ jobs:
           merge-multiple: true
           path: dist
       - run: cargo run --locked --bin xtask -- release-notes > dist/release-notes.md
-      - run: gh release create "$RELEASE_TAG" dist/*.zip dist/*.deb dist/*.pkg --notes-file dist/release-notes.md --verify-tag
+      - name: Generate release checksums
+        shell: bash
+        run: |
+          shopt -s nullglob
+          artifacts=(dist/*.zip dist/*.deb dist/*.pkg)
+          ((${#artifacts[@]} > 0)) || { echo 'No release packages were downloaded.' >&2; exit 1; }
+          names=()
+          for artifact in "${artifacts[@]}"; do names+=("${artifact#dist/}"); done
+          (cd dist && sha256sum "${names[@]}" > SHA256SUMS)
+      - run: gh release create "$RELEASE_TAG" dist/*.zip dist/*.deb dist/*.pkg dist/SHA256SUMS --notes-file dist/release-notes.md --verify-tag
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}

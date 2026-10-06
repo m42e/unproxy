@@ -87,6 +87,9 @@ enum Format {
     Macos,
     App,
 }
+fn release_version(version: &str) -> &str {
+    version.split('+').next().unwrap()
+}
 fn run(command: &mut Command) -> Result<()> {
     let status = command
         .status()
@@ -456,7 +459,8 @@ fn package(
     );
     std::fs::create_dir_all(&staging)?;
     let source_bin = |name: &str| binary_dir.join(format!("{name}{suffix}"));
-    let package_base = format!("unproxy-{}-{target_name}", unproxy::VERSION);
+    let version = release_version(unproxy::VERSION);
+    let package_base = format!("unproxy-{version}-{target_name}");
     for format in formats {
         let mut package_name = package_base.clone();
         match format {
@@ -566,7 +570,7 @@ fn package(
                     control.join("control"),
                     format!(
                         "Package: unproxy\nVersion: {}\nArchitecture: {arch}\nMaintainer: Unproxy contributors\nDepends: {depends}\nSection: net\nPriority: optional\nDescription: Local HTTP proxy with PAC routing and upstream authentication\n",
-                        unproxy::VERSION
+                        version
                     ),
                 )?;
                 for hook in ["postinst", "prerm", "postrm"] {
@@ -840,6 +844,12 @@ fn markdown(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_package_version_omits_build_revision() {
+        let version = "1.2.3+0123456789abcdef";
+        assert_eq!(release_version(version), "1.2.3");
+    }
 
     #[test]
     fn markdown_renders_headings_paragraphs_and_unclosed_code_blocks() {
