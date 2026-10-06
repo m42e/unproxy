@@ -59,6 +59,46 @@ fn windows_settings_dialog_exposes_optional_local_and_remote_filter_sources() {
 }
 
 #[test]
+fn windows_filter_list_remove_callback_captures_row_state() {
+    let script = include_str!("../assets/unproxy-tray.ps1");
+    let add_filter_start = script
+        .find("$addFilterRow = ({")
+        .expect("filter row callback");
+    let remove_start = script[add_filter_start..]
+        .find("$remove.add_Click(({")
+        .map(|offset| offset + add_filter_start)
+        .expect("filter row remove callback");
+    let remove_end = script[remove_start..]
+        .find("}).GetNewClosure())")
+        .map(|offset| offset + remove_start)
+        .expect("filter row remove closure");
+    let row_setup = &script[add_filter_start..remove_start];
+    let remove_callback = &script[remove_start..remove_end];
+
+    assert!(row_setup.contains("$filterRowCollection = $filterRows"));
+    assert!(row_setup.contains("$filterRowRenderer = $renderFilterRows"));
+    assert!(remove_callback.contains("$filterRowCollection.Remove($entry)"));
+    assert!(remove_callback.contains("& $filterRowRenderer"));
+}
+
+#[test]
+fn windows_settings_save_closure_uses_captured_preferences() {
+    let script = include_str!("../assets/unproxy-tray.ps1");
+    let save_start = script
+        .find("$saveButton.add_Click(({")
+        .expect("settings save callback");
+    let callback_end = script[save_start..]
+        .find("}).GetNewClosure())")
+        .expect("settings save callback closure")
+        + save_start;
+    let save_callback = &script[save_start..callback_end];
+
+    assert!(script[..save_start].contains("$preferences = $script:p"));
+    assert!(save_callback.contains("$preferences.listeners = $listenerAddresses"));
+    assert!(!save_callback.contains("$script:p."));
+}
+
+#[test]
 fn primary_listener_uses_the_first_configured_listener_or_loopback_default() {
     assert_eq!(Preferences::default().primary_listener(), "127.0.0.1:3128");
 
