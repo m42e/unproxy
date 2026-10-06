@@ -51,7 +51,8 @@ pub struct Pac {
     ip_string: Rc<RefCell<JsString>>,
     source: Option<String>,
     cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
-    glob_cache: Arc<Mutex<HashMap<String, std::result::Result<glob::Pattern, ShellPatternError>>>>,
+    glob_cache:
+        Rc<RefCell<HashMap<JsString, std::result::Result<glob::Pattern, ShellPatternError>>>>,
     last_prune: Instant,
     dns_budget: Arc<AtomicUsize>,
 }
@@ -74,7 +75,7 @@ impl Pac {
             ip_string: Rc::new(RefCell::new(JsString::from(ip.to_string()))),
             source: None,
             cache: Arc::new(Mutex::new(HashMap::new())),
-            glob_cache: Arc::new(Mutex::new(HashMap::new())),
+            glob_cache: Rc::new(RefCell::new(HashMap::new())),
             last_prune: Instant::now(),
             dns_budget: Arc::new(AtomicUsize::new(0)),
         };
@@ -96,7 +97,7 @@ impl Pac {
             ip_string: self.ip_string.clone(),
             source: None,
             cache: Arc::new(Mutex::new(HashMap::new())),
-            glob_cache: Arc::new(Mutex::new(HashMap::new())),
+            glob_cache: Rc::new(RefCell::new(HashMap::new())),
             last_prune: Instant::now(),
             dns_budget: Arc::new(AtomicUsize::new(0)),
         };
@@ -154,38 +155,45 @@ impl Pac {
         let glob_cache = self.glob_cache.clone();
         let sh_exp_match = unsafe {
             NativeFunction::from_closure(move |_, args, _| {
-                let value = args
-                    .first()
-                    .and_then(JsValue::as_string)
-                    .ok_or_else(|| {
-                        boa_engine::JsNativeError::typ().with_message("shExpMatch expects strings")
-                    })?
-                    .to_std_string_escaped();
-                let pattern = args
-                    .get(1)
-                    .and_then(JsValue::as_string)
-                    .ok_or_else(|| {
-                        boa_engine::JsNativeError::typ().with_message("shExpMatch expects strings")
-                    })?
-                    .to_std_string_escaped();
-                let compiled = {
-                    let mut cache = glob_cache.lock().unwrap();
-                    if let Some(compiled) = cache.get(&pattern) {
-                        compiled.clone()
+                let value = args.first().and_then(JsValue::as_string).ok_or_else(|| {
+                    boa_engine::JsNativeError::typ().with_message("shExpMatch expects strings")
+                })?;
+                let pattern = args.get(1).and_then(JsValue::as_string).ok_or_else(|| {
+                    boa_engine::JsNativeError::typ().with_message("shExpMatch expects strings")
+                })?;
+                if pattern == "*" {
+                    return Ok(JsValue::from(true));
+                }
+                let key = pattern.clone();
+                let value = value.to_std_string_escaped();
+                let mut cache = glob_cache.borrow_mut();
+                if !cache.contains_key(&key) {
+                    let compiled = compile_shell_pattern(&pattern.to_std_string_escaped());
+                    if cache.len() < SH_EXP_MATCH_CACHE_CAPACITY {
+                        cache.insert(key.clone(), compiled);
                     } else {
-                        let compiled = compile_shell_pattern(&pattern);
-                        if cache.len() < SH_EXP_MATCH_CACHE_CAPACITY {
-                            cache.insert(pattern, compiled.clone());
-                        }
-                        compiled
+                        // The bounded cache is full. Evaluate this uncommon pattern once
+                        // without evicting a pattern already kept hot by the PAC script.
+                        let compiled = compiled.map_err(|error| match error {
+                            ShellPatternError::InvalidGlob => {
+                                boa_engine::JsNativeError::error().with_message("invalid glob")
+                            }
+                            ShellPatternError::InvalidPattern(message) => {
+                                boa_engine::JsNativeError::syntax().with_message(message.clone())
+                            }
+                        })?;
+                        return Ok(JsValue::from(
+                            compiled.matches_with(&value, glob::MatchOptions::new()),
+                        ));
                     }
-                };
-                let compiled = compiled.map_err(|error| match error {
+                }
+                let compiled = cache.get(&key).expect("inserted or found above");
+                let compiled = compiled.as_ref().map_err(|error| match error {
                     ShellPatternError::InvalidGlob => {
                         boa_engine::JsNativeError::error().with_message("invalid glob")
                     }
                     ShellPatternError::InvalidPattern(message) => {
-                        boa_engine::JsNativeError::syntax().with_message(message)
+                        boa_engine::JsNativeError::syntax().with_message(message.clone())
                     }
                 })?;
                 Ok(JsValue::from(
