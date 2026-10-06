@@ -35,6 +35,8 @@ enum Task {
     },
     Check,
     Test,
+    /// Run the generated PAC routing performance test.
+    Perf,
     Docs {
         #[arg(long, default_value = "dist/site")]
         output: PathBuf,
@@ -167,6 +169,15 @@ fn main() -> Result<()> {
             test()
         }
         Task::Test => test(),
+        Task::Perf => run(Command::new("cargo").args([
+            "test",
+            "--locked",
+            "--test",
+            "pac_performance",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ])),
         Task::Docs { output, repository } => docs(&output, repository.as_deref()),
         Task::Package {
             format,
