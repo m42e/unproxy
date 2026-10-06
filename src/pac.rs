@@ -2,9 +2,11 @@ use crate::route::{Route, Routes};
 use anyhow::{Context as _, Result, anyhow, bail};
 use boa_engine::{Context, JsString, JsValue, NativeFunction, Script, Source};
 use std::{
+    cell::RefCell,
     collections::HashMap,
     future::Future as _,
     net::{IpAddr, ToSocketAddrs},
+    rc::Rc,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -44,7 +46,9 @@ fn preferred_ip(ips: impl IntoIterator<Item = IpAddr>) -> Option<IpAddr> {
 
 pub struct Pac {
     context: Context,
+    evaluation_script: Script,
     ip: Arc<Mutex<IpAddr>>,
+    ip_string: Rc<RefCell<JsString>>,
     source: Option<String>,
     cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
     glob_cache: Arc<Mutex<HashMap<String, std::result::Result<glob::Pattern, ShellPatternError>>>>,
@@ -56,9 +60,18 @@ impl Pac {
         Self::new_with_ip(source, "127.0.0.1".parse().unwrap())
     }
     pub fn new_with_ip(source: Option<&str>, ip: IpAddr) -> Result<Self> {
+        let mut context = limited_context();
+        let evaluation_script = Script::parse(
+            Source::from_bytes("FindProxyForURL(__unproxyUrl, __unproxyHost)"),
+            None,
+            &mut context,
+        )
+        .expect("constant PAC evaluator parses");
         let mut pac = Self {
-            context: Context::default(),
+            context,
+            evaluation_script,
             ip: Arc::new(Mutex::new(ip)),
+            ip_string: Rc::new(RefCell::new(JsString::from(ip.to_string()))),
             source: None,
             cache: Arc::new(Mutex::new(HashMap::new())),
             glob_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -69,9 +82,18 @@ impl Pac {
         Ok(pac)
     }
     pub fn set_script(&mut self, source: Option<&str>) -> Result<()> {
+        let mut context = limited_context();
+        let evaluation_script = Script::parse(
+            Source::from_bytes("FindProxyForURL(__unproxyUrl, __unproxyHost)"),
+            None,
+            &mut context,
+        )
+        .expect("constant PAC evaluator parses");
         let mut candidate = Self {
-            context: Context::default(),
+            context,
+            evaluation_script,
             ip: self.ip.clone(),
+            ip_string: self.ip_string.clone(),
             source: None,
             cache: Arc::new(Mutex::new(HashMap::new())),
             glob_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -86,7 +108,6 @@ impl Pac {
         if source.is_some_and(|s| s.len() > MAX_PAC_SCRIPT_BYTES) {
             bail!("PAC script exceeds 8 MiB");
         }
-        self.context = limited_context();
         self.context
             .runtime_limits_mut()
             .set_loop_iteration_limit(PAC_LOOP_LIMIT);
@@ -170,13 +191,9 @@ impl Pac {
         self.context
             .register_global_builtin_callable(JsString::from("shExpMatch"), 2, sh_exp_match)
             .map_err(|e| anyhow!("register shExpMatch: {e}"))?;
-        let ip = self.ip.clone();
+        let ip = self.ip_string.clone();
         let ipfn = unsafe {
-            NativeFunction::from_closure(move |_, _, _| {
-                Ok(JsValue::from(JsString::from(
-                    ip.lock().unwrap().to_string(),
-                )))
-            })
+            NativeFunction::from_closure(move |_, _, _| Ok(JsValue::from(ip.borrow().clone())))
         };
         self.context
             .register_global_builtin_callable(JsString::from("myIpAddress"), 0, ipfn)
@@ -265,26 +282,23 @@ impl Pac {
             &mut self.context,
         )
         .map_err(|e| anyhow!("PAC cache initialization: {e}"))?;
+        self.evaluation_script = Script::parse(
+            Source::from_bytes("FindProxyForURL(__unproxyUrl, __unproxyHost)"),
+            None,
+            &mut self.context,
+        )
+        .map_err(|e| anyhow!("PAC evaluator initialization: {e}"))?;
         Ok(())
     }
     pub fn set_ip(&mut self, ip: IpAddr) {
         *self.ip.lock().unwrap() = ip;
+        *self.ip_string.borrow_mut() = JsString::from(ip.to_string());
     }
     pub fn evaluate(&mut self, url: &str, host: &str) -> Result<Routes> {
-        if self.last_prune.elapsed() >= Duration::from_secs(300) {
-            self.cache
-                .lock()
-                .unwrap()
-                .retain(|_, v| v.at.elapsed() < Duration::from_secs(300));
-            self.last_prune = Instant::now();
-        }
+        self.prune_dns_cache();
         self.dns_budget.store(0, Ordering::Relaxed);
-        let source = format!(
-            "FindProxyForURL({}, {})",
-            serde_json::to_string(url)?,
-            serde_json::to_string(host)?
-        );
-        let val = eval_script_sync(&source, &mut self.context)
+        self.set_evaluation_arguments(url, host)?;
+        let val = eval_compiled_script_sync(&self.evaluation_script, &mut self.context)
             .map_err(|e| anyhow!("PAC evaluation: {e}"))?;
         if !val.is_string() {
             bail!("FindProxyForURL returned a non-string value")
@@ -292,17 +306,13 @@ impl Pac {
         val.as_string().unwrap().to_std_string_escaped().parse()
     }
     async fn evaluate_bounded(&mut self, url: &str, host: &str) -> Result<Routes> {
+        self.prune_dns_cache();
         self.dns_budget.store(0, Ordering::Relaxed);
-        let source = format!(
-            "FindProxyForURL({}, {})",
-            serde_json::to_string(url)?,
-            serde_json::to_string(host)?
-        );
-        let script = Script::parse(Source::from_bytes(&source), None, &mut self.context)
-            .map_err(|e| anyhow!("PAC evaluation parse: {e}"))?;
+        self.set_evaluation_arguments(url, host)?;
         let value = tokio::time::timeout(
             PAC_EVAL_TIMEOUT,
-            script.evaluate_async_with_budget(&mut self.context, PAC_EVAL_BUDGET),
+            self.evaluation_script
+                .evaluate_async_with_budget(&mut self.context, PAC_EVAL_BUDGET),
         )
         .await
         .context("PAC evaluation exceeded its time limit")?
@@ -311,6 +321,35 @@ impl Pac {
             bail!("FindProxyForURL returned a non-string value");
         }
         value.as_string().unwrap().to_std_string_escaped().parse()
+    }
+    fn set_evaluation_arguments(&mut self, url: &str, host: &str) -> Result<()> {
+        let global = self.context.global_object();
+        global
+            .set(
+                JsString::from("__unproxyUrl"),
+                JsString::from(url),
+                true,
+                &mut self.context,
+            )
+            .map_err(|e| anyhow!("set PAC URL: {e}"))?;
+        global
+            .set(
+                JsString::from("__unproxyHost"),
+                JsString::from(host),
+                true,
+                &mut self.context,
+            )
+            .map_err(|e| anyhow!("set PAC host: {e}"))?;
+        Ok(())
+    }
+    fn prune_dns_cache(&mut self) {
+        if self.last_prune.elapsed() >= Duration::from_secs(300) {
+            self.cache
+                .lock()
+                .unwrap()
+                .retain(|_, v| v.at.elapsed() < Duration::from_secs(300));
+            self.last_prune = Instant::now();
+        }
     }
     pub fn cache_snapshot(&self) -> HashMap<String, Option<IpAddr>> {
         self.cache
@@ -520,6 +559,10 @@ fn evaluate_scripts_bounded(
 fn eval_script_sync(source: &str, context: &mut Context) -> Result<JsValue> {
     let script = Script::parse(Source::from_bytes(source), None, context)
         .map_err(|e| anyhow!("script parse: {e}"))?;
+    eval_compiled_script_sync(&script, context)
+}
+
+fn eval_compiled_script_sync(script: &Script, context: &mut Context) -> Result<JsValue> {
     let future = script.evaluate_async_with_budget(context, PAC_EVAL_BUDGET);
     let waker = std::task::Waker::noop();
     let mut task_context = std::task::Context::from_waker(waker);
@@ -689,6 +732,25 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn bounded_evaluation_prunes_expired_dns_entries() {
+        let mut pac = Pac::new(None).unwrap();
+        pac.cache.lock().unwrap().insert(
+            "expired.test".into(),
+            CacheEntry {
+                value: None,
+                at: Instant::now() - Duration::from_secs(301),
+            },
+        );
+        pac.last_prune = Instant::now() - Duration::from_secs(301);
+
+        pac.evaluate_bounded("http://example.test/", "example.test")
+            .await
+            .unwrap();
+
+        assert!(!pac.cache.lock().unwrap().contains_key("expired.test"));
+    }
+
     #[test]
     fn pac_substr_supports_standard_start_and_length_semantics() {
         let mut pac = Pac::new(Some(
@@ -700,6 +762,24 @@ mod tests {
                 .unwrap()
                 .to_string(),
             "HTTP substr.test:80"
+        );
+    }
+
+    #[test]
+    fn compiled_evaluator_handles_repeated_arguments_without_source_interpolation() {
+        let mut pac = Pac::new(Some(
+            "function FindProxyForURL(url, host) { return url.includes(\"'\") && host === 'second.test' ? 'PROXY matched.test:80' : 'DIRECT'; }",
+        ))
+        .unwrap();
+        assert_eq!(
+            pac.evaluate("first", "first.test").unwrap().to_string(),
+            "DIRECT"
+        );
+        assert_eq!(
+            pac.evaluate("url with ' quote", "second.test")
+                .unwrap()
+                .to_string(),
+            "HTTP matched.test:80"
         );
     }
 
