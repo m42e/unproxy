@@ -306,6 +306,7 @@ fn build_menu() -> Result<(Menu, MenuItem, MenuItem, MenuItem, MenuItem, MenuIte
 fn child_restart_required(current: &Preferences, updated: &Preferences) -> bool {
     current.effective_listeners() != updated.effective_listeners()
         || current.effective_pac_files() != updated.effective_pac_files()
+        || current.effective_filter_lists() != updated.effective_filter_lists()
         || current.proxytunnel != updated.proxytunnel
         || current.direct_fallback != updated.direct_fallback
         || (cfg!(feature = "negotiate") && current.negotiate != updated.negotiate)
@@ -625,5 +626,16 @@ mod tests {
             ..current.clone()
         };
         assert!(child_restart_required(&current, &updated));
+    }
+
+    #[test]
+    fn changing_filter_lists_restarts_the_windows_proxy_child() {
+        let current = Preferences::default();
+        let updated = Preferences {
+            filter_lists: Some(vec![PathBuf::from("C:\\lists\\hosts.txt")]),
+            ..current.clone()
+        };
+        assert!(child_restart_required(&current, &updated));
+        assert!(!child_restart_required(&updated, &updated));
     }
 }

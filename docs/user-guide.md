@@ -98,8 +98,14 @@ sources together. Select a PAC row and click **Open / View**: local files open
 in their default app, and remote URLs display their downloaded text. PAC file
 **+** opens a local file chooser; **Add URL…** adds a remote HTTP(S) source.
 Listener **+** adds a row you can edit in place. Double-click an existing row
-to change its value. Valid changes, including connection behavior checkboxes,
-are saved and applied immediately. Add a listener for each numeric IP address
+to change its value. In **Ad blocking lists**, choose **Add Local List…** or
+**Add Remote URL…**. Remove a row to disable that source; leaving the list empty
+turns ad blocking off. Save to apply the changes. On macOS, choose **Settings…**
+from the Unproxy menu bar menu to see listeners, PAC sources, and ad blocking
+lists together. Use **+** under Ad blocking lists to choose a local file,
+**Add URL…** to add a remote HTTP(S) list, and **−** to remove a source.
+Valid macOS changes, including connection behavior checkboxes, are saved and
+applied immediately. Add a listener for each numeric IP address
 and port; write IPv6 addresses in brackets, such as
 `[::1]:3128`. Both desktop apps start with IPv4 and IPv6 loopback listeners on
 port 3128.
