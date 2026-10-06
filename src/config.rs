@@ -581,10 +581,10 @@ mod tests {
     }
     #[test]
     fn token_lines() {
-        let p = std::env::temp_dir().join("pd-config-test");
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config");
         fs::write(&p, "# hi\n--listen 127.0.0.1:5\n").unwrap();
         assert_eq!(token_file(&p), ["--listen", "127.0.0.1:5"]);
-        let _ = fs::remove_file(p);
     }
 
     #[test]

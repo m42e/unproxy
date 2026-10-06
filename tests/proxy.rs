@@ -140,6 +140,81 @@ async fn status_page_explains_upstream_authentication_negotiation() {
 }
 
 #[tokio::test]
+async fn resolve_endpoint_validates_urls_and_returns_policy_results() {
+    let policy = Policy::new(Some(
+        "function FindProxyForURL(url, host) { return 'PROXY proxy.example:8080'; }".into(),
+    ))
+    .unwrap();
+    let proxy = start(policy).await;
+    let addr = proxy.local_addrs()[0];
+
+    async fn get(addr: SocketAddr, target: &str) -> String {
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(
+                format!("GET {target} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        response
+    }
+
+    let missing = get(addr, "/resolve.json").await;
+    assert!(missing.starts_with("HTTP/1.1 400"), "{missing}");
+    assert!(missing.contains("Provide a URL"), "{missing}");
+
+    let invalid = get(addr, "/resolve.json?url=ftp%3A%2F%2Fexample.test%2F").await;
+    assert!(invalid.starts_with("HTTP/1.1 400"), "{invalid}");
+    assert!(invalid.contains("absolute HTTP or HTTPS"), "{invalid}");
+
+    let undecodable = get(addr, "/resolve.json?url=%GG").await;
+    assert!(undecodable.starts_with("HTTP/1.1 400"), "{undecodable}");
+    assert!(undecodable.contains("Provide a URL"), "{undecodable}");
+
+    let invalid_destination = get(
+        addr,
+        "/resolve.json?url=http%3A%2F%2Fuser%40example.test%2F",
+    )
+    .await;
+    assert!(
+        invalid_destination.starts_with("HTTP/1.1 400"),
+        "{invalid_destination}"
+    );
+    assert!(
+        invalid_destination.contains("Invalid URL"),
+        "{invalid_destination}"
+    );
+
+    let result = get(addr, "/resolve.json?url=http%3A%2F%2Fexample.test%2Fpath").await;
+    assert!(result.starts_with("HTTP/1.1 200"), "{result}");
+    assert!(result.contains("proxy.example:8080"), "{result}");
+    proxy.shutdown();
+    proxy.wait().await;
+
+    let strict = ContextBuilder::new(
+        Arc::new(Policy::new(None).unwrap()),
+        ConnectionOptions::default(),
+    )
+    .strict_policy(true)
+    .listen("127.0.0.1:0".parse().unwrap())
+    .bind()
+    .await
+    .unwrap();
+    let strict_result = get(
+        strict.local_addrs()[0],
+        "/resolve.json?url=http%3A%2F%2Fexample.test%2F",
+    )
+    .await;
+    assert!(strict_result.starts_with("HTTP/1.1 503"), "{strict_result}");
+    assert!(strict_result.contains("routing policy is unavailable"));
+    strict.shutdown();
+    strict.wait().await;
+}
+
+#[tokio::test]
 async fn local_errors_and_self_loop_are_rejected() {
     let proxy = start(Policy::new(None).unwrap()).await;
     let addr = proxy.local_addrs()[0];
