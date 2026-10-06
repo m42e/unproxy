@@ -235,23 +235,28 @@ async fn startup_waits_for_remote_policy_before_accepting_connections() {
 }
 
 #[tokio::test]
-async fn logfile_is_truncated_and_receives_runtime_startup_messages() {
+async fn logfile_is_preserved_and_receives_runtime_startup_messages() {
     let temp = tempfile::tempdir().unwrap();
     let netrc = temp.path().join("netrc");
     std::fs::write(&netrc, "").unwrap();
     let pac = temp.path().join("proxy.pac");
     std::fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
     let logfile = temp.path().join("unproxy.log");
-    std::fs::write(&logfile, "stale contents must be truncated\n").unwrap();
+    std::fs::write(&logfile, "previous diagnostic history\n").unwrap();
+    let address = reserve_address();
+    let mut child = process_with_log(address, pac.to_str().unwrap(), &netrc, Some(&logfile));
+    wait_for_listener(address, &mut child).await;
+    stop_child(&mut child).await;
+
     let address = reserve_address();
     let mut child = process_with_log(address, pac.to_str().unwrap(), &netrc, Some(&logfile));
     wait_for_listener(address, &mut child).await;
     stop_child(&mut child).await;
 
     let log = std::fs::read_to_string(logfile).unwrap();
-    assert!(!log.contains("stale contents"));
+    assert!(log.contains("previous diagnostic history"));
     assert!(log.contains("proxy listening"), "{log}");
-    assert!(log.contains("proxy started"), "{log}");
+    assert_eq!(log.matches("proxy started").count(), 2, "{log}");
 }
 
 #[cfg(unix)]

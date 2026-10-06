@@ -7,7 +7,190 @@ use crate::{
     proxy::ContextBuilder,
 };
 use anyhow::{Context, Result, anyhow};
-use std::{ffi::OsString, fs, sync::Arc, time::Duration};
+use std::{
+    ffi::OsString,
+    fs,
+    io::{self, Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
+};
+
+const LOG_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+const LOG_FILE_BACKUPS: usize = 3;
+
+#[derive(Clone)]
+struct RotatingLog {
+    state: Arc<Mutex<RotatingLogState>>,
+}
+
+struct RotatingLogState {
+    path: PathBuf,
+    file: Option<fs::File>,
+    size: u64,
+    max_bytes: u64,
+    backups: usize,
+}
+
+struct RotatingLogGuard<'a>(MutexGuard<'a, RotatingLogState>);
+
+impl RotatingLog {
+    fn open(path: &Path, max_bytes: u64, backups: usize) -> io::Result<Self> {
+        assert!(max_bytes > 0, "log size limit must be nonzero");
+        for index in 1..=backups {
+            trim_path_to_limit(&backup_path(path, index), max_bytes)?;
+        }
+        trim_path_to_limit(path, max_bytes)?;
+        let file = open_log_file(path)?;
+        let size = file.metadata()?.len();
+        Ok(Self {
+            state: Arc::new(Mutex::new(RotatingLogState {
+                path: path.to_owned(),
+                file: Some(file),
+                size,
+                max_bytes,
+                backups,
+            })),
+        })
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for RotatingLog {
+    type Writer = RotatingLogGuard<'a>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        RotatingLogGuard(self.state.lock().unwrap_or_else(|error| error.into_inner()))
+    }
+}
+
+impl Write for RotatingLogGuard<'_> {
+    fn write(&mut self, mut bytes: &[u8]) -> io::Result<usize> {
+        let written = bytes.len();
+        while !bytes.is_empty() {
+            if self.0.size >= self.0.max_bytes && self.0.rotate().is_err() {
+                self.0.compact()?;
+            }
+            let available = (self.0.max_bytes - self.0.size) as usize;
+            let count = bytes.len().min(available);
+            let written_now = self
+                .0
+                .file
+                .as_mut()
+                .expect("rotating log file is open")
+                .write(&bytes[..count])?;
+            if written_now == 0 {
+                return Err(io::Error::from(io::ErrorKind::WriteZero));
+            }
+            self.0.size += written_now as u64;
+            bytes = &bytes[written_now..];
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0
+            .file
+            .as_mut()
+            .expect("rotating log file is open")
+            .flush()
+    }
+}
+
+impl RotatingLogState {
+    fn rotate(&mut self) -> io::Result<()> {
+        if let Some(file) = self.file.as_mut() {
+            file.flush()?;
+        }
+        drop(self.file.take());
+
+        let rotation = rotate_paths(&self.path, self.backups);
+        let reopened = open_log_file(&self.path);
+        match reopened {
+            Ok(file) => {
+                let size = file.metadata().map(|metadata| metadata.len());
+                self.file = Some(file);
+                self.size = size?;
+                rotation
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn compact(&mut self) -> io::Result<()> {
+        let file = self.file.as_mut().expect("rotating log file is open");
+        trim_open_file_to_limit(file, self.max_bytes / 2)?;
+        self.size = file.metadata()?.len();
+        Ok(())
+    }
+}
+
+fn open_log_file(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .read(true)
+        .open(path)
+}
+
+fn backup_path(path: &Path, index: usize) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".{index}"));
+    PathBuf::from(name)
+}
+
+fn trim_path_to_limit(path: &Path, max_bytes: u64) -> io::Result<()> {
+    let mut file = match fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    trim_open_file_to_limit(&mut file, max_bytes)
+}
+
+fn trim_open_file_to_limit(file: &mut fs::File, max_bytes: u64) -> io::Result<()> {
+    let size = file.metadata()?.len();
+    if size <= max_bytes {
+        return Ok(());
+    }
+    file.seek(SeekFrom::Start(size - max_bytes))?;
+    let mut tail = Vec::with_capacity(max_bytes as usize);
+    file.read_to_end(&mut tail)?;
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&tail)?;
+    file.flush()
+}
+
+fn rotate_paths(path: &Path, backups: usize) -> io::Result<()> {
+    if backups == 0 {
+        let file = open_log_file(path)?;
+        file.set_len(0)?;
+        return Ok(());
+    }
+    remove_if_exists(&backup_path(path, backups))?;
+    for index in (1..backups).rev() {
+        let source = backup_path(path, index);
+        if source.exists() {
+            let destination = backup_path(path, index + 1);
+            remove_if_exists(&destination)?;
+            fs::rename(source, destination)?;
+        }
+    }
+    if path.exists() {
+        let first_backup = backup_path(path, 1);
+        remove_if_exists(&first_backup)?;
+        fs::rename(path, first_backup)?;
+    }
+    Ok(())
+}
+
+fn remove_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
 
 /// Run the primary proxy process with already parsed settings.
 pub async fn run(a: MainArgs) -> Result<()> {
@@ -49,23 +232,16 @@ async fn run_until(
                 config::verbosity_level(a.verbose, a.quiet).unwrap_or("off"),
             )
         });
-    if let Some(file) = a.logfile.as_ref().and_then(|p| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(p)
-            .ok()
-    }) {
+    if let Some(log) = a
+        .logfile
+        .as_ref()
+        .and_then(|path| RotatingLog::open(path, LOG_FILE_MAX_BYTES, LOG_FILE_BACKUPS).ok())
+    {
         tracing_subscriber::fmt()
             .compact()
             .with_timer(tracing_subscriber::fmt::time::uptime())
             .with_env_filter(filter)
-            .with_writer(move || -> Box<dyn std::io::Write + Send> {
-                file.try_clone()
-                    .map(|f| Box::new(f) as Box<dyn std::io::Write + Send>)
-                    .unwrap_or_else(|_| Box::new(std::io::stderr()))
-            })
+            .with_writer(log)
             .try_init()
             .ok();
     } else {
@@ -377,6 +553,44 @@ fn select_pac_ip(
 mod tests {
     use super::*;
     use clap::Parser;
+    use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[test]
+    fn logfile_appends_across_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unproxy.log");
+        {
+            let log = RotatingLog::open(&path, 32, 2).unwrap();
+            log.make_writer().write_all(b"first session\n").unwrap();
+        }
+        {
+            let log = RotatingLog::open(&path, 32, 2).unwrap();
+            log.make_writer().write_all(b"second session\n").unwrap();
+        }
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "first session\nsecond session\n"
+        );
+    }
+
+    #[test]
+    fn logfile_rotation_bounds_active_and_backup_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unproxy.log");
+        let log = RotatingLog::open(&path, 8, 2).unwrap();
+        for chunk in [b"12345678", b"ABCDEFGH", b"abcdefgh", b"ijklmnop"] {
+            log.make_writer().write_all(chunk).unwrap();
+        }
+
+        assert_eq!(fs::read(&path).unwrap(), b"ijklmnop");
+        assert_eq!(fs::read(backup_path(&path, 1)).unwrap(), b"abcdefgh");
+        assert_eq!(fs::read(backup_path(&path, 2)).unwrap(), b"ABCDEFGH");
+        assert!(!backup_path(&path, 3).exists());
+        for log_path in [&path, &backup_path(&path, 1), &backup_path(&path, 2)] {
+            assert!(fs::metadata(log_path).unwrap().len() <= 8);
+        }
+    }
+
     #[test]
     fn effective_ip_prefers_override_and_detects_only_when_needed() {
         for ip in ["192.0.2.42", "2001:db8::42"] {
