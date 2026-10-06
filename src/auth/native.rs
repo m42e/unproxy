@@ -1451,3 +1451,28 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "negotiate", windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn native_sspi_context_acquires_credentials_and_attempts_an_initial_token() {
+        let mut context = NegotiateContext::new("localhost")
+            .expect("Windows Negotiate package should acquire the process credentials");
+        assert!(!context.is_complete());
+
+        match context.step(None) {
+            Ok(Some(token)) => assert!(!token.is_empty()),
+            Ok(None) => assert!(
+                context.is_complete(),
+                "completed SSPI exchange has no token"
+            ),
+            Err(error) => assert!(
+                error.to_string().contains("SecurityContext")
+                    || error.to_string().contains("CompleteAuthToken"),
+                "{error:#}"
+            ),
+        }
+    }
+}

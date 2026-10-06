@@ -541,6 +541,24 @@ mod tests {
             Err(error) => assert!(format!("{error:#}").contains("localhost"), "{error:#}"),
         }
     }
+
+    #[test]
+    #[cfg(all(feature = "negotiate", windows))]
+    fn socks_negotiate_context_checks_the_host_before_acquiring_sspi_credentials() {
+        let auth = AuthFactory::negotiate(vec!["proxy.corp.test".into()]);
+        assert!(
+            auth.socks_gss_context("proxy.public.test")
+                .unwrap()
+                .is_none()
+        );
+
+        let context = auth
+            .socks_gss_context("proxy.corp.test")
+            .unwrap()
+            .expect("allowed host should acquire an SSPI context");
+        assert!(!context.is_complete());
+    }
+
     #[test]
     #[cfg(feature = "negotiate")]
     fn negotiate_header_enforces_host_allowlist_and_formats_or_omits_tokens() {
