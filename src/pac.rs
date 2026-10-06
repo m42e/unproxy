@@ -3,7 +3,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use boa_engine::{Context, JsString, JsValue, NativeFunction, Script, Source};
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     future::Future as _,
     net::{IpAddr, ToSocketAddrs},
     rc::Rc,
@@ -20,6 +20,7 @@ const DEFAULT_SCRIPT: &str = "function FindProxyForURL(url, host) { return 'DIRE
 const PAC_LOOP_LIMIT: u64 = 100_000;
 const PAC_QUEUE_CAPACITY: usize = 64;
 const SH_EXP_MATCH_CACHE_CAPACITY: usize = 512;
+const ROUTE_CACHE_CAPACITY: usize = 64;
 const PAC_EVAL_BUDGET: u32 = 256;
 const PAC_EVAL_TIMEOUT: Duration = Duration::from_secs(2);
 const PAC_RECURSION_LIMIT: usize = 64;
@@ -50,6 +51,9 @@ pub struct Pac {
     ip: Arc<Mutex<IpAddr>>,
     ip_string: Rc<RefCell<JsString>>,
     source: Option<String>,
+    route_cache: HashMap<JsString, Rc<Routes>>,
+    last_routes: Option<(JsString, Rc<Routes>)>,
+    route_cache_order: VecDeque<JsString>,
     cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
     glob_cache:
         Rc<RefCell<HashMap<JsString, std::result::Result<glob::Pattern, ShellPatternError>>>>,
@@ -76,6 +80,9 @@ impl Pac {
             source: None,
             cache: Arc::new(Mutex::new(HashMap::new())),
             glob_cache: Rc::new(RefCell::new(HashMap::new())),
+            route_cache: HashMap::new(),
+            last_routes: None,
+            route_cache_order: VecDeque::new(),
             last_prune: Instant::now(),
             dns_budget: Arc::new(AtomicUsize::new(0)),
         };
@@ -98,6 +105,9 @@ impl Pac {
             source: None,
             cache: Arc::new(Mutex::new(HashMap::new())),
             glob_cache: Rc::new(RefCell::new(HashMap::new())),
+            route_cache: HashMap::new(),
+            last_routes: None,
+            route_cache_order: VecDeque::new(),
             last_prune: Instant::now(),
             dns_budget: Arc::new(AtomicUsize::new(0)),
         };
@@ -361,16 +371,41 @@ impl Pac {
         *self.ip.lock().unwrap() = ip;
         *self.ip_string.borrow_mut() = JsString::from(ip.to_string());
     }
+    fn parse_routes(&mut self, value: JsValue) -> Result<Routes> {
+        if !value.is_string() {
+            bail!("FindProxyForURL returned a non-string value")
+        }
+        let value = value.as_string().unwrap();
+        // Most PACs return the same directive string repeatedly. Avoid hashing it
+        // on that path while retaining the bounded cache for alternating results.
+        if let Some((last, routes)) = &self.last_routes
+            && last == &value
+        {
+            return Ok(routes.as_ref().clone());
+        }
+        if let Some(routes) = self.route_cache.get(&value) {
+            self.last_routes = Some((value, routes.clone()));
+            return Ok(routes.as_ref().clone());
+        }
+
+        let routes = Rc::new(value.to_std_string_escaped().parse::<Routes>()?);
+        if self.route_cache.len() == ROUTE_CACHE_CAPACITY
+            && let Some(oldest) = self.route_cache_order.pop_front()
+        {
+            self.route_cache.remove(&oldest);
+        }
+        self.route_cache.insert(value.clone(), routes.clone());
+        self.last_routes = Some((value.clone(), routes.clone()));
+        self.route_cache_order.push_back(value);
+        Ok(routes.as_ref().clone())
+    }
     pub fn evaluate(&mut self, url: &str, host: &str) -> Result<Routes> {
         self.prune_dns_cache();
         self.dns_budget.store(0, Ordering::Relaxed);
         self.set_evaluation_arguments(url, host)?;
         let val = eval_compiled_script_sync(&self.evaluation_script, &mut self.context)
             .map_err(|e| anyhow!("PAC evaluation: {e}"))?;
-        if !val.is_string() {
-            bail!("FindProxyForURL returned a non-string value")
-        }
-        val.as_string().unwrap().to_std_string_escaped().parse()
+        self.parse_routes(val)
     }
     async fn evaluate_bounded(&mut self, url: &str, host: &str) -> Result<Routes> {
         self.prune_dns_cache();
@@ -384,10 +419,7 @@ impl Pac {
         .await
         .context("PAC evaluation exceeded its time limit")?
         .map_err(|e| anyhow!("PAC evaluation: {e}"))?;
-        if !value.is_string() {
-            bail!("FindProxyForURL returned a non-string value");
-        }
-        value.as_string().unwrap().to_std_string_escaped().parse()
+        self.parse_routes(value)
     }
     fn set_evaluation_arguments(&mut self, url: &str, host: &str) -> Result<()> {
         let global = self.context.global_object();
@@ -816,6 +848,77 @@ mod tests {
             .unwrap();
 
         assert!(!pac.cache.lock().unwrap().contains_key("expired.test"));
+    }
+
+    #[test]
+    #[ignore = "performance measurement; run release ignored PAC tests"]
+    fn repeated_route_parser_performance() {
+        const ITERATIONS: u32 = 20_000;
+        let mut pac = Pac::new(None).unwrap();
+        let value = boa_engine::JsValue::from(boa_engine::JsString::from(
+            "PROXY edge.example:8080; HTTPS secure.example:8443; SOCKS socks.example:1080; DIRECT",
+        ));
+        let expected =
+            "HTTP edge.example:8080; HTTPS secure.example:8443; SOCKS4 socks.example:1080; DIRECT";
+        assert_eq!(
+            pac.parse_routes(value.clone()).unwrap().to_string(),
+            expected
+        );
+        let mut uncached = Vec::new();
+        let mut cached = Vec::new();
+        for _ in 0..5 {
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                std::hint::black_box(
+                    value
+                        .as_string()
+                        .unwrap()
+                        .to_std_string_escaped()
+                        .parse::<crate::route::Routes>()
+                        .unwrap(),
+                );
+            }
+            uncached.push(start.elapsed() / ITERATIONS);
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                std::hint::black_box(pac.parse_routes(value.clone()).unwrap());
+            }
+            cached.push(start.elapsed() / ITERATIONS);
+        }
+        uncached.sort_unstable();
+        cached.sort_unstable();
+        println!(
+            "Repeated route parser only: uncached median {:?}, cached median {:?}",
+            uncached[2], cached[2]
+        );
+    }
+
+    #[test]
+    fn parsed_route_cache_is_bounded_and_resets_with_scripts() {
+        let mut pac = Pac::new(Some("function FindProxyForURL(url){return url;}")).unwrap();
+        for index in 0..super::ROUTE_CACHE_CAPACITY + 8 {
+            let result = format!("PROXY proxy{index}.test:8080");
+            let mut routes = pac.evaluate(&result, "x").unwrap();
+            routes.0.clear();
+            // Returning an owned result must not expose the cached routes to mutation.
+            assert_eq!(
+                pac.evaluate(&result, "x").unwrap().to_string(),
+                format!("HTTP proxy{index}.test:8080")
+            );
+        }
+        assert_eq!(pac.route_cache.len(), super::ROUTE_CACHE_CAPACITY);
+        assert_eq!(pac.route_cache_order.len(), super::ROUTE_CACHE_CAPACITY);
+        assert!(
+            !pac.route_cache
+                .contains_key(&boa_engine::JsString::from("PROXY proxy0.test:8080"))
+        );
+        let count = pac.route_cache.len();
+        assert!(pac.evaluate("invalid", "x").is_err());
+        assert_eq!(pac.route_cache.len(), count);
+        pac.set_script(None).unwrap();
+        assert!(pac.route_cache.is_empty());
+        assert!(pac.route_cache_order.is_empty());
+        assert!(pac.last_routes.is_none());
     }
 
     #[test]
