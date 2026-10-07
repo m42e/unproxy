@@ -23,6 +23,17 @@ install.ps1 -AsService.
 See [Use Unproxy](docs/user-guide.md) for copyable setup steps, credentials, and
 troubleshooting.
 
+## Limitations
+
+- Unproxy does not enforce a process memory limit. Memory use depends on traffic
+  and the configured PAC and filter data.
+- Client authentication is not available on the proxy listeners. Anyone who can
+  connect to a listener can use it as a proxy.
+- The status page and its JSON endpoint are served on the proxy listeners
+  without authentication. If a listener is reachable remotely, remote clients
+  can also read the status. Bind only to trusted networks and use firewall rules
+  to restrict access when needed.
+
 ## Build from source
 
 With Rust installed, run:
