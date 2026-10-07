@@ -75,6 +75,23 @@ lists, and proxy behavior.
 Use **Start with Login** to control whether the app opens when you sign in. The
 menu also has actions to open the log and copy the proxy address.
 
+To use Unproxy from terminal applications, add these lines to `~/.zshrc` (the
+default shell on macOS), adjusting the address and port if your first listener
+is different:
+
+```sh
+export http_proxy=http://127.0.0.1:3128
+export https_proxy=http://127.0.0.1:3128
+export no_proxy=localhost,127.0.0.1,::1
+```
+
+Open a new Terminal window, or run `source ~/.zshrc`, for the changes to take
+effect. These variables are inherited by programs started from that shell;
+they do not configure GUI apps launched from Finder. Unproxy does not modify
+your shell profile. To stop using the proxy, remove the lines from `~/.zshrc`
+and open a new shell, or run `unset http_proxy https_proxy no_proxy` in the
+current shell.
+
 ## Debian or Ubuntu
 
 Open a terminal in the folder containing the downloaded `.deb` package and run:
