@@ -392,11 +392,18 @@ fn load_icon(directory: &Path, key: &str) -> Result<Icon> {
 }
 
 fn read_runtime_status(preferences: &Preferences) -> Option<RuntimeStatus> {
+    read_runtime_status_with(preferences, read_runtime_status_at)
+}
+
+fn read_runtime_status_with(
+    preferences: &Preferences,
+    read_at: impl FnMut(SocketAddr) -> Option<RuntimeStatus>,
+) -> Option<RuntimeStatus> {
     preferences
         .effective_listeners()
         .iter()
         .filter_map(|listener| listener.parse::<SocketAddr>().ok())
-        .find_map(read_runtime_status_at)
+        .find_map(read_at)
 }
 
 fn read_runtime_status_at(address: SocketAddr) -> Option<RuntimeStatus> {
@@ -603,57 +610,24 @@ mod tests {
 
     #[test]
     fn runtime_status_uses_configured_listeners() {
-        use std::io::{BufRead, BufReader};
-        use std::net::TcpListener;
-
-        let unused = TcpListener::bind("127.0.0.1:0").unwrap();
-        let unavailable_address = unused.local_addr().unwrap();
-        drop(unused);
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let (mut stream, _) = loop {
-                match listener.accept() {
-                    Ok(connection) => break connection,
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::WouldBlock
-                            && Instant::now() < deadline =>
-                    {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("accept status request: {error}"),
-                }
-            };
-            stream.set_nonblocking(false).unwrap();
-            let mut request = BufReader::new(stream.try_clone().unwrap());
-            let mut request_line = String::new();
-            request.read_line(&mut request_line).unwrap();
-            assert!(request_line.starts_with("GET /status.json "));
-            loop {
-                let mut header = String::new();
-                request.read_line(&mut header).unwrap();
-                if header == "\r\n" || header.is_empty() {
-                    break;
-                }
-            }
-            let body = r#"{"pac_loaded":true}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-            stream.flush().unwrap();
-        });
+        let unavailable_address = "127.0.0.1:3128".parse::<SocketAddr>().unwrap();
+        let address = "[::1]:3128".parse::<SocketAddr>().unwrap();
         let preferences = Preferences {
             listeners: Some(vec![unavailable_address.to_string(), address.to_string()]),
             ..Preferences::default()
         };
+        let mut attempted = Vec::new();
 
-        let status = read_runtime_status(&preferences).expect("configured listener status");
-        server.join().unwrap();
+        let status = read_runtime_status_with(&preferences, |candidate| {
+            attempted.push(candidate);
+            (candidate == address).then(|| RuntimeStatus {
+                pac_loaded: Some(true),
+                ..RuntimeStatus::default()
+            })
+        })
+        .expect("configured listener status");
+
+        assert_eq!(attempted, vec![unavailable_address, address]);
         assert_eq!(status.pac_loaded, Some(true));
     }
 
