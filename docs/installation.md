@@ -22,20 +22,26 @@ the macOS package for your Mac.
    files, and proxy behavior. The installer adds Unproxy to your Start menu and
    starts it when you sign in; you can change that in Settings.
 
+The tray installation does not create or use an `unproxyrc` file. Its settings
+are saved in `%LOCALAPPDATA%\Unproxy\preferences.json`; use **Settings…** in
+the tray menu to change them.
+
 To install Unproxy as a Windows service instead, run this from the extracted
 folder:
 
     .\install.ps1 -AsService
 
 Windows asks for administrator approval. The service starts at boot and runs
-without the tray app. It installs its executable under C:\Program Files\Unproxy
-and keeps its settings, PAC file, and log under C:\ProgramData\Unproxy.
-Edit unproxyrc and proxy.pac there to configure it. If the package includes
-Negotiate support, add --negotiate to unproxyrc to use Windows authentication.
+without the tray app. It installs its executable under `C:\Program Files\Unproxy`
+and keeps its settings, PAC file, and log under `C:\ProgramData\Unproxy`.
+The installer creates `C:\ProgramData\Unproxy\unproxyrc` and `proxy.pac` on
+the first service install. Edit those files there to configure the service. If
+the package includes Negotiate support, add `--negotiate` to `unproxyrc` to use
+Windows authentication.
 The service runs as NetworkService, so Negotiate uses the computer account on
 a domain. You can change the service logon account in Windows Services if your
 organization requires a different identity; grant that account Modify access
-to C:\ProgramData\Unproxy so it can read its configuration and write logs.
+to `C:\ProgramData\Unproxy` so it can read its configuration and write logs.
 
 Use PowerShell to manage the service:
 
