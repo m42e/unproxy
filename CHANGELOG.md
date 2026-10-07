@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1
+
+- Improve PAC performance with cached route directives, faster IP and glob
+  matching, and bounded resolver work.
+- Add live PAC evaluation timings and diagnostics.
+- Configure Windows proxy settings during installation and improve tray status
+  and lifecycle updates; document Windows setup and macOS proxy configuration.
+
 ## 0.3.0
 
 - Add resilient ad blocking filter lists and live diagnostics.
