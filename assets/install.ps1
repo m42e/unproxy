@@ -1,6 +1,60 @@
 param([switch]$DisableLoginStartup, [switch]$AsService)
 $ErrorActionPreference = 'Stop'
 
+function Get-ProxyPortOwners {
+    $connections = @(Get-NetTCPConnection -LocalPort 3128 -State Listen -ErrorAction SilentlyContinue)
+    $ownerIds = @($connections | Select-Object -ExpandProperty OwningProcess -Unique)
+    foreach ($ownerId in $ownerIds) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ownerId" -ErrorAction SilentlyContinue
+        if (-not $process) {
+            [pscustomobject]@{ ProcessId = $ownerId; Name = 'unknown'; Path = ''; Identity = "PID $ownerId" }
+            continue
+        }
+        $productInfo = ''
+        if ($process.ExecutablePath) {
+            try {
+                $versionInfo = (Get-Item -LiteralPath $process.ExecutablePath -ErrorAction Stop).VersionInfo
+                $productInfo = "$($versionInfo.ProductName) $($versionInfo.FileDescription)"
+            } catch { }
+        }
+        [pscustomobject]@{
+            ProcessId = $ownerId
+            Name = $process.Name
+            Path = $process.ExecutablePath
+            Identity = "$($process.Name) $($process.ExecutablePath) $productInfo"
+        }
+    }
+}
+
+function Assert-DefaultProxyPortAvailable {
+    $userProxyPath = Join-Path $env:LOCALAPPDATA 'Unproxy\bin\unproxy.exe'
+    $serviceProxyPath = Join-Path $env:ProgramFiles 'Unproxy\unproxy.exe'
+    while ($true) {
+        $owners = @(Get-ProxyPortOwners)
+        if ($owners.Count -eq 0) { return }
+
+        $proxyDetoxOwners = @($owners | Where-Object {
+            $_.Identity -match '(?i)proxy[\s._-]*detox|detox[\s._-]*proxy'
+        })
+        if ($proxyDetoxOwners.Count -gt 0) {
+            Write-Warning 'Proxy Detox is listening on port 3128. Uninstall Proxy Detox before installing Unproxy.'
+            [void](Read-Host 'After uninstalling Proxy Detox, press Enter to check port 3128 again')
+            continue
+        }
+
+        $otherOwners = @($owners | Where-Object {
+            $_.Name -ine 'unproxy.exe' -or
+            ($_.Path -ine $userProxyPath -and $_.Path -ine $serviceProxyPath)
+        })
+        if ($otherOwners.Count -eq 0) { return }
+
+        $details = ($otherOwners | ForEach-Object { "$($_.Name) (PID $($_.ProcessId))" }) -join ', '
+        throw "Port 3128 is already in use by $details. Stop that program before installing Unproxy."
+    }
+}
+
+Assert-DefaultProxyPortAvailable
+
 if ($AsService) {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -155,5 +209,47 @@ if ($preferences.autostart) {
 } else {
     Remove-ItemProperty $runKey -Name Unproxy -ErrorAction SilentlyContinue
 }
+
+$proxyHost = '127.0.0.1'
+$proxyPort = [int]$preferences.port
+if ($proxyPort -lt 1024 -or $proxyPort -gt 65534) { $proxyPort = 3128 }
+if ($preferences.listeners -and $preferences.listeners.Count -gt 0) {
+    $primaryListener = [string]$preferences.listeners[0]
+    if ($primaryListener -match '^\[(?<host>[^\]]+)\]:(?<port>\d+)$') {
+        $proxyHost = $Matches.host
+        if ($proxyHost -eq '::') { $proxyHost = '::1' }
+        $proxyHost = "[$proxyHost]"
+        $proxyPort = [int]$Matches.port
+    } elseif ($primaryListener -match '^(?<host>[^:]+):(?<port>\d+)$') {
+        $proxyHost = $Matches.host
+        if ($proxyHost -eq '0.0.0.0') { $proxyHost = '127.0.0.1' }
+        $proxyPort = [int]$Matches.port
+    }
+}
+$proxyUrl = 'http://{0}:{1}' -f $proxyHost, $proxyPort
+$proxyEnvironment = [ordered]@{
+    http_proxy = $proxyUrl
+    https_proxy = $proxyUrl
+    no_proxy = 'localhost,127.0.0.1,::1'
+}
+$environmentBackupPath = Join-Path $root 'environment-before-install.json'
+if (Test-Path -LiteralPath $environmentBackupPath) {
+    $environmentState = Get-Content $environmentBackupPath -Raw | ConvertFrom-Json
+    $previousEnvironment = $environmentState.original
+} else {
+    $previousEnvironment = [ordered]@{}
+    foreach ($name in $proxyEnvironment.Keys) {
+        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'User')
+    }
+}
+[ordered]@{
+    original = $previousEnvironment
+    installed = $proxyEnvironment
+} | ConvertTo-Json -Depth 3 | Set-Content -Encoding UTF8 $environmentBackupPath
+foreach ($name in $proxyEnvironment.Keys) {
+    [Environment]::SetEnvironmentVariable($name, $proxyEnvironment[$name], 'User')
+    Set-Item -Path ("Env:{0}" -f $name) -Value $proxyEnvironment[$name]
+}
+
 Write-Host "Installed Unproxy to $destination. User data is stored in $root."
 Start-Process (Join-Path $destination 'UnproxyTray.exe')

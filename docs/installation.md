@@ -32,6 +32,12 @@ The tray installation does not create or use an `unproxyrc` file. Its settings
 are saved in `%LOCALAPPDATA%\Unproxy\preferences.json`; use **Settings…** in
 the tray menu to change them.
 
+The per-user installer sets `http_proxy` and `https_proxy` to the configured
+listener and sets `no_proxy` to bypass localhost. It saves any previous
+per-user values and restores them on uninstall if they have not been changed
+since installation. Reopen existing terminals to pick up the new values.
+
+
 To install Unproxy as a Windows service instead, run this from the extracted
 folder:
 
@@ -44,6 +50,7 @@ The installer creates `C:\ProgramData\Unproxy\unproxyrc` and `proxy.pac` on
 the first service install. Edit those files there to configure the service. If
 the package includes Negotiate support, add `--negotiate` to `unproxyrc` to use
 Windows authentication.
+
 The service runs as NetworkService, so Negotiate uses the computer account on
 a domain. You can change the service logon account in Windows Services if your
 organization requires a different identity; grant that account Modify access
@@ -80,6 +87,23 @@ Choose **Settings…** to set listeners, ordered PAC files, optional ad blocking
 lists, and proxy behavior.
 Use **Start with Login** to control whether the app opens when you sign in. The
 menu also has actions to open the log and copy the proxy address.
+
+To use Unproxy from terminal applications, add these lines to `~/.zshrc` (the
+default shell on macOS), adjusting the address and port if your first listener
+is different:
+
+```sh
+export http_proxy=http://127.0.0.1:3128
+export https_proxy=http://127.0.0.1:3128
+export no_proxy=localhost,127.0.0.1,::1
+```
+
+Open a new Terminal window, or run `source ~/.zshrc`, for the changes to take
+effect. These variables are inherited by programs started from that shell;
+they do not configure GUI apps launched from Finder. Unproxy does not modify
+your shell profile. To stop using the proxy, remove the lines from `~/.zshrc`
+and open a new shell, or run `unset http_proxy https_proxy no_proxy` in the
+current shell.
 
 ## Debian or Ubuntu
 

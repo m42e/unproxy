@@ -33,6 +33,7 @@ if ($RemoveUserData) {
 
 $root = Join-Path $env:LOCALAPPDATA 'Unproxy'
 $destination = Join-Path $root 'bin'
+$environmentBackupPath = Join-Path $root 'environment-before-install.json'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 Remove-ItemProperty $runKey -Name Unproxy -ErrorAction SilentlyContinue
 try { $event = [Threading.EventWaitHandle]::OpenExisting('Local\UnproxyTrayExit'); $event.Set() | Out-Null; $event.Dispose() } catch { }
@@ -43,6 +44,26 @@ do { $trayRunning = Get-CimInstance Win32_Process -Filter "Name='UnproxyTray.exe
 Get-CimInstance Win32_Process -Filter "Name='UnproxyTray.exe'" | Where-Object { $_.ExecutablePath -eq $installed } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*unproxy-tray.ps1*' -and $_.CommandLine -like "*$destination*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Get-CimInstance Win32_Process -Filter "Name='unproxy.exe'" | Where-Object { $_.ExecutablePath -eq $proxy } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+if (Test-Path -LiteralPath $environmentBackupPath) {
+    try {
+        $environmentState = Get-Content $environmentBackupPath -Raw | ConvertFrom-Json
+        foreach ($name in @('http_proxy', 'https_proxy', 'no_proxy')) {
+            $currentValue = [Environment]::GetEnvironmentVariable($name, 'User')
+            $installedValue = [string]$environmentState.installed.$name
+            if ($currentValue -ceq $installedValue) {
+                $previousValue = $environmentState.original.$name
+                [Environment]::SetEnvironmentVariable($name, $previousValue, 'User')
+                if ($null -eq $previousValue) {
+                    Remove-Item -Path ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+                } else {
+                    Set-Item -Path ("Env:{0}" -f $name) -Value ([string]$previousValue)
+                }
+            }
+        }
+    } catch {
+        Write-Warning "Could not restore the original proxy environment variables: $_"
+    }
+}
 Remove-Item (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Unproxy.lnk') -Force -ErrorAction SilentlyContinue
 Remove-Item $destination -Recurse -Force -ErrorAction SilentlyContinue
 if ($RemoveUserData) { Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue }
