@@ -24,7 +24,9 @@ the macOS package for your Mac.
 
 This standard tray installation is per-user and does not require administrator
 approval. Unproxy runs in the signed-in user's session and uses that user's
-settings and Windows credentials.
+settings and Windows credentials. The executables are installed in
+`%LOCALAPPDATA%\Unproxy\bin`; settings and the default PAC file are stored in
+`%LOCALAPPDATA%\Unproxy`.
 
 The tray installation does not create or use an `unproxyrc` file. Its settings
 are saved in `%LOCALAPPDATA%\Unproxy\preferences.json`; use **Settings…** in
