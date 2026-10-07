@@ -22,6 +22,10 @@ the macOS package for your Mac.
    files, and proxy behavior. The installer adds Unproxy to your Start menu and
    starts it when you sign in; you can change that in Settings.
 
+This standard tray installation is per-user and does not require administrator
+approval. Unproxy runs in the signed-in user's session and uses that user's
+settings and Windows credentials.
+
 The tray installation does not create or use an `unproxyrc` file. Its settings
 are saved in `%LOCALAPPDATA%\Unproxy\preferences.json`; use **Settings…** in
 the tray menu to change them.
