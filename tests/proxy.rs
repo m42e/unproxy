@@ -165,6 +165,7 @@ async fn status_page_explains_upstream_authentication_negotiation() {
     );
     assert!(response.contains("Authorization token sent"), "{response}");
     assert!(response.contains("<h2>Blocked domains</h2>"), "{response}");
+    assert!(response.contains("id=\"pac-evaluation\""), "{response}");
     assert!(
         response.contains("id=\"blocked-domain-count\""),
         "{response}"
@@ -188,6 +189,7 @@ async fn status_page_explains_upstream_authentication_negotiation() {
     let status: serde_json::Value = serde_json::from_str(body).unwrap();
     assert_eq!(status["upstream_route"], serde_json::Value::Null);
     assert_eq!(status["authentication_sent"], false);
+    assert_eq!(status["pac_evaluation"]["evaluations"], 0);
     proxy.shutdown();
     proxy.wait().await;
 }
@@ -195,7 +197,7 @@ async fn status_page_explains_upstream_authentication_negotiation() {
 #[tokio::test]
 async fn resolve_endpoint_validates_urls_and_returns_policy_results() {
     let policy = Policy::new(Some(
-        "function FindProxyForURL(url, host) { return 'PROXY proxy.example:8080'; }".into(),
+        "function FindProxyForURL(url, host) { if (host === 'failure.example.test') return 1; return 'PROXY proxy.example:8080'; }".into(),
     ))
     .unwrap();
     let proxy = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
@@ -265,6 +267,24 @@ async fn resolve_endpoint_validates_urls_and_returns_policy_results() {
     assert_eq!(result["filter_list"]["host"], "sub.ads.example.test");
     assert_eq!(result["filter_list"]["blocked"], true);
     assert_eq!(result["results"][0]["routes"], "HTTP proxy.example:8080");
+    let status_response = get(addr, "/status.json").await;
+    let status_body = status_response.split_once("\r\n\r\n").unwrap().1;
+    let status: serde_json::Value = serde_json::from_str(status_body).unwrap();
+    assert_eq!(status["pac_evaluation"]["evaluations"], 1);
+    assert_eq!(status["pac_evaluation"]["errors"], 0);
+    assert!(status["pac_evaluation"]["last_ms"].as_f64().unwrap() >= 0.0);
+    let failure = get(
+        addr,
+        "/resolve.json?url=http%3A%2F%2Ffailure.example.test%2F",
+    )
+    .await;
+    assert!(failure.starts_with("HTTP/1.1 200"), "{failure}");
+    assert!(failure.contains("FindProxyForURL returned a non-string value"));
+    let status_response = get(addr, "/status.json").await;
+    let status_body = status_response.split_once("\r\n\r\n").unwrap().1;
+    let status: serde_json::Value = serde_json::from_str(status_body).unwrap();
+    assert_eq!(status["pac_evaluation"]["evaluations"], 2);
+    assert_eq!(status["pac_evaluation"]["errors"], 1);
     proxy.shutdown();
     proxy.wait().await;
 

@@ -1003,6 +1003,7 @@ async fn handle(
             "/log" => log_response(cfg.log_stream.clone()),
             "/status.json" => {
                 let status = cfg.runtime_status.snapshot();
+                let pac_evaluation = cfg.policy.evaluation_stats();
                 let pac_loaded = cfg.policy.is_loaded();
                 let blocked_domain_count = cfg
                     .filter_list
@@ -1015,6 +1016,13 @@ async fn handle(
                     serde_json::json!({
                         "pac_loaded": pac_loaded,
                         "pac_files": if pac_loaded { status.pac_files } else { Vec::new() },
+                        "pac_evaluation": {
+                            "evaluations": pac_evaluation.evaluations,
+                            "errors": pac_evaluation.errors,
+                            "last_ms": pac_evaluation.last_ms,
+                            "average_ms": pac_evaluation.average_ms,
+                            "max_ms": pac_evaluation.max_ms,
+                        },
                         "blocked_domain_count": blocked_domain_count,
                         "authentication_configured": status.authentication_configured,
                         "upstream_state": status.upstream_state,
@@ -1824,6 +1832,7 @@ fn status_html() -> String {
   <section class="grid" aria-live="polite">
     <article><h2>Proxy</h2><p>Running</p><small>This page is served by the active proxy.</small></article>
     <article><h2>PAC policy</h2><p id="pac">Loading…</p><small>Whether a PAC policy is currently loaded. Loaded PAC files:</small><ul id="pac-files" aria-label="Loaded PAC files"><li>Loading…</li></ul></article>
+    <article><h2>PAC evaluation time</h2><p id="pac-evaluation">Loading…</p><small id="pac-evaluation-details">Cumulative script timings since startup.</small></article>
     <article><h2>Blocked domains</h2><p id="blocked-domain-count">Loading…</p><small>Unique domains in the active filter lists.</small></article>
     <article><h2>Upstream</h2><p id="upstream">Loading…</p><small id="checked">Checking latest request…</small></article>
     <article><h2>Authentication negotiation</h2><p id="auth">Loading…</p><small>Negotiate creates an OS-backed token for an eligible upstream proxy. Unproxy sends the initial token with CONNECT; the token itself is never displayed.</small><ul id="negotiation-details"><li>Loading…</li></ul></article>
@@ -1846,6 +1855,19 @@ fn status_html() -> String {
         if (!response.ok) throw new Error('HTTP ' + response.status);
         const status = await response.json();
         document.querySelector('#pac').textContent = status.pac_loaded ? 'Loaded' : 'Not loaded';
+                const evaluation = status.pac_evaluation;
+                const evaluationTime = document.querySelector('#pac-evaluation');
+                const evaluationDetails = document.querySelector('#pac-evaluation-details');
+                if (evaluation && Number.isFinite(evaluation.last_ms)) {
+                    evaluationTime.textContent = evaluation.evaluations
+                        ? `Last ${evaluation.last_ms.toFixed(3)} ms; average ${evaluation.average_ms.toFixed(3)} ms; max ${evaluation.max_ms.toFixed(3)} ms`
+                        : 'No evaluations yet';
+                    evaluationDetails.textContent =
+                        `${evaluation.evaluations.toLocaleString()} script evaluations; ${evaluation.errors.toLocaleString()} errors since startup.`;
+                } else {
+                    evaluationTime.textContent = 'Unavailable';
+                    evaluationDetails.textContent = 'PAC evaluation timing statistics are unavailable.';
+                }
                 document.querySelector('#blocked-domain-count').textContent = Number.isInteger(status.blocked_domain_count)
                     ? status.blocked_domain_count.toLocaleString() : 'Unavailable';
         const pacFiles = document.querySelector('#pac-files');
@@ -1883,6 +1905,8 @@ fn status_html() -> String {
           'Authentication is disabled');
       } catch (_) {
         document.querySelector('#pac').textContent = 'Unavailable';
+                document.querySelector('#pac-evaluation').textContent = 'Unavailable';
+                document.querySelector('#pac-evaluation-details').textContent = 'Could not read status.json';
             document.querySelector('#blocked-domain-count').textContent = 'Unavailable';
         document.querySelector('#pac-files').replaceChildren();
         document.querySelector('#upstream').textContent = 'Status unavailable';

@@ -26,6 +26,46 @@ const MAX_PAC_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
 const DNS_RESOLVE_BUDGET: usize = 4;
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_millis(100);
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PacEvaluationStats {
+    pub evaluations: u64,
+    pub errors: u64,
+    pub last_ms: f64,
+    pub average_ms: f64,
+    pub max_ms: f64,
+}
+
+#[derive(Default)]
+struct PacEvaluationAccumulator {
+    evaluations: u64,
+    errors: u64,
+    total: Duration,
+    last: Duration,
+    max: Duration,
+}
+impl PacEvaluationAccumulator {
+    fn record(&mut self, duration: Duration, failed: bool) {
+        self.evaluations = self.evaluations.saturating_add(1);
+        self.errors = self.errors.saturating_add(u64::from(failed));
+        self.total = self.total.saturating_add(duration);
+        self.last = duration;
+        self.max = self.max.max(duration);
+    }
+    fn snapshot(&self) -> PacEvaluationStats {
+        PacEvaluationStats {
+            evaluations: self.evaluations,
+            errors: self.errors,
+            last_ms: self.last.as_secs_f64() * 1000.0,
+            average_ms: if self.evaluations == 0 {
+                0.0
+            } else {
+                self.total.as_secs_f64() * 1000.0 / self.evaluations as f64
+            },
+            max_ms: self.max.as_secs_f64() * 1000.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CacheEntry {
     value: Option<IpAddr>,
@@ -333,6 +373,7 @@ enum Job {
 pub struct Policy {
     tx: tokio::sync::mpsc::Sender<Job>,
     loaded: Arc<AtomicBool>,
+    evaluation_stats: Arc<Mutex<PacEvaluationAccumulator>>,
 }
 impl Policy {
     pub fn new(source: Option<String>) -> Result<Self> {
@@ -345,6 +386,8 @@ impl Policy {
         let (tx, mut rx) = tokio::sync::mpsc::channel(PAC_QUEUE_CAPACITY);
         let loaded = Arc::new(AtomicBool::new(!scripts.is_empty()));
         let worker_loaded = loaded.clone();
+        let evaluation_stats = Arc::new(Mutex::new(PacEvaluationAccumulator::default()));
+        let worker_evaluation_stats = evaluation_stats.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("pac-policy".into())
@@ -375,7 +418,13 @@ impl Policy {
                             let result = if strict && !worker_loaded.load(Ordering::Acquire) {
                                 Err(anyhow!("routing policy is unavailable"))
                             } else {
-                                evaluate_scripts_bounded(&mut pacs, &u, &h, &runtime)
+                                evaluate_scripts_bounded(
+                                    &mut pacs,
+                                    &u,
+                                    &h,
+                                    &runtime,
+                                    &worker_evaluation_stats,
+                                )
                             };
                             let _ = r.send(result);
                         }
@@ -383,9 +432,14 @@ impl Policy {
                             let results = pacs
                                 .iter_mut()
                                 .map(|pac| {
-                                    runtime
-                                        .block_on(pac.evaluate_bounded(&u, &h))
-                                        .map_err(|e| format!("{e:#}"))
+                                    evaluate_pac_bounded(
+                                        pac,
+                                        &u,
+                                        &h,
+                                        &runtime,
+                                        &worker_evaluation_stats,
+                                    )
+                                    .map_err(|e| format!("{e:#}"))
                                 })
                                 .collect();
                             let _ = r.send(results);
@@ -430,7 +484,11 @@ impl Policy {
             .recv()
             .map_err(|_| anyhow!("PAC worker failed to start"))?
             .map_err(|e| anyhow!(e))?;
-        Ok(Self { tx, loaded })
+        Ok(Self {
+            tx,
+            loaded,
+            evaluation_stats,
+        })
     }
     pub async fn evaluate(&self, url: String, host: String) -> Result<Routes> {
         self.evaluate_with_policy(url, host, false).await
@@ -468,6 +526,12 @@ impl Policy {
     }
     pub fn is_loaded(&self) -> bool {
         self.loaded.load(Ordering::Acquire)
+    }
+    pub fn evaluation_stats(&self) -> PacEvaluationStats {
+        self.evaluation_stats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot()
     }
     pub fn mark_unloaded(&self) {
         self.loaded.store(false, Ordering::Release);
@@ -507,14 +571,37 @@ fn evaluate_scripts_bounded(
     url: &str,
     host: &str,
     runtime: &tokio::runtime::Runtime,
+    evaluation_stats: &Mutex<PacEvaluationAccumulator>,
 ) -> Result<Routes> {
     for pac in pacs {
-        let routes = runtime.block_on(pac.evaluate_bounded(url, host))?;
+        let routes = evaluate_pac_bounded(pac, url, host, runtime, evaluation_stats)?;
         if routes.0.iter().any(|route| !matches!(route, Route::Direct)) {
             return Ok(routes);
         }
     }
     Ok("DIRECT".parse().expect("DIRECT is valid"))
+}
+
+fn evaluate_pac_bounded(
+    pac: &mut Pac,
+    url: &str,
+    host: &str,
+    runtime: &tokio::runtime::Runtime,
+    evaluation_stats: &Mutex<PacEvaluationAccumulator>,
+) -> Result<Routes> {
+    let started = Instant::now();
+    let result = runtime.block_on(pac.evaluate_bounded(url, host));
+    let duration = started.elapsed();
+    evaluation_stats
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .record(duration, result.is_err());
+    tracing::debug!(
+        duration_ms = duration.as_secs_f64() * 1000.0,
+        success = result.is_ok(),
+        "PAC evaluation completed"
+    );
+    result
 }
 
 fn eval_script_sync(source: &str, context: &mut Context) -> Result<JsValue> {
@@ -846,6 +933,9 @@ mod tests {
         let closed = Policy {
             tx,
             loaded: Arc::new(AtomicBool::new(false)),
+            evaluation_stats: Arc::new(std::sync::Mutex::new(
+                super::PacEvaluationAccumulator::default(),
+            )),
         };
         assert!(
             closed
