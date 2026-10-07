@@ -22,6 +22,11 @@ the macOS package for your Mac.
    files, and proxy behavior. The installer adds Unproxy to your Start menu and
    starts it when you sign in; you can change that in Settings.
 
+The per-user installer sets `http_proxy` and `https_proxy` to the configured
+listener and sets `no_proxy` to bypass localhost. It saves any previous
+per-user values and restores them on uninstall if they have not been changed
+since installation. Reopen existing terminals to pick up the new values.
+
 To install Unproxy as a Windows service instead, run this from the extracted
 folder:
 
@@ -30,6 +35,7 @@ folder:
 Windows asks for administrator approval. The service starts at boot and runs
 without the tray app. It installs its executable under C:\Program Files\Unproxy
 and keeps its settings, PAC file, and log under C:\ProgramData\Unproxy.
+Service mode does not set per-user proxy environment variables.
 Edit unproxyrc and proxy.pac there to configure it. If the package includes
 Negotiate support, add --negotiate to unproxyrc to use Windows authentication.
 The service runs as NetworkService, so Negotiate uses the computer account on

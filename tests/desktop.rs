@@ -99,6 +99,30 @@ fn windows_settings_save_closure_uses_captured_preferences() {
 }
 
 #[test]
+fn windows_installer_checks_port_and_manages_user_proxy_environment() {
+    let installer = include_str!("../assets/install.ps1").replace("\r\n", "\n");
+    let port_check = installer
+        .find("\nAssert-DefaultProxyPortAvailable\n")
+        .expect("installer port check");
+    let first_install_change = installer
+        .find("New-Item -ItemType Directory")
+        .expect("installer file changes");
+    assert!(port_check < first_install_change);
+    assert!(installer.contains("Get-NetTCPConnection -LocalPort 3128 -State Listen"));
+    assert!(installer.contains("proxy[\\s._-]*detox|detox[\\s._-]*proxy"));
+    assert!(installer.contains("After uninstalling Proxy Detox, press Enter"));
+    assert!(installer.contains("http_proxy = $proxyUrl"));
+    assert!(installer.contains("https_proxy = $proxyUrl"));
+    assert!(installer.contains("no_proxy = 'localhost,127.0.0.1,::1'"));
+    assert!(installer.contains("SetEnvironmentVariable($name, $proxyEnvironment[$name], 'User')"));
+
+    let uninstaller = include_str!("../assets/uninstall.ps1").replace("\r\n", "\n");
+    assert!(uninstaller.contains("environment-before-install.json"));
+    assert!(uninstaller.contains("$currentValue -ceq $installedValue"));
+    assert!(uninstaller.contains("SetEnvironmentVariable($name, $previousValue, 'User')"));
+}
+
+#[test]
 fn primary_listener_uses_the_first_configured_listener_or_loopback_default() {
     assert_eq!(Preferences::default().primary_listener(), "127.0.0.1:3128");
 

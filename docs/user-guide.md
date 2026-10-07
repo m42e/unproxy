@@ -54,6 +54,11 @@ $env:https_proxy = 'http://127.0.0.1:3128'
 $env:no_proxy = 'localhost,127.0.0.1,::1'
 ```
 
+The Windows per-user installer also persists these variables for the installing
+account. Reopen existing terminals so they inherit the updated environment. On
+uninstall, Unproxy restores the previous values unless you changed them after
+installation.
+
 To undo these settings in that terminal, run:
 
 ```sh
