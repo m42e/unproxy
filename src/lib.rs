@@ -14,6 +14,7 @@ pub mod platform;
 pub mod proxy;
 pub mod route;
 pub mod runtime;
+pub mod shell_setup;
 mod socks;
 pub mod tools;
 pub const VERSION: &str = env!("PRODUCT_VERSION");

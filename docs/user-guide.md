@@ -37,22 +37,31 @@ In the application's proxy settings, choose manual proxy and enter:
 If the application has one proxy address and one port, use `127.0.0.1:3128`.
 Applications that support IPv6 loopback can use `[::1]:3128` instead.
 Leave local addresses out of the proxy with the application's bypass list. For
-terminal programs, set these variables in the same terminal before launching the
-program:
+terminal programs, generate the proxy variables and shell completion for the
+current shell:
 
 ```sh
-export http_proxy=http://127.0.0.1:3128
-export https_proxy=http://127.0.0.1:3128
-export no_proxy=localhost,127.0.0.1,::1
+# bash
+source <(unproxy shell-setup bash)
+
+# zsh
+source <(unproxy shell-setup zsh)
+
+# fish
+unproxy shell-setup fish | source
 ```
 
-In Windows PowerShell, use:
+In PowerShell, use:
 
 ```powershell
-$env:http_proxy = 'http://127.0.0.1:3128'
-$env:https_proxy = 'http://127.0.0.1:3128'
-$env:no_proxy = 'localhost,127.0.0.1,::1'
+Invoke-Expression (unproxy shell-setup powershell | Out-String)
 ```
+
+The generated proxy address uses the first listener in Unproxy's settings file,
+or `127.0.0.1:3128` when no listener is configured. For Windows Command
+Prompt, run `for /f "delims=" %i in ('unproxy shell-setup cmd') do @%i` to set
+proxy variables in the current window. Command Prompt has no native argument
+completion support.
 
 The Windows per-user installer also persists these variables for the installing
 account. Reopen existing terminals so they inherit the updated environment. On

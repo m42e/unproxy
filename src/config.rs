@@ -117,7 +117,7 @@ pub fn netrc_default() -> Option<PathBuf> {
     name = "unproxy",
     version = crate::VERSION,
     about = "Local HTTP proxy with PAC based routing and corporate authentication",
-    long_about = "Run a local HTTP proxy that routes requests through upstream proxies according to PAC scripts. By default it listens on 127.0.0.1:3128 and [::1]:3128. Options from the unproxy settings file are loaded first; command-line options take precedence. Set UNPROXY_NORC=1 to ignore the settings file. Use paceval to inspect PAC routing and unproxyctl to control the system service.",
+    long_about = "Run a local HTTP proxy that routes requests through upstream proxies according to PAC scripts. By default it listens on 127.0.0.1:3128 and [::1]:3128. Options from the unproxy settings file are loaded first; command-line options take precedence. Set UNPROXY_NORC=1 to ignore the settings file. Use `unproxy shell-setup <bash|zsh|fish|powershell|cmd>` to print shell proxy variables and completion setup. Use paceval to inspect PAC routing and unproxyctl to control the system service.",
     args_override_self = true
 )]
 pub struct MainArgs {
