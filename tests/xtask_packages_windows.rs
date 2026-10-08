@@ -5,6 +5,59 @@ use std::{
     process::{Command, Output},
 };
 
+#[test]
+fn windows_installation_instructions_unblock_downloaded_package_scripts() {
+    let guide = include_str!("../docs/installation.md");
+    let commands = guide
+        .split_once("```powershell")
+        .unwrap()
+        .1
+        .split_once("```")
+        .unwrap()
+        .0;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("nested")).unwrap();
+    let scripts = ["install.ps1", "unproxy-tray.ps1", "nested/helper.ps1"];
+    for script in scripts {
+        std::fs::write(
+            root.path().join(script),
+            "Write-Output 'fixture installer ran'",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join(format!("{script}:Zone.Identifier")),
+            "[ZoneTransfer]\r\nZoneId=3\r\n",
+        )
+        .unwrap();
+    }
+
+    let output = Command::new("powershell.exe")
+        .current_dir(root.path())
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "RemoteSigned",
+            "-Command",
+            commands,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("fixture installer ran"));
+    for script in scripts {
+        assert!(
+            std::fs::read(root.path().join(format!("{script}:Zone.Identifier"))).is_err(),
+            "{script} still has its Internet-zone marker"
+        );
+    }
+}
+
 fn package_version() -> &'static str {
     unproxy::VERSION.split('+').next().unwrap()
 }
