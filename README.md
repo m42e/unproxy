@@ -8,8 +8,34 @@ local proxy running on your computer.
 Download the package for your operating system from the project's Releases
 page, then follow [the installation steps](docs/installation.md).
 
-On Windows, the install script also supports service installation with
-install.ps1 -AsService.
+### Windows
+
+Extract the Windows ZIP. After verifying that it came from the project's
+Releases page, open PowerShell in the extracted folder and run:
+
+```powershell
+Get-ChildItem -File -Recurse | Unblock-File
+.\install.ps1
+```
+
+`Unblock-File` removes the Internet-zone markers from the trusted package
+files, including the installer and tray scripts. Under `RemoteSigned`, these
+markers prevent unsigned downloaded scripts from running. Unblocking does not
+change your execution policy. The standard tray installation is per-user and
+does not require administrator approval.
+
+If PowerShell reports that running scripts is disabled and your organization
+does not enforce an execution policy, run
+`Set-ExecutionPolicy -Scope Process RemoteSigned` in the same terminal, then
+retry `.\install.ps1`. This change lasts only for that PowerShell session.
+Check policies with `Get-ExecutionPolicy -List`: `MachinePolicy` and
+`UserPolicy` take precedence over process settings, so `Bypass` cannot
+override them. If either enforces `AllSigned` or `Restricted`, contact your IT
+administrator for an approved installation method; unblocking does not
+satisfy those policies.
+
+For a Windows service instead of the tray app, run `.\install.ps1 -AsService`
+after unblocking the package. This installation requires administrator approval.
 
 ## Use it
 

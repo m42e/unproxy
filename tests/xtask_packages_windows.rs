@@ -7,7 +7,17 @@ use std::{
 
 #[test]
 fn windows_installation_instructions_unblock_downloaded_package_scripts() {
-    let guide = include_str!("../docs/installation.md");
+    assert_installation_instructions_unblock_downloaded_scripts(include_str!(
+        "../docs/installation.md"
+    ));
+}
+
+#[test]
+fn windows_readme_instructions_unblock_downloaded_package_scripts() {
+    assert_installation_instructions_unblock_downloaded_scripts(include_str!("../README.md"));
+}
+
+fn assert_installation_instructions_unblock_downloaded_scripts(guide: &str) {
     let commands = guide
         .split_once("```powershell")
         .unwrap()
@@ -240,7 +250,8 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
         b"fixture tray png",
     )
     .unwrap();
-    std::fs::write(root.join("README.md"), "fixture README").unwrap();
+    let readme = include_str!("../README.md");
+    std::fs::write(root.join("README.md"), readme).unwrap();
     std::fs::write(
         assets.join("proxy.pac"),
         "function FindProxyForURL(){return 'DIRECT';}",
@@ -301,10 +312,23 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
         std::fs::read(extracted.join("tray-icons/stopped-unloaded-unknown-disabled.png")).unwrap(),
         b"fixture tray png"
     );
-    assert_eq!(
-        std::fs::read_to_string(extracted.join("README.md")).unwrap(),
-        "fixture README"
-    );
+    let packaged_readme = std::fs::read_to_string(extracted.join("README.md")).unwrap();
+    assert_eq!(packaged_readme, readme);
+    for guidance in [
+        "Get-ChildItem -File -Recurse | Unblock-File",
+        ".\\install.ps1",
+        "RemoteSigned",
+        "Get-ExecutionPolicy -List",
+        "MachinePolicy",
+        "UserPolicy",
+        "AllSigned",
+        "Restricted",
+    ] {
+        assert!(
+            packaged_readme.contains(guidance),
+            "packaged README is missing installation guidance: {guidance}"
+        );
+    }
     assert_eq!(
         std::fs::read_to_string(extracted.join("proxy.pac.sample")).unwrap(),
         "function FindProxyForURL(){return 'DIRECT';}"
