@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+
+- Add the Unproxy icon to the macOS app bundle and documentation.
+- Publish the documentation site through GitHub Pages.
+
 ## 0.4.0
 
 - Add `unproxy doctor` diagnostics for PAC routes, upstream connectivity,
