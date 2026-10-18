@@ -7,8 +7,8 @@
 - Add `unproxy shell-setup` to generate proxy environment settings and shell
   completions for Bash, Zsh, Fish, PowerShell, and Command Prompt.
 - Expand installation, configuration, routing, authentication, desktop, and
-  troubleshooting guides with platform-specific instructions and status page
-  access.
+  troubleshooting guides with platform-specific instructions, status page
+  access, and tabbed removal steps.
 
 ## 0.3.1
 

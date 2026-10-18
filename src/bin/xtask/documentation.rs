@@ -78,33 +78,70 @@ fn render(source: &str) -> (String, String) {
     (body, toc)
 }
 
-fn platform_tabs(body: &str, prefix: &str, purpose: &str) -> String {
-    let platforms = [
-        ("windows", "Windows"),
-        ("macos", "macOS"),
-        ("debian-or-ubuntu", "Linux"),
-    ];
+fn platform_tab_group(
+    body: &str,
+    prefix: &str,
+    purpose: &str,
+    heading_level: u8,
+    platforms: &[(&str, &str, &str)],
+) -> String {
     let mut output = String::new();
     let mut remainder = body;
-    for (index, (id, label)) in platforms.iter().enumerate() {
-        let heading = format!("<h2 id=\"{id}\">");
+    for (index, (heading_id, id, label)) in platforms.iter().enumerate() {
+        let heading = format!("<h{heading_level} id=\"{heading_id}\">");
         let (before, section) = remainder.split_once(&heading).expect("platform heading");
         output.push_str(before);
         if index == 0 {
             output.push_str(
                 "<div class=platform-tabs role=tablist aria-label=\"Operating system\" hidden>",
             );
-            for (key, name) in platforms {
-                output.push_str(&format!("<button type=button role=tab id=\"tab-{key}\" aria-controls=\"{prefix}-{key}\" aria-selected=false tabindex=-1>{name}</button>"));
+            for (_, key, name) in platforms {
+                output.push_str(&format!("<button type=button role=tab id=\"tab-{prefix}-{key}\" aria-controls=\"{prefix}-{key}\" aria-selected=false tabindex=-1>{name}</button>"));
             }
             output.push_str("</div>");
         }
-        let end = section.find("<h2 ").unwrap_or(section.len());
+        let next_heading = format!("<h{heading_level} ");
+        let end = section.find(&next_heading).unwrap_or(section.len());
         output.push_str(&format!("<section class=platform-panel id=\"{prefix}-{id}\" data-platform=\"{id}\" aria-label=\"{label} {purpose}\">{heading}{}</section>", &section[..end]));
         remainder = &section[end..];
     }
     output.push_str(remainder);
     output
+}
+
+fn platform_tabs(body: &str, prefix: &str, purpose: &str) -> String {
+    platform_tab_group(
+        body,
+        prefix,
+        purpose,
+        2,
+        &[
+            ("windows", "windows", "Windows"),
+            ("macos", "macos", "macOS"),
+            ("debian-or-ubuntu", "debian-or-ubuntu", "Linux"),
+        ],
+    )
+}
+
+fn platform_tabs_in_section(body: &str, section_id: &str, prefix: &str, purpose: &str) -> String {
+    let heading = format!("<h2 id=\"{section_id}\">");
+    let (before, section) = body.split_once(&heading).expect("platform section heading");
+    let (title, section) = section.split_once("</h2>").expect("platform section title");
+    let end = section.find("<h2 ").unwrap_or(section.len());
+    let section_body = &section[..end];
+    let remainder = &section[end..];
+    let section_body = platform_tab_group(
+        section_body,
+        prefix,
+        purpose,
+        3,
+        &[
+            ("windows-removal", "windows", "Windows"),
+            ("macos-removal", "macos", "macOS"),
+            ("debian-ubuntu-removal", "debian-or-ubuntu", "Linux"),
+        ],
+    );
+    format!("{before}{heading}{title}</h2>{section_body}{remainder}")
 }
 
 pub(super) fn generate(output: &Path) -> Result<()> {
@@ -174,7 +211,12 @@ pub(super) fn generate(output: &Path) -> Result<()> {
         }
         let (body, toc) = render(&std::fs::read_to_string(path)?);
         let body = match name.as_ref() {
-            "installation" => platform_tabs(&body, "install", "installation"),
+            "installation" => platform_tabs_in_section(
+                &platform_tabs(&body, "install", "installation"),
+                "remove-unproxy",
+                "remove",
+                "removal",
+            ),
             "troubleshooting" => platform_tabs(&body, "troubleshoot", "troubleshooting"),
             _ => body,
         };

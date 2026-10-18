@@ -23,13 +23,13 @@ if (navigator.clipboard && window.isSecureContext) {
 }
 
 // All platform instructions are readable until this enhancement is initialized.
-const platformTabs = document.querySelector('.platform-tabs');
-if (platformTabs) {
+document.querySelectorAll('.platform-tabs').forEach(platformTabs => {
   const buttons = [...platformTabs.querySelectorAll('[role=tab]')];
-  const panels = [...document.querySelectorAll('.platform-panel')];
+  const panels = buttons.map(button => document.getElementById(button.getAttribute('aria-controls')));
   function selectPlatform(id, focus = false) {
     buttons.forEach(button => {
-      const selected = button.id === `tab-${id}`;
+      const panel = document.getElementById(button.getAttribute('aria-controls'));
+      const selected = panel.dataset.platform === id;
       button.setAttribute('aria-selected', String(selected));
       button.tabIndex = selected ? 0 : -1;
       if (selected && focus) button.focus();
@@ -39,7 +39,7 @@ if (platformTabs) {
     document.querySelectorAll('.toc a[href^="#"]').forEach(link => {
       const target = document.getElementById(link.hash.slice(1));
       const panel = target?.closest('.platform-panel');
-      link.hidden = Boolean(panel?.hidden);
+      if (panels.includes(panel)) link.hidden = Boolean(panel.hidden);
     });
   }
   function platformForHash() {
@@ -48,9 +48,10 @@ if (platformTabs) {
         ?.closest('.platform-panel')?.dataset.platform;
     } catch { return undefined; }
   }
-  panels.forEach(panel => {
+  buttons.forEach((button, index) => {
+    const panel = panels[index];
     panel.setAttribute('role', 'tabpanel');
-    panel.setAttribute('aria-labelledby', `tab-${panel.dataset.platform}`);
+    panel.setAttribute('aria-labelledby', button.id);
   });
   const system = `${navigator.platform} ${navigator.userAgent}`;
   const detected = /Windows|Win32|Win64/i.test(system) ? 'windows'
@@ -76,9 +77,10 @@ if (platformTabs) {
     const id = platformForHash();
     if (id) {
       selectPlatform(id);
-      document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
+      const target = document.getElementById(decodeURIComponent(location.hash.slice(1)));
+      if (panels.includes(target?.closest('.platform-panel'))) target?.scrollIntoView();
     }
   }
   window.addEventListener('hashchange', revealHash);
   revealHash();
-}
+});

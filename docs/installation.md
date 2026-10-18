@@ -70,16 +70,6 @@ Use PowerShell to manage the service:
 The service starts automatically at boot. Use the enable and disable commands
 to change that setting.
 
-### Uninstall Windows
-
-To remove Unproxy, open the extracted ZIP folder in PowerShell and run:
-
-```powershell
-.\uninstall.ps1
-```
-
-Add `-RemoveUserData` to also delete Unproxy preferences and logs.
-
 ## macOS
 
 1. Download the macOS app installer (`*-app.pkg`) and open it.
@@ -172,14 +162,30 @@ only, so an existing user's choices are preserved when the app is updated.
 
 ## Remove Unproxy
 
-On Windows, the RemoveUserData option also removes service configuration, PAC
-files, and logs.
+### Windows removal
 
-- **Windows:** Run `uninstall.ps1` from the extracted Windows ZIP. Add
-  `-RemoveUserData` if you also want to delete preferences and logs.
-- **macOS:** For the menu bar app, turn off **Start with Login**, quit Unproxy,
-  then move it from Applications to the Trash.
-- **Debian/Ubuntu:** Run `sudo apt remove unproxy`.
+On Windows, the `-RemoveUserData` option also removes service configuration,
+PAC files, and logs.
+
+Run `uninstall.ps1` from the extracted Windows ZIP. Add `-RemoveUserData` if
+you also want to delete preferences and logs.
+
+```powershell
+.\uninstall.ps1
+```
+
+### macOS removal
+
+For the menu bar app, turn off **Start with Login**, quit Unproxy, then move it
+from Applications to the Trash.
+
+### Debian/Ubuntu removal
+
+Run:
+
+```sh
+sudo apt remove unproxy
+```
 
 ## Next step
 

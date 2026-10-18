@@ -191,11 +191,51 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
     }
     let install = std::fs::read_to_string(output_dir.join("docs/installation.html")).unwrap();
     assert!(install.contains("role=tablist"));
+    assert_eq!(install.matches("role=tablist").count(), 2);
     for platform in ["windows", "macos", "debian-or-ubuntu"] {
         assert!(install.contains(&format!("aria-controls=\"install-{platform}\"")));
         assert!(install.contains(&format!("data-platform=\"{platform}\"")));
     }
     assert!(install.contains("id=\"windows-service\""));
+    assert!(install.contains("href=\"#remove-unproxy\""));
+    let removal = install.split_once("<h2 id=\"remove-unproxy\">").unwrap().1;
+    for (platform, required) in [
+        (
+            "windows",
+            vec![
+                "uninstall.ps1",
+                "RemoveUserData",
+                "service configuration",
+                "PAC",
+                "preferences",
+            ],
+        ),
+        (
+            "macos",
+            vec!["Start with Login", "quit Unproxy", "Applications", "Trash"],
+        ),
+        ("debian-or-ubuntu", vec!["apt remove unproxy"]),
+    ] {
+        assert!(removal.contains(&format!("aria-controls=\"remove-{platform}\"")));
+        let start = format!("<section class=platform-panel id=\"remove-{platform}\"");
+        let panel = removal
+            .split_once(&start)
+            .unwrap()
+            .1
+            .split_once("</section>")
+            .unwrap()
+            .0;
+        for text in required {
+            assert!(
+                panel.contains(text),
+                "{platform} removal instructions lack {text}"
+            );
+        }
+        assert!(
+            !panel.contains(" hidden"),
+            "removal instructions must be available without JavaScript"
+        );
+    }
     let troubleshooting =
         std::fs::read_to_string(output_dir.join("docs/troubleshooting.html")).unwrap();
     assert!(troubleshooting.contains("role=tablist"));
