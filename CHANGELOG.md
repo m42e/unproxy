@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Add `unproxy doctor` diagnostics for PAC routes, upstream connectivity,
+  credential readiness, filter lists, and live runtime status.
+- Add `unproxy shell-setup` to generate proxy environment settings and shell
+  completions for Bash, Zsh, Fish, PowerShell, and Command Prompt.
+- Expand installation, configuration, routing, authentication, desktop, and
+  troubleshooting guides with platform-specific instructions and status page
+  access.
+
 ## 0.3.1
 
 - Improve PAC performance with cached route directives, faster IP and glob
