@@ -157,6 +157,22 @@ paceval /path/to/company.pac https://example.com/
 Use the path to your `paceval` program if it is not on your PATH. If your
 administrator supplied an HTTPS PAC URL, pass that URL to `paceval` too.
 
+Run the built-in health check to inspect the settings Unproxy would use, load
+and evaluate PAC sources, test the selected route's TCP reachability, and read
+the state reported by a running instance:
+
+```sh
+unproxy doctor
+unproxy doctor --url https://intranet.example.org/
+unproxy doctor --json
+```
+
+You can repeat `--url` to inspect several destinations. The command checks
+whether local credentials can produce an authorization token without printing
+or sending it. It reports whether a running instance has recently seen an
+upstream success or authentication rejection; confirming a new upstream
+exchange still requires normal proxy traffic.
+
 ## Use a SOCKS upstream proxy
 
 PAC scripts can return `SOCKS5 proxy.example.org:1080` or

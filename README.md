@@ -23,6 +23,10 @@ install.ps1 -AsService.
 See [Use Unproxy](docs/user-guide.md) for copyable setup steps, credentials, and
 troubleshooting.
 
+To inspect the active configuration, PAC routes, listener, and authentication
+readiness, run `unproxy doctor`. Add `--url https://example.com/` to check
+host-specific routing, or `--json` for a machine-readable report.
+
 ## Limitations
 
 - Unproxy does not enforce a process memory limit. Memory use depends on traffic

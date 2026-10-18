@@ -15,14 +15,29 @@ fn run_shell_setup(args: Vec<OsString>) -> Result<()> {
     unproxy::shell_setup::run(args)
 }
 
+async fn run_cli() -> Result<bool> {
+    let cli = unproxy::config::parse_cli()?;
+    match cli.command {
+        None => {
+            unproxy::runtime::run(cli.server).await?;
+            Ok(true)
+        }
+        Some(unproxy::config::CliCommand::Doctor(args)) => {
+            unproxy::doctor::run(cli.server, args).await
+        }
+    }
+}
+
 #[cfg(not(windows))]
 #[tokio::main]
 async fn main() -> Result<()> {
     if let Some(args) = shell_setup_args() {
         return run_shell_setup(args);
     }
-    let args = unproxy::config::parse_main()?;
-    unproxy::runtime::run(args).await
+    if !run_cli().await? {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -34,12 +49,18 @@ fn main() -> Result<()> {
         return Ok(());
     }
     #[cfg(windows)]
-    if std::env::args_os().any(|x| x == "--attach-console") {
+    if std::env
+        .args_os()
+        .any(|arg| arg == "--attach-console" || arg == "doctor")
+    {
         unproxy::platform::attach_console()?;
     }
-    let args = unproxy::config::parse_main()?;
-    tokio::runtime::Builder::new_multi_thread()
+    let success = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(unproxy::runtime::run(args))
+        .block_on(run_cli())?;
+    if !success {
+        std::process::exit(1);
+    }
+    Ok(())
 }
