@@ -49,10 +49,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     #[cfg(windows)]
-    if std::env
-        .args_os()
-        .any(|arg| arg == "--attach-console" || arg == "doctor")
-    {
+    if std::env::args_os().any(|arg| arg == "--attach-console" || arg == "doctor") {
         unproxy::platform::attach_console()?;
     }
     let success = tokio::runtime::Builder::new_multi_thread()
