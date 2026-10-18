@@ -25,6 +25,7 @@ use windows_sys::Win32::{
 };
 
 const MENU_PROXY: &str = "proxy";
+const MENU_OPEN_STATUS: &str = "open-status";
 const MENU_OPEN_LOG: &str = "open-log";
 const MENU_COPY_ADDRESS: &str = "copy-address";
 const MENU_SETTINGS: &str = "settings";
@@ -95,8 +96,15 @@ pub(super) fn run() -> Result<()> {
         show_error("Could not start Unproxy", &format!("{error:#}"));
     }
 
-    let (menu, proxy_item, open_log_item, copy_address_item, settings_item, quit_item) =
-        build_menu()?;
+    let (
+        menu,
+        proxy_item,
+        open_status_item,
+        open_log_item,
+        copy_address_item,
+        settings_item,
+        quit_item,
+    ) = build_menu()?;
     let initial_running = child.is_running();
     let initial_status = read_runtime_status(&preferences);
     let initial_icon_key = icon_key(
@@ -148,6 +156,8 @@ pub(super) fn run() -> Result<()> {
             }
             let result = if event_id == controller.proxy_item.id() {
                 controller.toggle_proxy()
+            } else if event_id == open_status_item.id() {
+                open_status_page(&controller.preferences)
             } else if event_id == open_log_item.id() {
                 open_log()
             } else if event_id == copy_address_item.id() {
@@ -282,9 +292,18 @@ impl Controller {
     }
 }
 
-fn build_menu() -> Result<(Menu, MenuItem, MenuItem, MenuItem, MenuItem, MenuItem)> {
+fn build_menu() -> Result<(
+    Menu,
+    MenuItem,
+    MenuItem,
+    MenuItem,
+    MenuItem,
+    MenuItem,
+    MenuItem,
+)> {
     let menu = Menu::new();
     let proxy = MenuItem::with_id(MENU_PROXY, "Proxy: Starting...", true, None);
+    let open_status = MenuItem::with_id(MENU_OPEN_STATUS, "Open Status Page", true, None);
     let open_log = MenuItem::with_id(MENU_OPEN_LOG, "Open Log", true, None);
     let copy_address = MenuItem::with_id(MENU_COPY_ADDRESS, "Copy Proxy Address", true, None);
     let settings = MenuItem::with_id(MENU_SETTINGS, "Settings...", true, None);
@@ -292,6 +311,8 @@ fn build_menu() -> Result<(Menu, MenuItem, MenuItem, MenuItem, MenuItem, MenuIte
     let separator = PredefinedMenuItem::separator();
 
     menu.append(&proxy).context("add proxy menu item")?;
+    menu.append(&open_status)
+        .context("add status-page menu item")?;
     menu.append(&open_log).context("add log menu item")?;
     menu.append(&copy_address)
         .context("add copy-address menu item")?;
@@ -299,7 +320,15 @@ fn build_menu() -> Result<(Menu, MenuItem, MenuItem, MenuItem, MenuItem, MenuIte
     menu.append(&settings).context("add settings menu item")?;
     menu.append(&separator).context("add menu separator")?;
     menu.append(&quit).context("add quit menu item")?;
-    Ok((menu, proxy, open_log, copy_address, settings, quit))
+    Ok((
+        menu,
+        proxy,
+        open_status,
+        open_log,
+        copy_address,
+        settings,
+        quit,
+    ))
 }
 
 fn child_restart_required(current: &Preferences, updated: &Preferences) -> bool {
@@ -543,6 +572,32 @@ fn proxy_menu_text(running: bool, failed: bool) -> &'static str {
     }
 }
 
+fn open_status_page(preferences: &Preferences) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    let url = preferences.status_url()?;
+    let wide_url = std::ffi::OsStr::new(&url)
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // ShellExecute opens the URL through the user's default browser association.
+    let result = unsafe {
+        windows_sys::Win32::UI::Shell::ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            wide_url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        )
+    };
+    ensure!(
+        result as isize > 32,
+        "could not open the status page (ShellExecute error {})",
+        result as isize
+    );
+    Ok(())
+}
+
 fn open_log() -> Result<()> {
     Command::new("notepad.exe")
         .arg(log_path())
@@ -607,6 +662,13 @@ pub(super) fn show_startup_error(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_exposes_the_status_page_action() {
+        let (_, _, status, _, _, _, _) = build_menu().unwrap();
+        assert_eq!(status.id().0, MENU_OPEN_STATUS);
+        assert_eq!(status.text(), "Open Status Page");
+    }
 
     #[test]
     fn runtime_status_uses_configured_listeners() {

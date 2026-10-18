@@ -5,8 +5,8 @@ local proxy running on your computer.
 
 ## Install
 
-Download the package for your operating system from the project's Releases
-page, then follow [the installation steps](docs/installation.md).
+Download the package for your operating system from [GitHub
+Releases](https://github.com/m42e/unproxy/releases), then follow [the installation steps](docs/installation.md).
 
 On Windows, the install script also supports service installation with
 install.ps1 -AsService.
@@ -20,8 +20,23 @@ install.ps1 -AsService.
 3. If your organization gave you a PAC file, select it in the desktop app or
    start Unproxy with `--pac-file /path/to/company.pac`.
 
-See [Use Unproxy](docs/user-guide.md) for copyable setup steps, credentials, and
-troubleshooting.
+## Documentation
+
+Start with [Quick start](docs/user-guide.md) to connect your first application.
+
+| Guide | What you’ll find |
+| --- | --- |
+| [Installation](docs/installation.md) | Windows, macOS, Linux, services, and removal. |
+| [Desktop app](docs/desktop.md) | Tray controls, status lights, and every preference. |
+| [Connect applications](docs/applications.md) | Browser settings, shell setup, and copyable commands. |
+| [PAC & routing](docs/routing.md) | Ordered policies, SOCKS upstreams, filters, and strict policy. |
+| [Authentication](docs/authentication.md) | Passwords, Negotiate, and service identities. |
+| [Configuration reference](docs/configuration.md) | Settings locations, CLI options, and defaults. |
+| [Troubleshooting](docs/troubleshooting.md) | Connection checks, errors, logs, and support reports. |
+
+Build the styled, offline-readable documentation with `cargo xtask docs`.
+Open `dist/site/docs/user-guide.html` to preview it. The same Markdown is
+readable here on GitHub.
 
 ## Limitations
 

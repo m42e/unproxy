@@ -768,34 +768,7 @@ fn info_plist(id: &str, executable: &str, minimum: &str) -> String {
 fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
     let book = output.join("docs");
     std::fs::create_dir_all(&book)?;
-    let mut pages = std::fs::read_dir("docs")?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|s| s == "md"))
-        .collect::<Vec<_>>();
-    pages.sort();
-    let nav = pages
-        .iter()
-        .map(|p| {
-            let name = p.file_stem().unwrap().to_string_lossy();
-            format!("<a href='{name}.html'>{name}</a> ")
-        })
-        .collect::<String>();
-    for page in pages {
-        let text = std::fs::read_to_string(&page)?;
-        let name = page.file_stem().unwrap().to_string_lossy();
-        std::fs::write(
-            book.join(format!("{name}.html")),
-            format!(
-                "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>Unproxy {name}</title><style>body{{max-width:70em;margin:2em auto;padding:1em;font:16px system-ui}}pre{{white-space:pre-wrap}}nav a{{padding:.3em}}</style><nav>{nav}</nav><main>{}</main>",
-                markdown(&text)
-            ),
-        )?;
-    }
-    std::fs::write(
-        book.join("index.html"),
-        "<!doctype html><meta http-equiv=refresh content='0;url=user-guide.html'><a href=user-guide.html>Use Unproxy</a>",
-    )?;
+    documentation::generate(&book)?;
     let mut landing = std::fs::read_to_string("site/index.html")?
         .replace("@VERSION@", &html_escape(unproxy::VERSION));
     let repository = repository.unwrap_or("");
@@ -824,34 +797,8 @@ fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
     );
     Ok(())
 }
-fn markdown(text: &str) -> String {
-    let mut output = String::new();
-    let mut code = false;
-    for line in text.lines() {
-        if line.starts_with("```") {
-            output.push_str(if code { "</code></pre>" } else { "<pre><code>" });
-            code = !code;
-            continue;
-        }
-        let escaped = html_escape(line);
-        if code {
-            output.push_str(&escaped);
-            output.push('\n');
-        } else if let Some(heading) = line.strip_prefix("# ") {
-            output.push_str(&format!("<h1>{}</h1>", html_escape(heading)));
-        } else if let Some(heading) = line.strip_prefix("## ") {
-            output.push_str(&format!("<h2>{}</h2>", html_escape(heading)));
-        } else if let Some(heading) = line.strip_prefix("### ") {
-            output.push_str(&format!("<h3>{}</h3>", html_escape(heading)));
-        } else if !line.is_empty() {
-            output.push_str(&format!("<p>{escaped}</p>"));
-        }
-    }
-    if code {
-        output.push_str("</code></pre>");
-    }
-    output
-}
+#[path = "xtask/documentation.rs"]
+mod documentation;
 
 #[cfg(test)]
 mod tests {
@@ -861,15 +808,6 @@ mod tests {
     fn release_package_version_omits_build_revision() {
         let version = "1.2.3+0123456789abcdef";
         assert_eq!(release_version(version), "1.2.3");
-    }
-
-    #[test]
-    fn markdown_renders_headings_paragraphs_and_unclosed_code_blocks() {
-        let html = markdown("# Title\n\n## Sub & heading\ntext <tag>\n```\n<code>");
-        assert!(html.contains("<h1>Title</h1>"));
-        assert!(html.contains("<h2>Sub &amp; heading</h2>"));
-        assert!(html.contains("<p>text &lt;tag&gt;</p>"));
-        assert!(html.ends_with("<pre><code>&lt;code&gt;\n</code></pre>"));
     }
 
     #[test]

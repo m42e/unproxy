@@ -647,7 +647,7 @@ printf 'fixture archive' > "$1"
         "owner/project",
     ]));
     let page = std::fs::read_to_string(f.root.path().join("dist/site/docs/a.html")).unwrap();
-    assert!(page.contains("<h1>First</h1>"));
+    assert!(page.contains("<h1 id=\"first\">First</h1>"));
     let landing = std::fs::read_to_string(f.root.path().join("dist/site/index.html")).unwrap();
     assert!(landing.contains("owner/project"));
     assert!(f.root.path().join("dist/site/source.zip").is_file());

@@ -1,8 +1,8 @@
 # Install Unproxy
 
-Download the release package for your operating system from the project's
-Releases page. Choose a file for your operating system and processor. If you
-are unsure, use the normal 64-bit Intel/AMD package for Windows or Linux, or
+Download the release package for your operating system from [GitHub
+Releases](https://github.com/m42e/unproxy/releases). Choose a file for your
+operating system and processor. If you are unsure, use the normal 64-bit Intel/AMD package for Windows or Linux, or
 the macOS package for your Mac.
 
 ## Windows
@@ -20,7 +20,8 @@ the macOS package for your Mac.
 5. The Unproxy tray icon appears near the clock. Click its status row to start
    or stop the proxy. Choose **Settings…** to edit listeners, ordered PAC
    files, and proxy behavior. The installer adds Unproxy to your Start menu and
-   starts it when you sign in; you can change that in Settings.
+   starts it when you sign in; you can change that in Settings. Choose
+   **Open Status Page** from the tray menu to check the connection.
 
 This standard tray installation is per-user and does not require administrator
 approval. Unproxy runs in the signed-in user's session and uses that user's
@@ -37,6 +38,7 @@ listener and sets `no_proxy` to bypass localhost. It saves any previous
 per-user values and restores them on uninstall if they have not been changed
 since installation. Reopen existing terminals to pick up the new values.
 
+### Windows service
 
 To install Unproxy as a Windows service instead, run this from the extracted
 folder:
@@ -68,6 +70,8 @@ Use PowerShell to manage the service:
 The service starts automatically at boot. Use the enable and disable commands
 to change that setting.
 
+### Uninstall Windows
+
 To remove Unproxy, open the extracted ZIP folder in PowerShell and run:
 
 ```powershell
@@ -81,7 +85,8 @@ Add `-RemoveUserData` to also delete Unproxy preferences and logs.
 1. Download the macOS app installer (`*-app.pkg`) and open it.
 2. Follow the installer prompts, then open **Unproxy** from Applications.
 3. Click the Unproxy icon in the menu bar. Its status row starts or stops the
-   proxy.
+   proxy. Choose **Open Status Page** to check the configured listener in
+   your browser.
 
 Choose **Settings…** to set listeners, ordered PAC files, optional ad blocking
 lists, and proxy behavior.
@@ -175,3 +180,8 @@ files, and logs.
 - **macOS:** For the menu bar app, turn off **Start with Login**, quit Unproxy,
   then move it from Applications to the Trash.
 - **Debian/Ubuntu:** Run `sudo apt remove unproxy`.
+
+## Next step
+
+Follow [Quick start](user-guide.md) to add a PAC source and connect your first
+application. For desktop controls, see [Desktop app](desktop.md).

@@ -221,6 +221,18 @@ impl Preferences {
             .next()
             .unwrap_or_else(|| format!("127.0.0.1:{}", self.legacy_port()))
     }
+    /// The status page follows the primary listener, including IPv6 and custom ports.
+    pub fn status_url(&self) -> Result<String> {
+        let listener = self.primary_listener();
+        let address: std::net::SocketAddr = listener
+            .parse()
+            .with_context(|| format!("invalid status page listener {listener}"))?;
+        anyhow::ensure!(
+            !address.ip().is_unspecified(),
+            "status page requires a concrete listener"
+        );
+        Ok(format!("http://{address}/"))
+    }
     pub fn effective_pac_files(&self) -> Vec<PathBuf> {
         if let Some(files) = self.pac_files.as_ref().filter(|files| !files.is_empty()) {
             return files.clone();
@@ -613,6 +625,13 @@ mod native {
                         let message = format!("Could not open the Unproxy log: {error:#}");
                         notice = Some(message.clone());
                         show_message("Could not open the Unproxy log", &message);
+                    }
+                }
+                13 => {
+                    if let Err(error) = s.prefs.status_url().and_then(|url| open_status_url(&url)) {
+                        let message = format!("Could not open the Unproxy status page: {error:#}");
+                        notice = Some(message.clone());
+                        show_message("Could not open the Unproxy status page", &message);
                     }
                 }
                 11 => {
@@ -1077,6 +1096,7 @@ mod native {
                 format!("Proxy: {process} (click to start)")
             };
             menu_item(menu, &status_line, status_action, false, true, target);
+            menu_item(menu, "Open Status Page", 13, false, true, target);
             menu_item(menu, "Open Log", 10, false, true, target);
             menu_item(menu, "Start with Login", 9, s.prefs.autostart, true, target);
             menu_item(menu, "Copy Proxy Address", 11, false, true, target);
@@ -2406,6 +2426,18 @@ mod native {
         anyhow::ensure!(status.success(), "open command exited with {status}");
         Ok(())
     }
+    fn status_page_command(url: &str) -> Command {
+        let mut command = Command::new("/usr/bin/open");
+        command.arg(url);
+        command
+    }
+    fn open_status_url(url: &str) -> Result<()> {
+        let status = status_page_command(url)
+            .status()
+            .context("launch the default browser")?;
+        anyhow::ensure!(status.success(), "browser launcher exited with {status}");
+        Ok(())
+    }
     fn pac_editor_command(path: &Path) -> Command {
         let mut command = Command::new("/usr/bin/open");
         command.arg("-e").arg(path);
@@ -3040,7 +3072,8 @@ mod native {
                 menu_has_tag(menu, 9)
                     && menu_has_tag(menu, 10)
                     && menu_has_tag(menu, 11)
-                    && menu_has_tag(menu, 12),
+                    && menu_has_tag(menu, 12)
+                    && menu_has_tag(menu, 13),
                 "menu is missing a requested action"
             );
 
@@ -3070,6 +3103,10 @@ mod native {
             anyhow::ensure!(menu_has_tag(menu, 2), "running menu lacks Stop");
             anyhow::ensure!(!menu_has_tag(menu, 1), "running menu still offers Start");
             anyhow::ensure!(menu_has_tag(menu, 12), "running menu lacks Settings");
+            anyhow::ensure!(
+                menu_has_tag(menu, 13),
+                "running menu lacks Open Status Page"
+            );
             let shared = STATE.lock().unwrap().as_ref().unwrap().clone();
             let guard = shared.lock().unwrap();
             unsafe { poll_child(target, sel!(pollChild:), ptr::null_mut()) };
@@ -3829,6 +3866,20 @@ mod native {
     #[cfg(test)]
     mod editor_list_tests {
         use super::*;
+
+        #[test]
+        fn status_page_launcher_passes_the_configured_url_as_one_argument() {
+            let prefs = Preferences {
+                listeners: Some(vec!["[::1]:8080".into()]),
+                ..Preferences::default()
+            };
+            let command = status_page_command(&prefs.status_url().unwrap());
+            assert_eq!(command.get_program(), "/usr/bin/open");
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                ["http://[::1]:8080/"]
+            );
+        }
 
         #[test]
         fn runtime_status_response_parses_optional_fields_and_rejects_bad_responses() {

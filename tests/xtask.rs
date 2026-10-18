@@ -177,7 +177,53 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
     );
 
     let guide = std::fs::read_to_string(output_dir.join("docs/user-guide.html")).unwrap();
-    assert!(guide.contains("<nav>"));
+    assert!(guide.contains("aria-label=\"Documentation\""));
+    assert!(guide.contains("aria-current=\"page\""));
+    assert!(guide.contains("<table>"));
+    assert!(guide.contains("<ol>") || guide.contains("<h2"));
+    assert!(guide.contains("href=\"installation.html\""));
+    assert!(guide.contains("aria-label=\"On this page\""));
+    assert!(guide.contains("href=\"#1-install-and-start-unproxy\""));
+    for asset in ["docs.css", "docs.js"] {
+        assert!(output_dir.join("docs").join(asset).is_file());
+    }
+    let install = std::fs::read_to_string(output_dir.join("docs/installation.html")).unwrap();
+    assert!(install.contains("role=tablist"));
+    for platform in ["windows", "macos", "debian-or-ubuntu"] {
+        assert!(install.contains(&format!("aria-controls=\"install-{platform}\"")));
+        assert!(install.contains(&format!("data-platform=\"{platform}\"")));
+    }
+    assert!(install.contains("id=\"windows-service\""));
+    // Follow every internal generated link, including cross-page heading anchors.
+    for entry in std::fs::read_dir(output_dir.join("docs")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|ext| ext != "html") {
+            continue;
+        }
+        let page = std::fs::read_to_string(&path).unwrap();
+        assert!(!page.contains("@BODY@"));
+        for rest in page.split("href=\"").skip(1) {
+            let href = rest.split('"').next().unwrap();
+            if href.contains(':') || href.starts_with("//") {
+                continue;
+            }
+            let (file, anchor) = href.split_once('#').unwrap_or((href, ""));
+            let target = if file.is_empty() {
+                path.clone()
+            } else {
+                path.parent().unwrap().join(file)
+            };
+            assert!(target.is_file(), "broken link {href} in {}", path.display());
+            if !anchor.is_empty() {
+                let target_html = std::fs::read_to_string(&target).unwrap();
+                assert!(
+                    target_html.contains(&format!("id=\"{anchor}\"")),
+                    "missing anchor {href} in {}",
+                    path.display()
+                );
+            }
+        }
+    }
     assert!(output_dir.join("docs/index.html").is_file());
     assert!(output_dir.join("source.zip").is_file());
     let landing = std::fs::read_to_string(output_dir.join("index.html")).unwrap();
