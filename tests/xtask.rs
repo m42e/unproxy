@@ -180,6 +180,8 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
     assert!(guide.contains("aria-label=\"Documentation\""));
     assert!(guide.contains("aria-current=\"page\""));
     assert!(guide.contains("<table>"));
+    assert!(guide.contains("unproxy doctor --url"));
+    assert!(guide.contains("does not read desktop preferences automatically"));
     assert!(guide.contains("<ol>") || guide.contains("<h2"));
     assert!(guide.contains("href=\"installation.html\""));
     assert!(guide.contains("aria-label=\"On this page\""));
@@ -204,6 +206,7 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
                 "curl.exe --noproxy localhost",
                 "Get-Content",
                 "unproxyctl.exe",
+                "doctor --url",
                 "language-powershell",
             ],
             vec!["systemctl", "journalctl", "tail -n", "/Applications/"],
@@ -214,6 +217,7 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
                 "curl --noproxy",
                 "tail -n",
                 "/Applications/Unproxy.app/Contents/MacOS/unproxy",
+                "doctor --url",
                 "language-sh",
             ],
             vec!["systemctl", "journalctl", "Get-Content", "curl.exe"],
@@ -225,6 +229,7 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
                 "systemctl --user",
                 "journalctl --user",
                 "paceval",
+                "unproxy doctor --url",
                 "language-sh",
             ],
             vec!["Get-Content", "curl.exe", "/Applications/"],

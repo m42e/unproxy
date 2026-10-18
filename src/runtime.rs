@@ -272,17 +272,7 @@ async fn run_until(
             .try_init()
             .ok();
     }
-    let sources: Vec<crate::route::PathOrUri> = if a.pac_file.is_empty() {
-        config::pac_path()
-            .into_iter()
-            .map(crate::route::PathOrUri::Path)
-            .collect()
-    } else {
-        a.pac_file
-            .iter()
-            .map(|source| source.parse())
-            .collect::<Result<_>>()?
-    };
+    let sources = config::pac_sources(&a)?;
     let effective_ip = select_pac_ip(a.my_ip_address, crate::platform::default_interface_ipv4);
     let (filter_list, filter_lists_complete) =
         crate::filter_list::FilterList::load_best_effort_with_status(&a.filter_list).await;
@@ -513,7 +503,7 @@ async fn drain(context: crate::proxy::Context, timeout: Duration) -> bool {
     context.wait_timeout(timeout).await
 }
 
-fn load_auth(a: &MainArgs) -> Result<AuthFactory> {
+pub(crate) fn load_auth(a: &MainArgs) -> Result<AuthFactory> {
     load_auth_with_default_netrc(a, config::netrc_default())
 }
 
@@ -579,7 +569,6 @@ fn select_pac_ip(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
     use tracing_subscriber::fmt::writer::MakeWriter;
 
     #[test]

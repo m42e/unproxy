@@ -12,9 +12,23 @@ Start with the local listener, then check the PAC decision and the selected upst
 
 The examples use the default listener. Replace `http://127.0.0.1:3128` with your configured proxy address, and replace PAC paths with the file or URL you actually use. Stop the existing proxy before starting a CLI diagnostic instance on the same listener.
 
+The built-in **doctor** health check can run while Unproxy is running. It loads CLI settings, evaluates PAC routes, probes TCP reachability, checks local credential readiness without printing or sending authorization tokens, and reads runtime status when available. It does not perform a new authenticated upstream exchange.
+
+Doctor does not automatically read desktop preferences. For desktop diagnostics, pass the same listener, ordered PAC sources, and authentication options you use in Settings. The desktop examples below assume the default local PAC file and IPv4 listener. Place server options such as `--listen` and `--pac-file` **before** `doctor`; put doctor options such as `--url` and `--json` after it. Repeat `--url` to check several destinations. Reports use PASS, WARN, and FAIL; a failed check makes the command exit with status 1, while warnings alone do not.
+
 ## Windows
 
 Use **PowerShell** for these commands. Choose **Open Status Page** or **Open Log** from the tray menu to inspect the running desktop instance.
+
+### Run the health check in PowerShell
+
+For the standard per-user tray installation, using its default listener and PAC path:
+
+```powershell
+& "$env:LOCALAPPDATA\Unproxy\bin\unproxy.exe" --listen 127.0.0.1:3128 --pac-file "$env:LOCALAPPDATA\Unproxy\proxy.pac" doctor --url https://intranet.example.org/
+```
+
+Add `--json` after `doctor` for a machine-readable report. Adjust the listener, PAC sources, and authentication options to match your desktop settings.
 
 ### Test a request in PowerShell
 
@@ -49,6 +63,14 @@ These commands apply to a service installed with `install.ps1 -AsService`, which
 Get-Content "$env:ProgramData\Unproxy\unproxy.log" -Tail 100
 ```
 
+To check a service using the default listener and ProgramData PAC file:
+
+```powershell
+& "$env:ProgramFiles\Unproxy\unproxy.exe" --listen 127.0.0.1:3128 --pac-file "$env:ProgramData\Unproxy\proxy.pac" doctor --url https://intranet.example.org/
+```
+
+Pass any additional routing and authentication options from the service's ProgramData `unproxyrc` explicitly. Doctor runs with your current user's credentials, so its credential readiness check can differ from the service's NetworkService identity; the report also shows the running instance's last recorded authentication result.
+
 To restart or stop that service, open PowerShell as administrator and run the appropriate command:
 
 ```powershell
@@ -62,6 +84,16 @@ To restart or stop that service, open PowerShell as administrator and run the ap
 ## macOS
 
 Use **Terminal** with Zsh or Bash for these commands. Choose **Open Status Page** or **Open Log** from the Unproxy menu bar menu to inspect the running desktop instance.
+
+### Run the health check in Terminal
+
+For the menu bar app installed in Applications, using its default listener and PAC path:
+
+```sh
+/Applications/Unproxy.app/Contents/MacOS/unproxy --listen 127.0.0.1:3128 --pac-file "$HOME/Library/Application Support/Unproxy/proxy.pac" doctor --url https://intranet.example.org/
+```
+
+Add `--json` after `doctor` for a machine-readable report. Adjust the listener, PAC sources, and authentication options to match your desktop settings.
 
 ### Test a request in Terminal
 
@@ -88,6 +120,18 @@ Press Ctrl+C to end the diagnostic run, then start the proxy again from the menu
 ## Debian or Ubuntu
 
 Use a terminal for these commands. The Debian package installs a systemd **user** service; run `systemctl --user` as your normal user.
+
+### Run the health check
+
+Doctor reads the same CLI settings file as the installed user service:
+
+```sh
+unproxy doctor
+unproxy doctor --url https://intranet.example.org/
+unproxy doctor --json
+```
+
+Pass any options used only on a manually started CLI instance before `doctor` so it checks the same configuration.
 
 ### Test a request from the terminal
 

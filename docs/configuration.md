@@ -84,6 +84,7 @@ Unproxy does not enforce a process memory limit. Memory use depends on traffic, 
 | Command / option | Purpose |
 | --- | --- |
 | `unproxy --help` | Full options supported by the installed build. |
+| `unproxy doctor [--url URL] [--json]` | Check CLI settings, PAC routes, TCP reachability, credential readiness, and available runtime status. See [Troubleshooting](troubleshooting.md). |
 | `unproxy --version` | Installed version. |
 | `-v`, `-vv` | Debug and trace verbosity. |
 | `-q`, `-qq` | Reduce or disable logging. |

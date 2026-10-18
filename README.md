@@ -38,6 +38,11 @@ Build the styled, offline-readable documentation with `cargo xtask docs`.
 Open `dist/site/docs/user-guide.html` to preview it. The same Markdown is
 readable here on GitHub.
 
+To inspect CLI configuration, PAC routes, listeners, and authentication
+readiness, run `unproxy doctor`. Add `--url https://example.com/` to check
+host-specific routing, or `--json` for a machine-readable report. See
+[Troubleshooting](docs/troubleshooting.md) for desktop and service examples.
+
 ## Limitations
 
 - Unproxy does not enforce a process memory limit. Memory use depends on traffic

@@ -60,6 +60,28 @@ On Windows PowerShell, use `curl.exe` in place of `curl`. A successful request c
 
 If your proxy asks for credentials, follow [Authentication](authentication.md). If a request fails, start with [Troubleshooting](troubleshooting.md).
 
+## Run a health check
+
+If `unproxy` is on your PATH, run the built-in health check:
+
+```sh
+unproxy doctor
+unproxy doctor --url https://intranet.example.org/
+unproxy doctor --json
+```
+
+Doctor loads the CLI settings, evaluates PAC routes, checks TCP reachability,
+and reads status from a running instance when available. Repeat `--url` to
+check several destinations; `--json` produces a machine-readable report.
+
+It checks whether local credentials can generate an authorization token without
+printing or sending that token. It does not perform a new authenticated proxy
+exchange; use normal application traffic to confirm that authentication works.
+
+Doctor does not read desktop preferences automatically. See the
+[OS-specific troubleshooting commands](troubleshooting.md) for installed binary
+paths and examples that pass your listener and PAC settings explicitly.
+
 ## Find your next step
 
 | I want to… | Read |
