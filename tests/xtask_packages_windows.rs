@@ -329,6 +329,7 @@ fn windows_host_stages_debian_and_macos_packages_from_fixture_binaries() {
     .unwrap();
     std::fs::write(assets.join("unproxy.service"), "fixture service").unwrap();
     std::fs::write(assets.join("de.m42e.unproxy.plist"), "fixture launch agent").unwrap();
+    std::fs::write(assets.join("app-icon.icns"), "fixture app icon").unwrap();
     std::fs::write(
         assets.join("app-entitlements.plist"),
         "fixture app entitlements",
