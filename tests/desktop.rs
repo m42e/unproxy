@@ -185,7 +185,10 @@ fn embedded_child_gets_no_rc_environment_without_suppressing_cli_arguments() {
     let mut child = ChildLifecycle::default();
     child.start(&program, &prefs).unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
-    while !marker.exists() && Instant::now() < deadline {
+    while Instant::now() < deadline {
+        if std::fs::read_to_string(&marker).is_ok_and(|value| value == "1") {
+            break;
+        }
         thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "1");

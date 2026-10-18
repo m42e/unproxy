@@ -640,7 +640,7 @@ fn package_rejects_incompatible_targets_and_reports_missing_binaries_and_collisi
 }
 
 #[test]
-fn documentation_generation_sorts_pages_and_validates_repository_names() {
+fn documentation_generation_publishes_user_pages_and_validates_repository_names() {
     let f = Fixture::new();
     f.tool(
         "git",
@@ -651,8 +651,10 @@ printf 'fixture archive' > "$1"
 "#,
     );
     std::fs::create_dir_all(f.root.path().join("docs")).unwrap();
-    std::fs::write(f.root.path().join("docs/z.md"), "# Last\n").unwrap();
-    std::fs::write(f.root.path().join("docs/a.md"), "# First\n").unwrap();
+    std::fs::write(f.root.path().join("docs/user-guide.md"), "# Quick start\n").unwrap();
+    std::fs::write(f.root.path().join("docs/routing.md"), "# PAC & routing\n").unwrap();
+    std::fs::write(f.root.path().join("docs/a.md"), "# Internal first\n").unwrap();
+    std::fs::write(f.root.path().join("docs/z.md"), "# Internal last\n").unwrap();
     std::fs::create_dir_all(f.root.path().join("site")).unwrap();
     f.asset("app-icon.png", "app icon");
     std::fs::write(
@@ -668,13 +670,18 @@ printf 'fixture archive' > "$1"
         "--repository",
         "owner/project",
     ]));
-    let page = std::fs::read_to_string(f.root.path().join("dist/site/docs/a.html")).unwrap();
-    assert!(page.contains("<h1 id=\"first\">First</h1>"));
+    let page =
+        std::fs::read_to_string(f.root.path().join("dist/site/docs/user-guide.html")).unwrap();
+    assert!(page.contains("<h1 id=\"quick-start\">Quick start</h1>"));
     let landing = std::fs::read_to_string(f.root.path().join("dist/site/index.html")).unwrap();
     assert!(landing.contains("owner/project"));
     assert!(f.root.path().join("dist/site/source.zip").is_file());
-    let nav = std::fs::read_to_string(f.root.path().join("dist/site/docs/z.html")).unwrap();
-    assert!(nav.find("a.html").unwrap() < nav.find("z.html").unwrap());
+    let nav = std::fs::read_to_string(f.root.path().join("dist/site/docs/routing.html")).unwrap();
+    assert!(nav.find("user-guide.html").unwrap() < nav.find("routing.html").unwrap());
+    assert!(!nav.contains("Internal first"));
+    assert!(!nav.contains("Internal last"));
+    assert!(!f.root.path().join("dist/site/docs/a.html").exists());
+    assert!(!f.root.path().join("dist/site/docs/z.html").exists());
 
     let invalid = f.command(&[
         "docs",

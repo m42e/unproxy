@@ -46,6 +46,19 @@ paceval https://proxy.example.org/company.pac https://intranet.example.org/
 
 If it is not on PATH, use the full path to the executable. This inspects the routing decision; it does not prove the selected upstream is reachable or that credentials work.
 
+## PAC parsing and matching performance
+
+Local release-mode microbenchmarks on macOS ARM64 measured these medians:
+
+| Workload | Median |
+| --- | ---: |
+| 96 substring checks | 13.28 µs per evaluation (138 ns per check) |
+| 96 warm wildcard checks | 36.33 µs per evaluation (378 ns per check) |
+| 96 substring and cold wildcard pairs | 103.06 µs per evaluation (1.07 µs per pair) |
+| Repeated route-result cache hit, parser only | 50 ns |
+
+The matching measurements include JavaScript execution and route parsing. The parser-only measurement is for a repeated route result that hits the cache. These synthetic timings exclude network and connection time, vary by PAC script and hardware, and do not represent full request latency.
+
 ## Reload a policy
 
 Restart Unproxy after editing local PAC contents or to fetch an updated remote script. On Linux, the installed user service also supports:

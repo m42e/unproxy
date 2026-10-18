@@ -144,6 +144,18 @@ fn platform_tabs_in_section(body: &str, section_id: &str, prefix: &str, purpose:
     format!("{before}{heading}{title}</h2>{section_body}{remainder}")
 }
 
+fn user_pages(available: &[std::path::PathBuf]) -> Vec<(String, String, std::path::PathBuf)> {
+    USER_PAGES
+        .iter()
+        .filter_map(|(name, title)| {
+            available
+                .iter()
+                .find(|path| path.file_stem().is_some_and(|stem| stem == *name))
+                .map(|path| (name.to_string(), title.to_string(), path.clone()))
+        })
+        .collect()
+}
+
 pub(super) fn generate(output: &Path) -> Result<()> {
     std::fs::write(
         output.join("docs.css"),
@@ -153,55 +165,27 @@ pub(super) fn generate(output: &Path) -> Result<()> {
         output.join("docs.js"),
         include_str!("../../../site/docs.js"),
     )?;
-    // Preserve downloads linked by contributor pages as well as rendered Markdown.
+    // Keep static files stored with the documentation alongside generated pages.
     for entry in std::fs::read_dir("docs")? {
         let path = entry?.path();
         if path.is_file() && path.extension().is_none_or(|ext| ext != "md") {
             std::fs::copy(&path, output.join(path.file_name().unwrap()))?;
         }
     }
-    let mut pages = std::fs::read_dir("docs")?
+    let available_pages = std::fs::read_dir("docs")?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|ext| ext == "md"))
         .collect::<Vec<_>>();
-    pages.sort();
-    let mut links = USER_PAGES
-        .iter()
-        .filter(|(name, _)| {
-            pages
-                .iter()
-                .any(|path| path.file_stem().is_some_and(|stem| stem == *name))
-        })
-        .map(|(name, title)| (name.to_string(), title.to_string()))
-        .collect::<Vec<_>>();
-    let user_count = links.len();
-    for path in &pages {
-        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
-        if !links.iter().any(|(key, _)| key == &name) {
-            let source = std::fs::read_to_string(path)?;
-            let title = source
-                .lines()
-                .find_map(|line| line.strip_prefix("# "))
-                .unwrap_or(&name)
-                .to_string();
-            links.push((name, title));
-        }
-    }
-    for path in &pages {
-        let name = path.file_stem().unwrap().to_string_lossy();
-        let position = links.iter().position(|(key, _)| key == &name).unwrap();
-        let title = &links[position].1;
+    let links = user_pages(&available_pages);
+    for (position, (name, title, path)) in links.iter().enumerate() {
         let mut nav = String::new();
-        for (i, (key, label)) in links.iter().enumerate() {
-            if i == 0 && user_count > 0 {
+        for (i, (key, label, _)) in links.iter().enumerate() {
+            if i == 0 {
                 nav.push_str("<p class=nav-label>User guide</p>");
-            }
-            if i == user_count {
-                nav.push_str("<p class=nav-label>Contributors</p>");
             }
             nav.push_str(&format!(
                 "<a href=\"{key}.html\"{}>{}</a>",
-                if key == &name {
+                if key == name {
                     " aria-current=\"page\""
                 } else {
                     ""
@@ -226,7 +210,7 @@ pub(super) fn generate(output: &Path) -> Result<()> {
             ("Next", (position + 1 < links.len()).then_some(position + 1)),
         ] {
             if let Some(index) = index {
-                let (key, title) = &links[index];
+                let (key, title, _) = &links[index];
                 pager.push_str(&format!(
                     "<a href=\"{key}.html\"><span>{label}</span>{}</a>",
                     html_escape(title)
@@ -272,5 +256,35 @@ mod tests {
         }
         assert!(!body.contains("<script>"));
         assert!(toc.contains("href=\"#set-http-https-1\""));
+    }
+
+    #[test]
+    fn generated_docs_include_user_pages_only() {
+        let output = tempfile::tempdir().unwrap();
+        generate(output.path()).unwrap();
+
+        for page in [
+            "user-guide",
+            "installation",
+            "desktop",
+            "applications",
+            "routing",
+            "authentication",
+            "configuration",
+            "troubleshooting",
+        ] {
+            assert!(output.path().join(format!("{page}.html")).exists());
+        }
+        for page in [
+            "corporate-auth-tests",
+            "coverage-test-plan",
+            "pac-performance",
+            "release-signing",
+        ] {
+            assert!(!output.path().join(format!("{page}.html")).exists());
+        }
+
+        let user_guide = std::fs::read_to_string(output.path().join("user-guide.html")).unwrap();
+        assert!(!user_guide.contains("<p class=nav-label>Contributors</p>"));
     }
 }
