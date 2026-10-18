@@ -683,7 +683,12 @@ fn package(
                 )?;
                 std::fs::write(
                     app.join("Info.plist"),
-                    info_plist("de.m42e.unproxy.app", "unproxy-app", "11.1"),
+                    info_plist(
+                        "de.m42e.unproxy.app",
+                        "unproxy-app",
+                        "11.1",
+                        Some("Unproxy"),
+                    ),
                 )?;
                 std::fs::write(
                     helper.join("Info.plist"),
@@ -691,9 +696,11 @@ fn package(
                         "de.m42e.unproxy.login-helper",
                         "unproxy-login-helper",
                         "10.14",
+                        None,
                     ),
                 )?;
                 std::fs::create_dir_all(app.join("Resources"))?;
+                std::fs::copy("assets/app-icon.icns", app.join("Resources/Unproxy.icns"))?;
                 let tray_icons = Path::new("assets/tray-icons");
                 if tray_icons.is_dir() {
                     let resources_icons = app.join("Resources/tray-icons");
@@ -758,10 +765,16 @@ fn package(
     println!("Artifacts written to {}", output.display());
     Ok(())
 }
-fn info_plist(id: &str, executable: &str, minimum: &str) -> String {
+fn info_plist(id: &str, executable: &str, minimum: &str, icon_file: Option<&str>) -> String {
     let version = unproxy::VERSION.split('+').next().unwrap();
+    let icon = icon_file.map_or_else(String::new, |file| {
+        format!(
+            "<key>CFBundleIconFile</key><string>{}</string>",
+            html_escape(file)
+        )
+    });
     format!(
-        "<?xml version=\"1.0\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>{id}</string><key>CFBundleName</key><string>Unproxy</string><key>CFBundleExecutable</key><string>{executable}</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>{version}</string><key>CFBundleShortVersionString</key><string>{version}</string><key>ProductBuildVersion</key><string>{}</string><key>LSUIElement</key><true/><key>LSMinimumSystemVersion</key><string>{minimum}</string></dict></plist>",
+        "<?xml version=\"1.0\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>{id}</string><key>CFBundleName</key><string>Unproxy</string><key>CFBundleExecutable</key><string>{executable}</string><key>CFBundlePackageType</key><string>APPL</string>{icon}<key>CFBundleVersion</key><string>{version}</string><key>CFBundleShortVersionString</key><string>{version}</string><key>ProductBuildVersion</key><string>{}</string><key>LSUIElement</key><true/><key>LSMinimumSystemVersion</key><string>{minimum}</string></dict></plist>",
         html_escape(unproxy::VERSION)
     )
 }
@@ -769,6 +782,7 @@ fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
     let book = output.join("docs");
     std::fs::create_dir_all(&book)?;
     documentation::generate(&book)?;
+    std::fs::copy("assets/app-icon.png", output.join("unproxy-icon.png"))?;
     let mut landing = std::fs::read_to_string("site/index.html")?
         .replace("@VERSION@", &html_escape(unproxy::VERSION));
     let repository = repository.unwrap_or("");
@@ -812,11 +826,15 @@ mod tests {
 
     #[test]
     fn app_plist_escapes_version_and_includes_bundle_metadata() {
-        let plist = info_plist("example.bundle", "example", "11.1");
+        let plist = info_plist("example.bundle", "example", "11.1", Some("Unproxy"));
         assert!(plist.contains("<string>example.bundle</string>"));
         assert!(plist.contains("<string>example</string>"));
         assert!(plist.contains("<string>11.1</string>"));
+        assert!(plist.contains("<key>CFBundleIconFile</key><string>Unproxy</string>"));
         assert!(plist.contains(&html_escape(unproxy::VERSION)));
+
+        let helper = info_plist("example.helper", "helper", "10.14", None);
+        assert!(!helper.contains("CFBundleIconFile"));
     }
 
     #[cfg(windows)]

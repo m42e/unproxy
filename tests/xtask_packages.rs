@@ -129,6 +129,7 @@ cp -R ./. "$CAPTURE_DIR/zip-$n/"
     f.asset("unproxy-tray.ps1", "tray");
     f.asset("app-entitlements.plist", "app entitlements");
     f.asset("child-entitlements.plist", "child entitlements");
+    f.asset("app-icon.icns", "app icon");
     for hook in ["postinst", "prerm", "postrm"] {
         f.asset(&format!("debian-{hook}"), "#!/bin/sh\nexit 0");
     }
@@ -384,6 +385,17 @@ printf 'fixture pkg' > "$out"
                 .join("pkgroot-1/Applications/Unproxy.app/Contents/Info.plist")
                 .is_file()
         );
+        assert!(
+            f.capture
+                .join("pkgroot-1/Applications/Unproxy.app/Contents/Resources/Unproxy.icns")
+                .is_file()
+        );
+        let plist = std::fs::read_to_string(
+            f.capture
+                .join("pkgroot-1/Applications/Unproxy.app/Contents/Info.plist"),
+        )
+        .unwrap();
+        assert!(plist.contains("<key>CFBundleIconFile</key><string>Unproxy</string>"));
     } else {
         assert!(
             f.capture
@@ -391,6 +403,15 @@ printf 'fixture pkg' > "$out"
                 .is_file()
         );
         assert!(f.capture.join("zip-1/Unproxy.app/Contents/Library/LoginItems/UnproxyLoginHelper.app/Contents/MacOS/unproxy-login-helper").is_file());
+        assert!(
+            f.capture
+                .join("zip-1/Unproxy.app/Contents/Resources/Unproxy.icns")
+                .is_file()
+        );
+        let plist =
+            std::fs::read_to_string(f.capture.join("zip-1/Unproxy.app/Contents/Info.plist"))
+                .unwrap();
+        assert!(plist.contains("<key>CFBundleIconFile</key><string>Unproxy</string>"));
         assert!(
             f.capture
                 .join("zip-2/Applications/Unproxy.app/Contents/Info.plist")
@@ -633,6 +654,7 @@ printf 'fixture archive' > "$1"
     std::fs::write(f.root.path().join("docs/z.md"), "# Last\n").unwrap();
     std::fs::write(f.root.path().join("docs/a.md"), "# First\n").unwrap();
     std::fs::create_dir_all(f.root.path().join("site")).unwrap();
+    f.asset("app-icon.png", "app icon");
     std::fs::write(
         f.root.path().join("site/index.html"),
         "@VERSION@ @REPOSITORY@",

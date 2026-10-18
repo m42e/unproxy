@@ -244,7 +244,7 @@ pub(super) fn generate(output: &Path) -> Result<()> {
     }
     std::fs::write(
         output.join("index.html"),
-        "<!doctype html><html lang=en><meta charset=utf-8><title>Unproxy documentation</title><meta http-equiv=refresh content='0;url=user-guide.html'><a href=user-guide.html>Read the Unproxy user guide</a></html>",
+        "<!doctype html><html lang=en><meta charset=utf-8><link rel=icon type=image/png href=../unproxy-icon.png><title>Unproxy documentation</title><meta http-equiv=refresh content='0;url=user-guide.html'><a href=user-guide.html>Read the Unproxy user guide</a></html>",
     )?;
     Ok(())
 }

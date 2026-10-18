@@ -186,6 +186,17 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
     assert!(guide.contains("href=\"installation.html\""));
     assert!(guide.contains("aria-label=\"On this page\""));
     assert!(guide.contains("href=\"#1-install-and-start-unproxy\""));
+    assert!(guide.contains("src=\"../unproxy-icon.png\""));
+    assert!(guide.contains("href=\"../unproxy-icon.png\""));
+    assert!(output_dir.join("unproxy-icon.png").is_file());
+    let landing = std::fs::read_to_string(output_dir.join("index.html")).unwrap();
+    assert!(landing.contains("href=\"unproxy-icon.png\""));
+    assert!(output_dir.join("docs/index.html").is_file());
+    assert!(
+        std::fs::read_to_string(output_dir.join("docs/index.html"))
+            .unwrap()
+            .contains("../unproxy-icon.png")
+    );
     for asset in ["docs.css", "docs.js"] {
         assert!(output_dir.join("docs").join(asset).is_file());
     }

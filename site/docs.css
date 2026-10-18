@@ -61,14 +61,10 @@ a:focus-visible,button:focus-visible,summary:focus-visible {
 }
 
 .brand-icon {
-  background:var(--accent);
-  color:white;
-  border-radius:11px;
   width:36px;
   height:36px;
-  text-align:center;
-  line-height:32px;
-  font-size:30px
+  border-radius:10px;
+  object-fit:contain
 }
 
 .brand-divider {
@@ -398,10 +394,6 @@ footer {
     --soft:#1c3836;
     --code:#0b141b;
     --code-ink:#dfedf2
-  }
-
-  .brand-icon {
-    color:#111c23
   }
 
 }

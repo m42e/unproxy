@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render all tray icon states from the native AppKit vector drawing.
+"""Render the tray status variants and app icon from the native AppKit drawing.
 
 Requires Swift and ImageMagick. These tools are only needed to update the
 checked-in icons; users and release builds consume the generated files.
@@ -42,6 +42,34 @@ def main() -> None:
             "icon:auto-resize=64,48,32,24,20,16",
             str(png_path.with_suffix(".ico")),
         )
+
+    app_icon = ROOT / "assets/app-icon.png"
+    with tempfile.TemporaryDirectory(prefix="unproxy-iconset-") as cache:
+        iconset = Path(cache) / "Unproxy.iconset"
+        iconset.mkdir()
+        sizes = [
+            (16, 16),
+            (16, 32),
+            (32, 32),
+            (32, 64),
+            (128, 128),
+            (128, 256),
+            (256, 256),
+            (256, 512),
+            (512, 512),
+            (512, 1024),
+        ]
+        for logical_size, pixel_size in sizes:
+            suffix = "@2x" if pixel_size == logical_size * 2 else ""
+            filename = iconset / f"icon_{logical_size}x{logical_size}{suffix}.png"
+            run(
+                "magick",
+                str(app_icon),
+                "-resize",
+                f"{pixel_size}x{pixel_size}",
+                str(filename),
+            )
+        run("iconutil", "-c", "icns", str(iconset), "-o", str(ROOT / "assets/app-icon.icns"))
 
 
 if __name__ == "__main__":
