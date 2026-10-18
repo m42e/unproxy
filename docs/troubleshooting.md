@@ -7,19 +7,149 @@ Start with the local listener, then check the PAC decision and the selected upst
 1. Confirm Unproxy is running in the tray, menu bar, terminal, or service manager.
 2. Choose **Open Status Page** from the tray or menu bar menu. For a CLI or service, open your listener’s HTTP address (default `http://127.0.0.1:3128/`).
 3. Confirm your application uses `127.0.0.1:3128` as an **HTTP** proxy for both HTTP and HTTPS destinations.
-4. Make an explicit test request from a terminal:
+4. Follow the commands for your operating system below. In the HTML guide, the tabs select your OS automatically; choose another tab to switch.
+5. Repeat the request with the destination that fails. If the explicit test works but your app fails, inspect the app’s proxy settings, bypass rules, and inherited environment variables.
 
-   ```sh
-   curl --noproxy "" --proxy http://127.0.0.1:3128 https://example.com/
-   ```
+The examples use the default listener. Replace `http://127.0.0.1:3128` with your configured proxy address, and replace PAC paths with the file or URL you actually use. Stop the existing proxy before starting a CLI diagnostic instance on the same listener.
 
-5. Repeat with the destination that fails. Use `curl.exe` in Windows PowerShell.
+## Windows
 
-If the explicit test works but your app fails, inspect the app’s proxy settings, bypass rules, and inherited environment variables.
+Use **PowerShell** for these commands. Choose **Open Status Page** or **Open Log** from the tray menu to inspect the running desktop instance.
+
+### Test a request in PowerShell
+
+Use `curl.exe` explicitly so Windows PowerShell does not interpret `curl` as its `Invoke-WebRequest` alias. This command overrides inherited bypass rules for non-local destinations:
+
+```powershell
+curl.exe --noproxy localhost --proxy http://127.0.0.1:3128 https://example.com/
+```
+
+### Read the desktop log
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\Unproxy\unproxy.log" -Tail 100
+```
+
+### Run desktop diagnostics from the terminal
+
+Stop the proxy through its tray status row first. For the standard per-user installation:
+
+```powershell
+& "$env:LOCALAPPDATA\Unproxy\bin\unproxy.exe" -v --pac-file "$env:LOCALAPPDATA\Unproxy\proxy.pac"
+```
+
+Press Ctrl+C to end the diagnostic run, then start the proxy again from the tray menu.
+
+### Check an optional Windows service
+
+These commands apply to a service installed with `install.ps1 -AsService`, which runs without the tray app:
+
+```powershell
+& "$env:ProgramFiles\Unproxy\unproxyctl.exe" status
+Get-Content "$env:ProgramData\Unproxy\unproxy.log" -Tail 100
+```
+
+To restart or stop that service, open PowerShell as administrator and run the appropriate command:
+
+```powershell
+& "$env:ProgramFiles\Unproxy\unproxyctl.exe" restart
+```
+
+```powershell
+& "$env:ProgramFiles\Unproxy\unproxyctl.exe" stop
+```
+
+## macOS
+
+Use **Terminal** with Zsh or Bash for these commands. Choose **Open Status Page** or **Open Log** from the Unproxy menu bar menu to inspect the running desktop instance.
+
+### Test a request in Terminal
+
+```sh
+curl --noproxy "" --proxy http://127.0.0.1:3128 https://example.com/
+```
+
+### Read the menu bar app log
+
+```sh
+tail -n 100 "$HOME/Library/Application Support/Unproxy/unproxy.log"
+```
+
+### Run menu bar app diagnostics from the terminal
+
+Stop the proxy through its menu bar status row first. For the app installed in Applications:
+
+```sh
+/Applications/Unproxy.app/Contents/MacOS/unproxy -v --pac-file "$HOME/Library/Application Support/Unproxy/proxy.pac"
+```
+
+Press Ctrl+C to end the diagnostic run, then start the proxy again from the menu bar menu. To stop the desktop proxy during everyday use, click its status row; to exit the app, choose **Quit Unproxy**.
+
+## Debian or Ubuntu
+
+Use a terminal for these commands. The Debian package installs a systemd **user** service; run `systemctl --user` as your normal user.
+
+### Test a request from the terminal
+
+```sh
+curl --noproxy "" --proxy http://127.0.0.1:3128 https://example.com/
+```
+
+### Check the service and its log
+
+```sh
+systemctl --user status unproxy
+journalctl --user -u unproxy -n 100 --no-pager
+```
+
+### Run CLI diagnostics
+
+Stop the user service first, then start a diagnostic instance with your PAC source:
+
+```sh
+systemctl --user stop unproxy
+unproxy -v --pac-file /path/to/company.pac
+```
+
+Press Ctrl+C to finish, then restore the user service:
+
+```sh
+systemctl --user start unproxy
+```
+
+If you installed the standalone CLI instead, stop that instance with Ctrl+C before starting diagnostics.
+
+### Inspect a PAC decision
+
+```sh
+paceval /path/to/company.pac https://intranet.example.org/
+```
+
+This checks the routing decision, not upstream connectivity or authentication.
+
+### Reload, restart, or stop the service
+
+Reload PAC contents without changing CLI options:
+
+```sh
+systemctl --user reload unproxy
+```
+
+After changing CLI options in `unproxyrc`, restart:
+
+```sh
+systemctl --user restart unproxy
+```
+
+To stop the user service:
+
+```sh
+systemctl --user stop unproxy
+```
 
 ## Find status and logs
 
-Choose **Open Status Page** from the tray or menu bar menu to open the current listener in your default browser. Use the links on that page to reach the live access log, diagnostic log, and status JSON.
+On Windows or macOS, choose **Open Status Page** from the tray or menu bar menu to open the current listener in your default browser. Use the links on that page to reach the live access log, diagnostic log, and status JSON.
 
 For a CLI or service, use the following paths at your configured listener’s HTTP address. For example, with the default listener, `/access.html` becomes `http://127.0.0.1:3128/access.html`.
 
@@ -30,18 +160,7 @@ For a CLI or service, use the following paths at your configured listener’s HT
 | `/log.html` | Runtime messages. |
 | `/status.json` | Machine-readable runtime state. |
 
-Desktop users can also choose **Open Log**. File locations are listed in [Configuration reference](configuration.md#desktop-files). On Linux:
-
-```sh
-systemctl --user status unproxy
-journalctl --user -u unproxy -n 100 --no-pager
-```
-
-For a CLI diagnostic run, stop the existing instance first, then start with extra verbosity:
-
-```sh
-unproxy -v --pac-file /path/to/company.pac
-```
+File locations are listed in [Configuration reference](configuration.md#desktop-files). The OS instructions above show how to read the relevant log from a terminal.
 
 ## The local status page does not open
 
@@ -53,11 +172,7 @@ An “address already in use” message usually means another Unproxy instance o
 
 Confirm you are connected to the required company network or VPN. Check that the configured PAC file or URL is correct and that the status page reports a loaded policy.
 
-Inspect a routing decision:
-
-```sh
-paceval /path/to/company.pac https://intranet.example.org/
-```
+Inspect the selected route in the access and diagnostic logs. If you have the `paceval` utility installed, you can also [check a PAC decision](routing.md#check-a-routing-decision).
 
 Check whether the selected upstream hostname is reachable on your current network. If a remote PAC download fails, inspect the diagnostic log. After fixing connectivity, restart Unproxy or reload the Linux user service.
 
@@ -92,11 +207,7 @@ Terminal proxy variables are inherited when a process starts. Open a new termina
 
 Clear the application’s proxy settings or [remove shell variables](applications.md#stop-using-proxy-variables) before stopping the proxy. Otherwise, applications can keep sending traffic to a listener that is no longer running.
 
-Stop through the desktop status row, Ctrl+C in the terminal, or:
-
-```sh
-systemctl --user stop unproxy
-```
+Stop through the desktop status row or Ctrl+C in the terminal. For a service, use the stop command in your selected OS instructions above.
 
 For removal instructions, see [Uninstall](installation.md#remove-unproxy).
 

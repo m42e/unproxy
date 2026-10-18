@@ -194,6 +194,73 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
         assert!(install.contains(&format!("data-platform=\"{platform}\"")));
     }
     assert!(install.contains("id=\"windows-service\""));
+    let troubleshooting =
+        std::fs::read_to_string(output_dir.join("docs/troubleshooting.html")).unwrap();
+    assert!(troubleshooting.contains("role=tablist"));
+    for (platform, required, excluded) in [
+        (
+            "windows",
+            vec![
+                "curl.exe --noproxy localhost",
+                "Get-Content",
+                "unproxyctl.exe",
+                "language-powershell",
+            ],
+            vec!["systemctl", "journalctl", "tail -n", "/Applications/"],
+        ),
+        (
+            "macos",
+            vec![
+                "curl --noproxy",
+                "tail -n",
+                "/Applications/Unproxy.app/Contents/MacOS/unproxy",
+                "language-sh",
+            ],
+            vec!["systemctl", "journalctl", "Get-Content", "curl.exe"],
+        ),
+        (
+            "debian-or-ubuntu",
+            vec![
+                "curl --noproxy",
+                "systemctl --user",
+                "journalctl --user",
+                "paceval",
+                "language-sh",
+            ],
+            vec!["Get-Content", "curl.exe", "/Applications/"],
+        ),
+    ] {
+        assert!(troubleshooting.contains(&format!("aria-controls=\"troubleshoot-{platform}\"")));
+        let start = format!("<section class=platform-panel id=\"troubleshoot-{platform}\"");
+        let panel = troubleshooting
+            .split_once(&start)
+            .unwrap()
+            .1
+            .split_once("</section>")
+            .unwrap()
+            .0;
+        for command in required {
+            assert!(
+                panel.contains(command),
+                "{platform} instructions lack {command}"
+            );
+        }
+        for command in excluded {
+            assert!(
+                !panel.contains(command),
+                "{platform} instructions contain {command}"
+            );
+        }
+        assert!(
+            !panel.contains(" hidden"),
+            "instructions must be available without JavaScript"
+        );
+    }
+    let shared = troubleshooting.rsplit_once("</section>").unwrap().1;
+    assert!(
+        !shared.contains("<pre>"),
+        "OS commands must stay inside their tabs"
+    );
     // Follow every internal generated link, including cross-page heading anchors.
     for entry in std::fs::read_dir(output_dir.join("docs")).unwrap() {
         let path = entry.unwrap().path();

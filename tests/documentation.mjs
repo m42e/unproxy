@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const source = readFileSync(new URL('../site/docs.js', import.meta.url), 'utf8');
-function setup(platform, hash = '') {
+function setup(platform, hash = '', prefix = 'install') {
   const keys = ['windows', 'macos', 'debian-or-ubuntu'];
   const buttons = keys.map(key => ({
     id: `tab-${key}`, attrs: {}, events: {},
@@ -13,7 +13,7 @@ function setup(platform, hash = '') {
     addEventListener(name, fn) { this.events[name] = fn; },
     focus() { this.focused = true; },
   }));
-  const panels = keys.map(key => ({ dataset: { platform: key }, hidden: false, setAttribute() {} }));
+  const panels = keys.map(key => ({ id: `${prefix}-${key}`, dataset: { platform: key }, hidden: false, setAttribute() {} }));
   const targets = Object.fromEntries(keys.map((key, i) => [key, {
     closest() { return panels[i]; },
     scrollIntoView() { this.scrolled = true; },
@@ -78,5 +78,19 @@ test('deep links override detection and hash changes reveal hidden instructions'
 test('malformed and unrelated anchors keep automatic platform selection working', () => {
   for (const hash of ['#%broken', '#build-from-source', '']) {
     assert.equal(selected(setup('MacIntel', hash)), 'macos');
+  }
+});
+
+test('troubleshooting tabs switch every command group and keep shared guidance visible', () => {
+  const state = setup('MacIntel', '', 'troubleshoot');
+  const shared = { hidden: false, closest() { return null; } };
+  state.targets['find-status-and-logs'] = shared;
+  state.toc.push({ hash: '#find-status-and-logs' });
+  for (const [index, key] of ['windows', 'macos', 'debian-or-ubuntu'].entries()) {
+    state.buttons[index].events.click();
+    assert.equal(selected(state), key);
+    assert.equal(state.panels.find(panel => !panel.hidden).id, `troubleshoot-${key}`);
+    assert.equal(state.toc.at(-1).hidden, false);
+    assert.equal(shared.hidden, false);
   }
 });

@@ -78,7 +78,7 @@ fn render(source: &str) -> (String, String) {
     (body, toc)
 }
 
-fn installation_tabs(body: &str) -> String {
+fn platform_tabs(body: &str, prefix: &str, purpose: &str) -> String {
     let platforms = [
         ("windows", "Windows"),
         ("macos", "macOS"),
@@ -88,21 +88,19 @@ fn installation_tabs(body: &str) -> String {
     let mut remainder = body;
     for (index, (id, label)) in platforms.iter().enumerate() {
         let heading = format!("<h2 id=\"{id}\">");
-        let (before, section) = remainder
-            .split_once(&heading)
-            .expect("installation platform heading");
+        let (before, section) = remainder.split_once(&heading).expect("platform heading");
         output.push_str(before);
         if index == 0 {
             output.push_str(
                 "<div class=platform-tabs role=tablist aria-label=\"Operating system\" hidden>",
             );
             for (key, name) in platforms {
-                output.push_str(&format!("<button type=button role=tab id=\"tab-{key}\" aria-controls=\"install-{key}\" aria-selected=false tabindex=-1>{name}</button>"));
+                output.push_str(&format!("<button type=button role=tab id=\"tab-{key}\" aria-controls=\"{prefix}-{key}\" aria-selected=false tabindex=-1>{name}</button>"));
             }
             output.push_str("</div>");
         }
         let end = section.find("<h2 ").unwrap_or(section.len());
-        output.push_str(&format!("<section class=platform-panel id=\"install-{id}\" data-platform=\"{id}\" aria-label=\"{label} installation\">{heading}{}</section>", &section[..end]));
+        output.push_str(&format!("<section class=platform-panel id=\"{prefix}-{id}\" data-platform=\"{id}\" aria-label=\"{label} {purpose}\">{heading}{}</section>", &section[..end]));
         remainder = &section[end..];
     }
     output.push_str(remainder);
@@ -175,10 +173,10 @@ pub(super) fn generate(output: &Path) -> Result<()> {
             ));
         }
         let (body, toc) = render(&std::fs::read_to_string(path)?);
-        let body = if name == "installation" {
-            installation_tabs(&body)
-        } else {
-            body
+        let body = match name.as_ref() {
+            "installation" => platform_tabs(&body, "install", "installation"),
+            "troubleshooting" => platform_tabs(&body, "troubleshoot", "troubleshooting"),
+            _ => body,
         };
         let mut pager = String::new();
         for (label, index) in [
