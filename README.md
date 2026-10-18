@@ -22,7 +22,8 @@ install.ps1 -AsService.
 
 ## Documentation
 
-Start with [Quick start](docs/user-guide.md) to connect your first application.
+Read the [online documentation](https://m42e.github.io/unproxy/) or start with
+[Quick start](docs/user-guide.md) to connect your first application.
 
 | Guide | What you’ll find |
 | --- | --- |
