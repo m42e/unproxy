@@ -28,6 +28,13 @@ impl Fixture {
 use std::io::Write;
 
 fn main() {
+    if std::env::current_exe().unwrap().file_stem().unwrap() == "git" {
+        let args = std::env::args().skip(1).collect::<Vec<_>>();
+        let archive = args.iter().position(|arg| arg == "-o").map(|i| &args[i + 1]).unwrap();
+        std::fs::write(archive, "fixture archive").unwrap();
+        return;
+    }
+
     let path = std::env::var_os("CARGO_SHIM_CAPTURE").expect("capture path");
     let args = std::env::args().skip(1).collect::<Vec<_>>().join("\n");
     let mut capture = std::fs::OpenOptions::new()
@@ -39,6 +46,11 @@ fn main() {
         writeln!(capture, "--CALL--").expect("separate captured cargo calls");
     }
     write!(capture, "{args}").expect("write captured cargo arguments");
+
+    if std::env::var_os("CARGO_SHIM_PAC_REPORTS").is_some() {
+        println!("PAC report: Fixture parsing | 100 parses | 1us | 2us");
+        println!("PAC report: Fixture matching | 50 evaluations | 3us | 4us");
+    }
 }
 "#,
         )
@@ -48,6 +60,19 @@ fn main() {
             .arg(&source)
             .arg("-o")
             .arg(&cargo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "rustc stdout: {}\nrustc stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let git = tools.join("git.exe");
+        let output = Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&git)
             .output()
             .unwrap();
         assert!(
@@ -77,6 +102,10 @@ fn main() {
     }
 
     fn command(&self, args: &[&str]) -> Output {
+        self.command_with_pac_reports(args, false)
+    }
+
+    fn command_with_pac_reports(&self, args: &[&str], pac_reports: bool) -> Output {
         let mut paths = vec![self.tools.clone()];
         paths.extend(std::env::split_paths(
             &std::env::var_os("PATH").unwrap_or_default(),
@@ -90,6 +119,9 @@ fn main() {
             .env_remove("APPLE_SIGNING_IDENTITY")
             .env_remove("APPLE_INSTALLER_SIGNING_IDENTITY")
             .args(args);
+        if pac_reports {
+            command.env("CARGO_SHIM_PAC_REPORTS", "1");
+        }
         if let Some(pattern) = std::env::var_os("LLVM_PROFILE_FILE") {
             let pattern = pattern.to_string_lossy();
             let unique = if pattern.contains("%p") && pattern.contains("%m") {
@@ -486,5 +518,54 @@ fn main() {
                 package_version()
             ))
             .is_file()
+    );
+}
+
+#[test]
+fn windows_docs_command_uses_pac_reports_and_writes_the_site() {
+    let fixture = Fixture::new();
+    let root = fixture.root.path();
+    let docs = root.join("docs");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::write(docs.join("user-guide.md"), "# Quick start\n").unwrap();
+    std::fs::write(
+        docs.join("routing.md"),
+        "# PAC routing\n\n<!-- PAC_PERFORMANCE_RESULTS -->\n",
+    )
+    .unwrap();
+    let assets = root.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("app-icon.png"), "fixture icon").unwrap();
+    let site = root.join("site");
+    std::fs::create_dir_all(&site).unwrap();
+    std::fs::write(site.join("index.html"), "@VERSION@ @REPOSITORY@").unwrap();
+
+    let output = fixture.command_with_pac_reports(
+        &[
+            "docs",
+            "--output",
+            "dist/site",
+            "--repository",
+            "owner/project",
+        ],
+        true,
+    );
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let routing = std::fs::read_to_string(root.join("dist/site/docs/routing.html")).unwrap();
+    assert!(routing.contains("<td>Fixture parsing</td><td>100 parses</td><td>1us / 2us</td>"));
+    assert!(routing.contains("<td>Fixture matching</td><td>50 evaluations</td><td>3us / 4us</td>"));
+    assert!(root.join("dist/site/docs/user-guide.html").is_file());
+    assert!(root.join("dist/site/unproxy-icon.png").is_file());
+    assert!(root.join("dist/site/source.zip").is_file());
+    assert!(
+        std::fs::read_to_string(&fixture.cargo_capture)
+            .unwrap()
+            .contains("test\n--release\n--locked\n--lib\npac::tests::")
     );
 }
