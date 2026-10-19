@@ -270,7 +270,11 @@ mod tests {
     #[test]
     fn generated_docs_include_user_pages_only() {
         let output = tempfile::tempdir().unwrap();
-        generate(output.path(), "PAC performance: unit test result").unwrap();
+        generate(
+            output.path(),
+            "Measured during this documentation build.\n\n| Benchmark | Workload | Results |\n| --- | --- | --- |\n| PAC performance | — | unit test result |\n",
+        )
+        .unwrap();
 
         for page in [
             "user-guide",
@@ -296,7 +300,9 @@ mod tests {
         let user_guide = std::fs::read_to_string(output.path().join("user-guide.html")).unwrap();
         assert!(!user_guide.contains("<p class=nav-label>Contributors</p>"));
         let routing = std::fs::read_to_string(output.path().join("routing.html")).unwrap();
-        assert!(routing.contains("PAC performance: unit test result"));
+        assert!(routing.contains("<th>Benchmark</th>"));
+        assert!(routing.contains("<th>Workload</th>"));
+        assert!(routing.contains("<td>PAC performance</td><td>—</td><td>unit test result</td>"));
         assert!(!routing.contains("PAC_PERFORMANCE_RESULTS"));
     }
 }

@@ -686,8 +686,10 @@ printf 'fixture archive' > "$1"
     assert!(f.root.path().join("dist/site/source.zip").is_file());
     let nav = std::fs::read_to_string(f.root.path().join("dist/site/docs/routing.html")).unwrap();
     assert!(nav.find("user-guide.html").unwrap() < nav.find("routing.html").unwrap());
-    assert!(nav.contains("PAC performance: fixture result"));
-    assert!(nav.contains("PAC matching performance: fixture result"));
+    assert!(nav.contains("<th>Benchmark</th>"));
+    assert!(nav.contains("<th>Workload</th>"));
+    assert!(nav.contains("<td>PAC performance</td><td>—</td><td>fixture result</td>"));
+    assert!(nav.contains("<td>PAC matching performance</td><td>—</td><td>fixture result</td>"));
     assert!(!nav.contains("Internal first"));
     assert!(!nav.contains("Internal last"));
     assert!(!f.root.path().join("dist/site/docs/a.html").exists());

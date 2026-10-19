@@ -792,6 +792,36 @@ fn pac_performance_line(line: &str) -> Option<&str> {
     .find_map(|prefix| line.find(prefix).map(|index| &line[index..]))
 }
 
+fn pac_performance_report(lines: &[String], host: &str, generated: &str) -> String {
+    let mut report = format!(
+        "Measured during this documentation build with release-mode PAC tests on `{host}` at `{generated}`.\n\n| Benchmark | Workload | Results |\n| --- | --- | --- |\n"
+    );
+    for line in lines {
+        let (label, details) = line
+            .split_once(": ")
+            .unwrap_or(("PAC performance", line.as_str()));
+        let (benchmark, default_workload) = label
+            .split_once(" (")
+            .and_then(|(benchmark, workload)| {
+                workload
+                    .strip_suffix(')')
+                    .map(|workload| (benchmark, workload))
+            })
+            .unwrap_or((label, "—"));
+        let (workload, result) = details
+            .split_once("; ")
+            .unwrap_or((default_workload, details));
+        report.push_str(&format!(
+            "| {} | {} | {} |\n",
+            benchmark.trim().replace('|', "\\|"),
+            workload.trim().replace('|', "\\|"),
+            result.trim().replace('|', "\\|")
+        ));
+    }
+    report.push('\n');
+    report
+}
+
 fn pac_performance_results() -> Result<String> {
     let commands: [&[&str]; 2] = [
         &[
@@ -847,9 +877,10 @@ fn pac_performance_results() -> Result<String> {
     );
     let host = format!("{} / {}", std::env::consts::OS, std::env::consts::ARCH);
     let generated = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
-    Ok(format!(
-        "Measured during this documentation build with release-mode PAC tests on `{host}` at `{generated}`.\n\n```text\n{}\n```\n",
-        lines.join("\n")
+    Ok(pac_performance_report(
+        &lines,
+        &host,
+        &generated.to_string(),
     ))
 }
 
@@ -909,6 +940,29 @@ mod tests {
             Some("Repeated route parser only: uncached median 300ns")
         );
         assert_eq!(pac_performance_line("test result: ok"), None);
+    }
+
+    #[test]
+    fn pac_performance_report_formats_measurements_as_a_table() {
+        let report = pac_performance_report(
+            &[
+                "PAC performance: four route entries; median 1us, mean 2us".into(),
+                "Repeated route parser only: uncached median 30ns, cached median 10ns".into(),
+                "warm DNS cache (64 entries, 32 hits): median 23us, mean 24us".into(),
+            ],
+            "macOS / aarch64",
+            "2026-10-19 12:00 UTC",
+        );
+
+        assert!(report.contains("| Benchmark | Workload | Results |"));
+        assert!(report.contains("| PAC performance | four route entries | median 1us, mean 2us |"));
+        assert!(report.contains(
+            "| Repeated route parser only | — | uncached median 30ns, cached median 10ns |"
+        ));
+        assert!(
+            report.contains("| warm DNS cache | 64 entries, 32 hits | median 23us, mean 24us |")
+        );
+        assert!(!report.contains("```text"));
     }
 
     #[test]

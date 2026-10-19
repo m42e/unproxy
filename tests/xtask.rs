@@ -190,8 +190,11 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
     assert!(guide.contains("href=\"../unproxy-icon.png\""));
     let routing = std::fs::read_to_string(output_dir.join("docs/routing.html")).unwrap();
     assert!(routing.contains("Measured during this documentation build"));
-    assert!(routing.contains("Repeated route parser only:"));
-    assert!(routing.contains("PAC matching performance:"));
+    assert!(routing.contains("<th>Benchmark</th>"));
+    assert!(routing.contains("<th>Workload</th>"));
+    assert!(routing.contains("<th>Results</th>"));
+    assert!(routing.contains("<td>Repeated route parser only</td>"));
+    assert!(routing.contains("<td>PAC matching performance</td>"));
     assert!(!routing.contains("PAC_PERFORMANCE_RESULTS"));
     assert!(output_dir.join("unproxy-icon.png").is_file());
     let landing = std::fs::read_to_string(output_dir.join("index.html")).unwrap();
