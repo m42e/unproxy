@@ -2,6 +2,9 @@
 
 Unproxy runs on your computer and gives your applications one local proxy address. It applies your organization’s PAC rules and authenticates to upstream proxies for you.
 
+![Application traffic flows to Unproxy at 127.0.0.1:3128 over HTTP or HTTPS CONNECT. Unproxy evaluates PAC per destination, then connects directly or through an HTTP or HTTPS proxy using Basic or Negotiate authentication when needed.](traffic-flow.svg)
+![Application traffic flows to Unproxy at 127.0.0.1:3128 over HTTP or HTTPS CONNECT. Unproxy evaluates PAC per destination, then connects directly or through an HTTP or HTTPS proxy using Basic or Negotiate authentication when needed.](traffic-flow-mobile.svg)
+
 > **The address to remember:** `127.0.0.1:3128`. Use it for both HTTP and HTTPS proxy settings. Unproxy also listens on IPv6 loopback at `[::1]:3128` by default.
 
 ## 1. Install and start Unproxy

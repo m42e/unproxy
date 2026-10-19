@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="330" viewBox="0 0 1000 330" role="img" aria-labelledby="title description">
+  <title id="title">How Unproxy routes application traffic</title>
+  <desc id="description">An application sends HTTP requests and HTTPS CONNECT tunnels to Unproxy at 127.0.0.1:3128. Unproxy evaluates PAC for each destination and connects directly or through an HTTP or HTTPS proxy, handling Basic or Negotiate authentication.</desc>
+  <style>
+    .card { fill: #f5f8fa; stroke: #d5e0e5; }
+    .proxy { fill: #e8f5f1; stroke: #16776d; }
+    .route { fill: #f5f8fa; stroke: #8fa6b1; }
+    .ink { fill: #203541; }
+    .muted { fill: #5a707c; }
+    .line { fill: none; stroke: #78909c; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+    .arrow { fill: #78909c; }
+    .tag { fill: #ffffff; }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      .card, .route { fill: #1a2932; stroke: #3c505b; }
+      .proxy { fill: #1b3836; stroke: #76d6bd; }
+      .ink { fill: #e2eaf0; }
+      .muted { fill: #a2b3c2; }
+      .line { stroke: #90a8b3; }
+      .arrow { fill: #90a8b3; }
+      .tag { fill: #111c23; }
+    }
+  </style>
+
+  <rect class="card" x="20" y="100" width="180" height="130" rx="14" />
+  <text class="muted" x="40" y="130" font-size="12" font-weight="700" letter-spacing="1.4">APPLICATION</text>
+  <text class="ink" x="40" y="163" font-size="18" font-weight="650">Browser, CLI,</text>
+  <text class="ink" x="40" y="187" font-size="18" font-weight="650">or service</text>
+  <text class="muted" x="40" y="211" font-size="13">One proxy setting</text>
+
+  <rect class="proxy" x="265" y="100" width="220" height="130" rx="14" />
+  <text class="ink" x="287" y="132" font-size="12" font-weight="700" letter-spacing="1.4">UNPROXY</text>
+  <text class="ink" x="287" y="168" font-size="18" font-weight="650">Local HTTP proxy</text>
+  <text class="muted" x="287" y="198" font-size="15" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">127.0.0.1:3128</text>
+
+  <rect class="card" x="560" y="100" width="190" height="130" rx="14" />
+  <text class="muted" x="582" y="132" font-size="12" font-weight="700" letter-spacing="1.4">PAC POLICY</text>
+  <text class="ink" x="582" y="168" font-size="18" font-weight="650">Evaluate each</text>
+  <text class="ink" x="582" y="192" font-size="18" font-weight="650">destination</text>
+  <text class="muted" x="582" y="215" font-size="13">Choose a route</text>
+
+  <path class="line" d="M200 165H255" />
+  <path class="arrow" d="M265 165l-10-6v12z" />
+  <text class="muted tag" x="201" y="78" font-size="12" text-anchor="middle">HTTP + HTTPS CONNECT</text>
+
+  <path class="line" d="M485 165H550" />
+  <path class="arrow" d="M560 165l-10-6v12z" />
+  <text class="muted tag" x="520" y="78" font-size="12" text-anchor="middle">per destination</text>
+
+  <path class="line" d="M750 165H790V83H818" />
+  <path class="arrow" d="M828 83l-10-6v12z" />
+  <path class="line" d="M790 165v102h28" />
+  <path class="arrow" d="M828 267l-10-6v12z" />
+
+  <rect class="route" x="828" y="45" width="152" height="76" rx="12" />
+  <text class="ink" x="848" y="75" font-size="15" font-weight="700">DIRECT</text>
+  <text class="muted" x="848" y="99" font-size="13">to destination</text>
+
+  <rect class="route" x="828" y="226" width="152" height="82" rx="12" />
+  <text class="ink" x="848" y="254" font-size="14" font-weight="700">UPSTREAM PROXY</text>
+  <text class="muted" x="848" y="276" font-size="12">HTTP / HTTPS</text>
+  <text class="muted" x="848" y="295" font-size="11">Basic / Negotiate</text>
+</svg>
