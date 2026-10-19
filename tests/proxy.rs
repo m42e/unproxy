@@ -520,11 +520,11 @@ async fn idle_deadline_allows_active_streaming_response_bodies() {
         let mut request = [0; 1024];
         let _ = socket.read(&mut request).await.unwrap();
         socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n")
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n")
             .await
             .unwrap();
-        for _ in 0..10 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             socket.write_all(b"x").await.unwrap();
         }
     });
@@ -533,7 +533,7 @@ async fn idle_deadline_allows_active_streaming_response_bodies() {
         ConnectionOptions::default(),
     )
     .listen("127.0.0.1:0".parse().unwrap())
-    .idle_timeout(std::time::Duration::from_millis(50))
+    .idle_timeout(std::time::Duration::from_millis(500))
     .bind()
     .await
     .unwrap();
@@ -547,7 +547,7 @@ async fn idle_deadline_allows_active_streaming_response_bodies() {
     .await
     .unwrap()
     .unwrap();
-    assert!(response.ends_with(b"xxxxxxxxxx"));
+    assert!(response.ends_with(b"xxxxxxxxxxxxxxxxxxxx"));
     origin_task.await.unwrap();
     proxy.shutdown();
     proxy.wait().await;
