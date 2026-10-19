@@ -200,14 +200,12 @@ article>h1+p {
 
 article img {
   display:block;
-  width:100%;
+  width:auto;
   max-width:100%;
+  max-height:100vh;
+  max-height:100svh;
   height:auto;
   margin:30px 0
-}
-
-article img[src="traffic-flow-mobile.svg"] {
-  display:none
 }
 
 p {
@@ -501,14 +499,6 @@ footer {
 
   article>h1+p {
     font-size:17px
-  }
-
-  article img[src="traffic-flow.svg"] {
-    display:none
-  }
-
-  article img[src="traffic-flow-mobile.svg"] {
-    display:block
   }
 
   pre {
