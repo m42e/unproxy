@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- Improve the documentation site with platform-specific setup and removal steps,
+  shell tabs, and a traffic-flow guide.
+- Include PAC parsing and matching measurements in the routing guide.
+
 ## 0.4.1
 
 - Add the Unproxy icon to the macOS app bundle and documentation.
