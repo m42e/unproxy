@@ -184,7 +184,7 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
     assert!(guide.contains("does not read desktop preferences automatically"));
     assert!(guide.contains("<ol>") || guide.contains("<h2"));
     assert!(guide.contains("src=\"traffic-flow.svg\""));
-    assert!(guide.contains("src=\"traffic-flow-mobile.svg\""));
+    assert!(!guide.contains("traffic-flow-mobile.svg"));
     assert!(guide.contains("href=\"installation.html\""));
     assert!(guide.contains("aria-label=\"On this page\""));
     assert!(guide.contains("href=\"#1-install-and-start-unproxy\""));
@@ -207,9 +207,7 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
     for asset in ["docs.css", "docs.js"] {
         assert!(output_dir.join("docs").join(asset).is_file());
     }
-    for asset in ["traffic-flow.svg", "traffic-flow-mobile.svg"] {
-        assert!(output_dir.join("docs").join(asset).is_file());
-    }
+    assert!(output_dir.join("docs/traffic-flow.svg").is_file());
     let install = std::fs::read_to_string(output_dir.join("docs/installation.html")).unwrap();
     assert!(install.contains("role=tablist"));
     assert_eq!(install.matches("role=tablist").count(), 2);
