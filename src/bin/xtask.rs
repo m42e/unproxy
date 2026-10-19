@@ -778,13 +778,82 @@ fn info_plist(id: &str, executable: &str, minimum: &str, icon_file: Option<&str>
         html_escape(unproxy::VERSION)
     )
 }
+fn pac_performance_line(line: &str) -> Option<&str> {
+    [
+        "PAC performance:",
+        "PAC matching performance:",
+        "Repeated route parser only:",
+        "warm DNS cache",
+        "PAC slow DNS",
+        "PAC canceled queue",
+        "PAC live queue",
+    ]
+    .iter()
+    .find_map(|prefix| line.find(prefix).map(|index| &line[index..]))
+}
+
+fn pac_performance_results() -> Result<String> {
+    let commands: [&[&str]; 2] = [
+        &[
+            "test",
+            "--release",
+            "--locked",
+            "--lib",
+            "pac::tests::",
+            "--",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ],
+        &[
+            "test",
+            "--release",
+            "--locked",
+            "--test",
+            "pac_performance",
+            "--test",
+            "pac_matching_performance",
+            "--",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ],
+    ];
+    let mut lines = Vec::new();
+    for args in commands {
+        let description = args.join(" ");
+        let output = Command::new("cargo")
+            .args(args)
+            .output()
+            .with_context(|| format!("running cargo {description}"))?;
+        anyhow::ensure!(
+            output.status.success(),
+            "PAC performance command failed ({description}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{stdout}\n{stderr}");
+        lines.extend(
+            combined
+                .lines()
+                .filter_map(pac_performance_line)
+                .map(str::to_owned),
+        );
+    }
+    anyhow::ensure!(
+        !lines.is_empty(),
+        "PAC performance tests completed without reporting results"
+    );
+    let host = format!("{} / {}", std::env::consts::OS, std::env::consts::ARCH);
+    let generated = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+    Ok(format!(
+        "Measured during this documentation build with release-mode PAC tests on `{host}` at `{generated}`.\n\n```text\n{}\n```\n",
+        lines.join("\n")
+    ))
+}
+
 fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
-    let book = output.join("docs");
-    std::fs::create_dir_all(&book)?;
-    documentation::generate(&book)?;
-    std::fs::copy("assets/app-icon.png", output.join("unproxy-icon.png"))?;
-    let mut landing = std::fs::read_to_string("site/index.html")?
-        .replace("@VERSION@", &html_escape(unproxy::VERSION));
     let repository = repository.unwrap_or("");
     anyhow::ensure!(
         repository.is_empty()
@@ -795,6 +864,13 @@ fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
                 && !repository.contains(' ')),
         "repository must be OWNER/NAME"
     );
+    let book = output.join("docs");
+    std::fs::create_dir_all(&book)?;
+    let pac_performance_results = pac_performance_results()?;
+    documentation::generate(&book, &pac_performance_results)?;
+    std::fs::copy("assets/app-icon.png", output.join("unproxy-icon.png"))?;
+    let mut landing = std::fs::read_to_string("site/index.html")?
+        .replace("@VERSION@", &html_escape(unproxy::VERSION));
     landing = landing.replace("@REPOSITORY@", &html_escape(repository));
     std::fs::write(output.join("index.html"), landing)?;
     let archive = if output.is_absolute() {
@@ -822,6 +898,17 @@ mod tests {
     fn release_package_version_omits_build_revision() {
         let version = "1.2.3+0123456789abcdef";
         assert_eq!(release_version(version), "1.2.3");
+    }
+
+    #[test]
+    fn pac_performance_line_discards_test_harness_prefixes() {
+        assert_eq!(
+            pac_performance_line(
+                "test pac::tests::parser ... Repeated route parser only: uncached median 300ns"
+            ),
+            Some("Repeated route parser only: uncached median 300ns")
+        );
+        assert_eq!(pac_performance_line("test result: ok"), None);
     }
 
     #[test]

@@ -14,6 +14,7 @@ const USER_PAGES: &[(&str, &str)] = &[
     ("configuration", "Configuration reference"),
     ("troubleshooting", "Troubleshooting"),
 ];
+const PAC_PERFORMANCE_MARKER: &str = "<!-- PAC_PERFORMANCE_RESULTS -->";
 
 fn slug(text: &str) -> String {
     text.to_lowercase()
@@ -156,7 +157,7 @@ fn user_pages(available: &[std::path::PathBuf]) -> Vec<(String, String, std::pat
         .collect()
 }
 
-pub(super) fn generate(output: &Path) -> Result<()> {
+pub(super) fn generate(output: &Path, pac_performance_results: &str) -> Result<()> {
     std::fs::write(
         output.join("docs.css"),
         include_str!("../../../site/docs.css"),
@@ -193,7 +194,15 @@ pub(super) fn generate(output: &Path) -> Result<()> {
                 html_escape(label)
             ));
         }
-        let (body, toc) = render(&std::fs::read_to_string(path)?);
+        let mut source = std::fs::read_to_string(path)?;
+        if name == "routing" {
+            anyhow::ensure!(
+                source.matches(PAC_PERFORMANCE_MARKER).count() == 1,
+                "routing guide must contain exactly one PAC performance results marker"
+            );
+            source = source.replace(PAC_PERFORMANCE_MARKER, pac_performance_results);
+        }
+        let (body, toc) = render(&source);
         let body = match name.as_ref() {
             "installation" => platform_tabs_in_section(
                 &platform_tabs(&body, "install", "installation"),
@@ -261,7 +270,7 @@ mod tests {
     #[test]
     fn generated_docs_include_user_pages_only() {
         let output = tempfile::tempdir().unwrap();
-        generate(output.path()).unwrap();
+        generate(output.path(), "PAC performance: unit test result").unwrap();
 
         for page in [
             "user-guide",
@@ -286,5 +295,8 @@ mod tests {
 
         let user_guide = std::fs::read_to_string(output.path().join("user-guide.html")).unwrap();
         assert!(!user_guide.contains("<p class=nav-label>Contributors</p>"));
+        let routing = std::fs::read_to_string(output.path().join("routing.html")).unwrap();
+        assert!(routing.contains("PAC performance: unit test result"));
+        assert!(!routing.contains("PAC_PERFORMANCE_RESULTS"));
     }
 }

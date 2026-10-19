@@ -643,6 +643,10 @@ fn package_rejects_incompatible_targets_and_reports_missing_binaries_and_collisi
 fn documentation_generation_publishes_user_pages_and_validates_repository_names() {
     let f = Fixture::new();
     f.tool(
+        "cargo",
+        "printf '%s\\n' 'PAC performance: fixture result' 'PAC matching performance: fixture result'",
+    );
+    f.tool(
         "git",
         r#"
 while [ "$1" != "-o" ]; do shift; done
@@ -652,7 +656,11 @@ printf 'fixture archive' > "$1"
     );
     std::fs::create_dir_all(f.root.path().join("docs")).unwrap();
     std::fs::write(f.root.path().join("docs/user-guide.md"), "# Quick start\n").unwrap();
-    std::fs::write(f.root.path().join("docs/routing.md"), "# PAC & routing\n").unwrap();
+    std::fs::write(
+        f.root.path().join("docs/routing.md"),
+        "# PAC & routing\n\n<!-- PAC_PERFORMANCE_RESULTS -->\n",
+    )
+    .unwrap();
     std::fs::write(f.root.path().join("docs/a.md"), "# Internal first\n").unwrap();
     std::fs::write(f.root.path().join("docs/z.md"), "# Internal last\n").unwrap();
     std::fs::create_dir_all(f.root.path().join("site")).unwrap();
@@ -678,6 +686,8 @@ printf 'fixture archive' > "$1"
     assert!(f.root.path().join("dist/site/source.zip").is_file());
     let nav = std::fs::read_to_string(f.root.path().join("dist/site/docs/routing.html")).unwrap();
     assert!(nav.find("user-guide.html").unwrap() < nav.find("routing.html").unwrap());
+    assert!(nav.contains("PAC performance: fixture result"));
+    assert!(nav.contains("PAC matching performance: fixture result"));
     assert!(!nav.contains("Internal first"));
     assert!(!nav.contains("Internal last"));
     assert!(!f.root.path().join("dist/site/docs/a.html").exists());

@@ -48,16 +48,12 @@ If it is not on PATH, use the full path to the executable. This inspects the rou
 
 ## PAC parsing and matching performance
 
-Local release-mode microbenchmarks on macOS ARM64 measured these medians:
+The documentation build runs release-mode benchmarks for route parsing, PAC
+matching, and DNS resolution. The generated report below records results from
+the same machine and build that produced this guide. These synthetic workloads
+do not represent full request latency or proxy connection time.
 
-| Workload | Median |
-| --- | ---: |
-| 96 substring checks | 13.28 µs per evaluation (138 ns per check) |
-| 96 warm wildcard checks | 36.33 µs per evaluation (378 ns per check) |
-| 96 substring and cold wildcard pairs | 103.06 µs per evaluation (1.07 µs per pair) |
-| Repeated route-result cache hit, parser only | 50 ns |
-
-The matching measurements include JavaScript execution and route parsing. The parser-only measurement is for a repeated route result that hits the cache. These synthetic timings exclude network and connection time, vary by PAC script and hardware, and do not represent full request latency.
+<!-- PAC_PERFORMANCE_RESULTS -->
 
 ## Reload a policy
 

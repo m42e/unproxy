@@ -8,6 +8,13 @@ cargo test --release --locked --test pac_matching_performance -- --ignored --noc
 cargo test --release --locked --lib performance -- --ignored --nocapture --test-threads=1
 ```
 
+Each `cargo xtask docs` build runs the PAC parser, matching, and DNS-resolution
+measurements in release mode. Their output is embedded in the user-facing
+[PAC & routing guide](routing.md#pac-parsing-and-matching-performance), so the
+published report reflects the machine and code used for that documentation
+build. The filter-list measurements remain available through `cargo xtask perf`
+and are not part of the routing report.
+
 The integration cases include the policy worker and its request/reply channels.
 They warm up each policy, then report five batches of measurements. Concurrent
 results are amortized time per completed evaluation, not individual request

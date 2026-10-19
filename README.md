@@ -36,8 +36,10 @@ Read the [online documentation](https://m42e.github.io/unproxy/) or start with
 | [Troubleshooting](docs/troubleshooting.md) | Connection checks, errors, logs, and support reports. |
 
 Build the styled, offline-readable documentation with `cargo xtask docs`.
-Open `dist/site/docs/user-guide.html` to preview it. The same Markdown is
-readable here on GitHub.
+Each documentation build runs the release PAC parsing, matching, and DNS
+resolution benchmarks and includes that run's measurements in the PAC & routing
+guide. Open `dist/site/docs/user-guide.html` to preview the site. The Markdown
+guides remain readable here on GitHub.
 
 To inspect CLI configuration, PAC routes, listeners, and authentication
 readiness, run `unproxy doctor`. Add `--url https://example.com/` to check
