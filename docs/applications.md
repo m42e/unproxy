@@ -74,25 +74,43 @@ Use `curl.exe` in Windows PowerShell. `--noproxy ""` clears bypass rules for thi
 
 ## Stop using proxy variables
 
-Remove any persistent setup from your shell profile too. In Bash or Zsh, clear both cases in the current terminal:
+Remove any persistent setup from your shell profile too.
+
+### Bash
+
+Clear both cases in the current terminal:
 
 ```sh
 unset http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY
 ```
 
-In Fish:
+### Zsh
+
+Clear both cases in the current terminal:
+
+```sh
+unset http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY
+```
+
+### Fish
+
+Clear the proxy variables in the current terminal:
 
 ```fish
 set -e http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY
 ```
 
-In PowerShell:
+### PowerShell
+
+Clear the proxy variables in the current terminal:
 
 ```powershell
 Remove-Item Env:http_proxy, Env:https_proxy, Env:no_proxy -ErrorAction SilentlyContinue
 ```
 
-In Command Prompt:
+### Windows Command Prompt
+
+Clear the proxy variables in the current terminal:
 
 ```bat
 set http_proxy=

@@ -110,6 +110,57 @@ fn platform_tab_group(
     output
 }
 
+fn shell_tab_group(body: &str, prefix: &str, purpose: &str) -> String {
+    let shells = [
+        ("bash", "Bash"),
+        ("zsh", "Zsh"),
+        ("fish", "Fish"),
+        ("powershell", "PowerShell"),
+        ("cmd", "Windows Command Prompt"),
+    ];
+    let mut output = String::new();
+    let mut remainder = body;
+    for (index, (id, label)) in shells.iter().enumerate() {
+        let heading_end = format!(">{label}</h3>");
+        let heading_end_index = remainder.find(&heading_end).expect("shell heading");
+        let heading_start = remainder[..heading_end_index]
+            .rfind("<h3 ")
+            .expect("shell heading start");
+        let section_end = remainder[heading_end_index + heading_end.len()..]
+            .find("<h3 ")
+            .map(|relative| heading_end_index + heading_end.len() + relative)
+            .unwrap_or(remainder.len());
+
+        output.push_str(&remainder[..heading_start]);
+        if index == 0 {
+            output.push_str("<div class=shell-tabs role=tablist aria-label=Shell hidden>");
+            for (shell_id, shell_label) in &shells {
+                output.push_str(&format!("<button type=button role=tab id=\"tab-{prefix}-{shell_id}\" aria-controls=\"{prefix}-{shell_id}\" aria-selected=false tabindex=-1>{shell_label}</button>"));
+            }
+            output.push_str("</div>");
+        }
+        let heading_end_index = heading_end_index + heading_end.len();
+        let heading = &remainder[heading_start..heading_end_index];
+        let content = &remainder[heading_end_index..section_end];
+        output.push_str(&format!("<section class=shell-panel id=\"{prefix}-{id}\" data-shell=\"{id}\" aria-label=\"{label} {purpose}\">{heading}{content}</section>"));
+        remainder = &remainder[section_end..];
+    }
+    output.push_str(remainder);
+    output
+}
+
+fn shell_tabs_in_section(body: &str, section_id: &str, prefix: &str, purpose: &str) -> String {
+    let heading = format!("<h2 id=\"{section_id}\">");
+    let (before, section) = body.split_once(&heading).expect("shell section heading");
+    let (title, section) = section.split_once("</h2>").expect("shell section title");
+    let end = section.find("<h2 ").unwrap_or(section.len());
+    let section_body = shell_tab_group(&section[..end], prefix, purpose);
+    format!(
+        "{before}{heading}{title}</h2>{section_body}{}",
+        &section[end..]
+    )
+}
+
 fn platform_tabs(body: &str, prefix: &str, purpose: &str) -> String {
     platform_tab_group(
         body,
@@ -204,6 +255,12 @@ pub(super) fn generate(output: &Path, pac_performance_results: &str) -> Result<(
         }
         let (body, toc) = render(&source);
         let body = match name.as_ref() {
+            "applications" => shell_tabs_in_section(
+                &shell_tabs_in_section(&body, "terminal-setup", "shell-setup", "terminal setup"),
+                "stop-using-proxy-variables",
+                "shell-cleanup",
+                "proxy variable cleanup",
+            ),
             "installation" => platform_tabs_in_section(
                 &platform_tabs(&body, "install", "installation"),
                 "remove-unproxy",
