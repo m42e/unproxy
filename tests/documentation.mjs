@@ -55,6 +55,7 @@ function setup(platform, hash = '', prefixes = ['install']) {
       querySelectorAll(selector) {
         if (selector === '.platform-tabs') return tabs;
         if (selector === '.platform-panel') return panels;
+        if (selector === '.shell-tabs') return [];
         return toc;
       },
       getElementById(id) { return targets[id] ?? null; },
