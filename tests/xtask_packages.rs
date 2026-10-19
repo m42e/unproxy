@@ -644,7 +644,7 @@ fn documentation_generation_publishes_user_pages_and_validates_repository_names(
     let f = Fixture::new();
     f.tool(
         "cargo",
-        "printf '%s\\n' 'PAC performance: fixture result' 'PAC matching performance: fixture result'",
+        "printf '%s\\n' 'PAC report: Fixture parsing | 100 parses | 1us | 2us' 'PAC report: Fixture matching | 50 evaluations | 3us | 4us'",
     );
     f.tool(
         "git",
@@ -686,10 +686,11 @@ printf 'fixture archive' > "$1"
     assert!(f.root.path().join("dist/site/source.zip").is_file());
     let nav = std::fs::read_to_string(f.root.path().join("dist/site/docs/routing.html")).unwrap();
     assert!(nav.find("user-guide.html").unwrap() < nav.find("routing.html").unwrap());
-    assert!(nav.contains("<th>Benchmark</th>"));
-    assert!(nav.contains("<th>Workload</th>"));
-    assert!(nav.contains("<td>PAC performance</td><td>—</td><td>fixture result</td>"));
-    assert!(nav.contains("<td>PAC matching performance</td><td>—</td><td>fixture result</td>"));
+    assert!(nav.contains("<th>Use case</th>"));
+    assert!(nav.contains("<th>Load / cases tested</th>"));
+    assert!(nav.contains("<th>Timing (median / max)</th>"));
+    assert!(nav.contains("<td>Fixture parsing</td><td>100 parses</td><td>1us / 2us</td>"));
+    assert!(nav.contains("<td>Fixture matching</td><td>50 evaluations</td><td>3us / 4us</td>"));
     assert!(!nav.contains("Internal first"));
     assert!(!nav.contains("Internal last"));
     assert!(!f.root.path().join("dist/site/docs/a.html").exists());

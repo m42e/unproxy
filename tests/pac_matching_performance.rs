@@ -68,7 +68,7 @@ fn assert_routes(routes: &Routes, case: &Case) {
     assert_eq!(routes.to_string(), case.expected);
 }
 
-fn benchmark(label: &str, script: &str, unit: &str) {
+fn benchmark(label: &str, script: &str) {
     let mut pac = Pac::new(Some(script)).unwrap();
     let inputs = cases();
     for input in &inputs[..WARMUP] {
@@ -87,20 +87,18 @@ fn benchmark(label: &str, script: &str, unit: &str) {
         }
         outputs.clear();
     }
-    report(label, &timings, unit);
+    report(label, &timings);
 }
 
-fn report(label: &str, timings: &[Duration], unit: &str) {
-    let total: Duration = timings.iter().sum();
+fn report(label: &str, timings: &[Duration]) {
     let count = BATCH_SIZE * timings.len();
-    let mean = total / count as u32;
     let mut ordered = timings.to_vec();
     ordered.sort_unstable();
     let median = ordered[ordered.len() / 2] / BATCH_SIZE as u32;
+    let max = *ordered.last().unwrap() / BATCH_SIZE as u32;
     println!(
-        "PAC matching performance: {label}; {count} evaluations; median {median:.2?}, mean {mean:.2?} per evaluation; median {:.2?}, mean {:.2?} per {unit} (amortized, includes JavaScript and one route parse)",
-        median / HELPERS as u32,
-        mean / HELPERS as u32,
+        "PAC report: PAC matching: {label} | {count} evaluations ({BATCH_SIZE} per sample × {} samples) | {median:.2?} | {max:.2?}",
+        timings.len()
     );
 }
 
@@ -156,11 +154,7 @@ fn matching_workloads_use_distinct_inputs_and_return_correct_routes() {
 #[test]
 #[ignore = "performance measurement; run with cargo xtask perf"]
 fn substr_only_throughput() {
-    benchmark(
-        "96 substr calls, unique hosts and routes",
-        &substr_script(),
-        "substr call",
-    );
+    benchmark("96 substr calls, unique hosts and routes", &substr_script());
 }
 
 #[test]
@@ -169,7 +163,6 @@ fn warm_realistic_glob_patterns() {
     benchmark(
         "96 warm glob checks, unique hosts and routes",
         &warm_glob_script(),
-        "glob call",
     );
 }
 
@@ -179,6 +172,5 @@ fn substr_and_cold_glob_pattern() {
     benchmark(
         "96 substr/cold-glob pairs, unique hosts and routes",
         cold_combined_script(),
-        "pair",
     );
 }

@@ -779,47 +779,38 @@ fn info_plist(id: &str, executable: &str, minimum: &str, icon_file: Option<&str>
     )
 }
 fn pac_performance_line(line: &str) -> Option<&str> {
-    [
-        "PAC performance:",
-        "PAC matching performance:",
-        "Repeated route parser only:",
-        "warm DNS cache",
-        "PAC slow DNS",
-        "PAC canceled queue",
-        "PAC live queue",
-    ]
-    .iter()
-    .find_map(|prefix| line.find(prefix).map(|index| &line[index..]))
+    line.find("PAC report:").map(|index| &line[index..])
 }
 
-fn pac_performance_report(lines: &[String], host: &str, generated: &str) -> String {
+fn pac_performance_report(lines: &[String], host: &str, generated: &str) -> Result<String> {
     let mut report = format!(
-        "Measured during this documentation build with release-mode PAC tests on `{host}` at `{generated}`.\n\n| Benchmark | Workload | Results |\n| --- | --- | --- |\n"
+        "Measured during this documentation build with release-mode PAC tests on `{host}` at `{generated}`.\n\n| Use case | Load / cases tested | Timing (median / max) |\n| --- | --- | --- |\n"
     );
     for line in lines {
-        let (label, details) = line
-            .split_once(": ")
-            .unwrap_or(("PAC performance", line.as_str()));
-        let (benchmark, default_workload) = label
-            .split_once(" (")
-            .and_then(|(benchmark, workload)| {
-                workload
-                    .strip_suffix(')')
-                    .map(|workload| (benchmark, workload))
-            })
-            .unwrap_or((label, "—"));
-        let (workload, result) = details
-            .split_once("; ")
-            .unwrap_or((default_workload, details));
+        let mut fields = line
+            .strip_prefix("PAC report: ")
+            .context("invalid PAC performance report line")?
+            .split(" | ");
+        let use_case = fields
+            .next()
+            .context("PAC report is missing its use case")?;
+        let load = fields.next().context("PAC report is missing its load")?;
+        let median = fields.next().context("PAC report is missing its median")?;
+        let max = fields.next().context("PAC report is missing its maximum")?;
+        anyhow::ensure!(
+            fields.next().is_none(),
+            "PAC report has more than four fields: {line}"
+        );
         report.push_str(&format!(
-            "| {} | {} | {} |\n",
-            benchmark.trim().replace('|', "\\|"),
-            workload.trim().replace('|', "\\|"),
-            result.trim().replace('|', "\\|")
+            "| {} | {} | {} / {} |\n",
+            use_case.trim().replace('|', "\\|"),
+            load.trim().replace('|', "\\|"),
+            median.trim().replace('|', "\\|"),
+            max.trim().replace('|', "\\|")
         ));
     }
     report.push('\n');
-    report
+    Ok(report)
 }
 
 fn pac_performance_results() -> Result<String> {
@@ -877,11 +868,7 @@ fn pac_performance_results() -> Result<String> {
     );
     let host = format!("{} / {}", std::env::consts::OS, std::env::consts::ARCH);
     let generated = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
-    Ok(pac_performance_report(
-        &lines,
-        &host,
-        &generated.to_string(),
-    ))
+    pac_performance_report(&lines, &host, &generated.to_string())
 }
 
 fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
@@ -935,9 +922,9 @@ mod tests {
     fn pac_performance_line_discards_test_harness_prefixes() {
         assert_eq!(
             pac_performance_line(
-                "test pac::tests::parser ... Repeated route parser only: uncached median 300ns"
+                "test pac::tests::parser ... PAC report: route parsing | 100,000 parses | 30ns | 40ns"
             ),
-            Some("Repeated route parser only: uncached median 300ns")
+            Some("PAC report: route parsing | 100,000 parses | 30ns | 40ns")
         );
         assert_eq!(pac_performance_line("test result: ok"), None);
     }
@@ -946,23 +933,25 @@ mod tests {
     fn pac_performance_report_formats_measurements_as_a_table() {
         let report = pac_performance_report(
             &[
-                "PAC performance: four route entries; median 1us, mean 2us".into(),
-                "Repeated route parser only: uncached median 30ns, cached median 10ns".into(),
-                "warm DNS cache (64 entries, 32 hits): median 23us, mean 24us".into(),
+                "PAC report: four route entries | 600 evaluations | 1us | 2us".into(),
+                "PAC report: route parsing (uncached) | 100,000 parses | 30ns | 40ns".into(),
             ],
             "macOS / aarch64",
             "2026-10-19 12:00 UTC",
-        );
+        )
+        .unwrap();
 
-        assert!(report.contains("| Benchmark | Workload | Results |"));
-        assert!(report.contains("| PAC performance | four route entries | median 1us, mean 2us |"));
-        assert!(report.contains(
-            "| Repeated route parser only | — | uncached median 30ns, cached median 10ns |"
-        ));
+        assert!(report.contains("| Use case | Load / cases tested | Timing (median / max) |"));
+        assert!(report.contains("| four route entries | 600 evaluations | 1us / 2us |"));
+        assert!(report.contains("| route parsing (uncached) | 100,000 parses | 30ns / 40ns |"));
         assert!(
-            report.contains("| warm DNS cache | 64 entries, 32 hits | median 23us, mean 24us |")
+            pac_performance_report(
+                &["PAC report: bad row | missing max".into()],
+                "macOS / aarch64",
+                "2026-10-19 12:00 UTC",
+            )
+            .is_err()
         );
-        assert!(!report.contains("```text"));
     }
 
     #[test]

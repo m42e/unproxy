@@ -208,15 +208,13 @@ where
 }
 
 fn report(label: &str, timings: &[Duration], operations: usize) {
-    let total: Duration = timings.iter().sum();
     let count = operations * timings.len();
-    let mean = total / count as u32;
     let mut ordered = timings.to_vec();
     ordered.sort_unstable();
     let median = ordered[ordered.len() / 2] / operations as u32;
-    let min = *ordered.first().unwrap() / operations as u32;
     let max = *ordered.last().unwrap() / operations as u32;
     println!(
-        "PAC performance: {label}; {count} evaluations total, min {min:.2?}, median {median:.2?}, mean {mean:.2?}, max {max:.2?} per evaluation"
+        "PAC report: PAC evaluation: {label} | {count} evaluations ({operations} per sample × {} samples) | {median:.2?} | {max:.2?}",
+        timings.len()
     );
 }

@@ -329,7 +329,7 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
         generate(
             output.path(),
-            "Measured during this documentation build.\n\n| Benchmark | Workload | Results |\n| --- | --- | --- |\n| PAC performance | — | unit test result |\n",
+            "Measured during this documentation build.\n\n| Use case | Load / cases tested | Timing (median / max) |\n| --- | --- | --- |\n| Example PAC evaluation | 10 cases | 1us / 2us |\n",
         )
         .unwrap();
 
@@ -357,9 +357,12 @@ mod tests {
         let user_guide = std::fs::read_to_string(output.path().join("user-guide.html")).unwrap();
         assert!(!user_guide.contains("<p class=nav-label>Contributors</p>"));
         let routing = std::fs::read_to_string(output.path().join("routing.html")).unwrap();
-        assert!(routing.contains("<th>Benchmark</th>"));
-        assert!(routing.contains("<th>Workload</th>"));
-        assert!(routing.contains("<td>PAC performance</td><td>—</td><td>unit test result</td>"));
+        assert!(routing.contains("<th>Use case</th>"));
+        assert!(routing.contains("<th>Load / cases tested</th>"));
+        assert!(routing.contains("<th>Timing (median / max)</th>"));
+        assert!(
+            routing.contains("<td>Example PAC evaluation</td><td>10 cases</td><td>1us / 2us</td>")
+        );
         assert!(!routing.contains("PAC_PERFORMANCE_RESULTS"));
     }
 

@@ -1384,9 +1384,17 @@ mod tests {
         }
         uncached.sort_unstable();
         cached.sort_unstable();
+        let load = format!(
+            "{} parses (5 samples × {ITERATIONS} parses)",
+            5 * ITERATIONS
+        );
         println!(
-            "Repeated route parser only: uncached median {:?}, cached median {:?}",
-            uncached[2], cached[2]
+            "PAC report: Route result parsing (uncached) | {load} | {:?} | {:?}",
+            uncached[2], uncached[4]
+        );
+        println!(
+            "PAC report: Route result parsing (cached) | {load} | {:?} | {:?}",
+            cached[2], cached[4]
         );
     }
 
@@ -1627,9 +1635,8 @@ mod tests {
             }
             samples.sort_unstable();
             println!(
-                "warm DNS cache ({size} entries, 32 hits): median {:?}, mean {:?}",
-                samples[250],
-                samples.iter().sum::<Duration>() / 500
+                "PAC report: Warm DNS cache | {size} filler entries + 1 hot entry; 500 evaluations × 32 DNS hits | {:?} | {:?}",
+                samples[250], samples[499]
             );
         }
     }
@@ -1682,9 +1689,14 @@ mod tests {
             queue_latency.sort_unstable();
             execution_time.sort_unstable();
             println!(
-                "PAC slow DNS ({worker_count} resolver workers): fast lookup queue latency median {:?}, execution median {:?}",
+                "PAC report: Fast DNS queue latency ({worker_count} resolver workers) | {SAMPLES} fast/slow lookup pairs | {:?} | {:?}",
                 queue_latency[SAMPLES / 2],
-                execution_time[SAMPLES / 2]
+                queue_latency[SAMPLES - 1]
+            );
+            println!(
+                "PAC report: Fast DNS resolver execution ({worker_count} resolver workers) | {SAMPLES} fast/slow lookup pairs | {:?} | {:?}",
+                execution_time[SAMPLES / 2],
+                execution_time[SAMPLES - 1]
             );
         }
     }
@@ -1778,9 +1790,14 @@ mod tests {
             execution_time.sort_unstable();
             let workload = if canceled { "canceled" } else { "live" };
             println!(
-                "PAC {workload} queue ({QUEUED} requests): queue drain after DNS release median {:?}, isolated evaluation median {:?}",
+                "PAC report: PAC queue drain after DNS release ({workload}) | {QUEUED} queued requests per sample × {SAMPLES} samples | {:?} | {:?}",
                 queue_latency[SAMPLES / 2],
-                execution_time[SAMPLES / 2]
+                queue_latency[SAMPLES - 1]
+            );
+            println!(
+                "PAC report: Isolated PAC evaluation after {workload} queue | 1 evaluation per sample × {SAMPLES} samples | {:?} | {:?}",
+                execution_time[SAMPLES / 2],
+                execution_time[SAMPLES - 1]
             );
         }
     }

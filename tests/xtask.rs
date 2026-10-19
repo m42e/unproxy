@@ -158,6 +158,8 @@ fn release_notes_reject_a_changelog_without_a_release_section() {
     );
 }
 
+// The docs command launches PAC timing benchmarks that coverage builds exclude.
+#[cfg(not(coverage))]
 #[test]
 fn docs_command_generates_pages_landing_page_and_source_archive() {
     let temp = tempfile::tempdir().unwrap();
@@ -192,11 +194,11 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
     assert!(guide.contains("href=\"../unproxy-icon.png\""));
     let routing = std::fs::read_to_string(output_dir.join("docs/routing.html")).unwrap();
     assert!(routing.contains("Measured during this documentation build"));
-    assert!(routing.contains("<th>Benchmark</th>"));
-    assert!(routing.contains("<th>Workload</th>"));
-    assert!(routing.contains("<th>Results</th>"));
-    assert!(routing.contains("<td>Repeated route parser only</td>"));
-    assert!(routing.contains("<td>PAC matching performance</td>"));
+    assert!(routing.contains("<th>Use case</th>"));
+    assert!(routing.contains("<th>Load / cases tested</th>"));
+    assert!(routing.contains("<th>Timing (median / max)</th>"));
+    assert!(routing.contains("<td>Route result parsing (uncached)</td>"));
+    assert!(routing.contains("<td>PAC matching: 96 substr calls, unique hosts and routes</td>"));
     assert!(!routing.contains("PAC_PERFORMANCE_RESULTS"));
     assert!(output_dir.join("unproxy-icon.png").is_file());
     let landing = std::fs::read_to_string(output_dir.join("index.html")).unwrap();
