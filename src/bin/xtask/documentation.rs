@@ -305,4 +305,59 @@ mod tests {
         assert!(routing.contains("<td>PAC performance</td><td>—</td><td>unit test result</td>"));
         assert!(!routing.contains("PAC_PERFORMANCE_RESULTS"));
     }
+
+    #[test]
+    fn routing_guide_explains_when_to_use_its_options() {
+        let guide = include_str!("../../../docs/routing.md");
+        for (heading, option, guidance) in [
+            (
+                "## Load a local or remote PAC file",
+                "`--pac-file`",
+                "**When to use it:**",
+            ),
+            (
+                "## Combine sources in order",
+                "`--direct-fallback`",
+                "**When to use multiple sources:**",
+            ),
+            (
+                "## Check a routing decision",
+                "`paceval`",
+                "**When to use it:**",
+            ),
+            (
+                "## Reload a policy",
+                "`--reload-pac-on-network-change`",
+                "**When to use it:**",
+            ),
+            (
+                "## Require a loaded policy",
+                "`--strict-policy`",
+                "**When to use it:**",
+            ),
+            ("## Use a SOCKS upstream", "`SOCKS5`", "**When to use it:**"),
+            (
+                "## Block domains with filter lists",
+                "`--filter-list`",
+                "**When to use it:**",
+            ),
+        ] {
+            let rest = guide
+                .split_once(heading)
+                .unwrap_or_else(|| panic!("missing section {heading}"))
+                .1;
+            let section = rest
+                .split_once("\n## ")
+                .map_or(rest, |(section, _)| section);
+            assert!(
+                section.contains(option),
+                "{heading} should mention {option}"
+            );
+            assert!(
+                section.contains(guidance),
+                "{heading} should explain when to use its option"
+            );
+        }
+        assert!(guide.contains("Use `undns --proxy` when"));
+    }
 }
