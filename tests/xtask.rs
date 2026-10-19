@@ -355,6 +355,34 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
             }
         }
     }
+    let applications = std::fs::read_to_string(output_dir.join("docs/applications.html")).unwrap();
+    assert_eq!(
+        applications
+            .matches("class=shell-tabs role=tablist")
+            .count(),
+        2
+    );
+    for shell in ["bash", "zsh", "fish", "powershell", "cmd"] {
+        assert_eq!(
+            applications
+                .matches(&format!("aria-controls=\"shell-setup-{shell}\""))
+                .count(),
+            1
+        );
+        assert_eq!(
+            applications
+                .matches(&format!("aria-controls=\"shell-cleanup-{shell}\""))
+                .count(),
+            1
+        );
+        assert!(applications.contains(&format!("data-shell=\"{shell}\"")));
+    }
+    assert!(applications.contains("source &lt;(unproxy shell-setup bash)"));
+    assert!(applications.contains("Remove-Item Env:http_proxy"));
+    let docs_js = std::fs::read_to_string(output_dir.join("docs/docs.js")).unwrap();
+    assert!(docs_js.contains("localStorage.getItem(storageKey)"));
+    assert!(docs_js.contains("localStorage.setItem(storageKey, id)"));
+    assert!(docs_js.contains("document.querySelectorAll('.shell-tabs')"));
     assert!(output_dir.join("docs/index.html").is_file());
     assert!(output_dir.join("source.zip").is_file());
     let landing = std::fs::read_to_string(output_dir.join("index.html")).unwrap();

@@ -549,7 +549,7 @@ footer {
   display:none!important
 }
 
-.platform-tabs {
+.platform-tabs,.shell-tabs {
   display:flex;
   gap:5px;
   padding:5px;
@@ -559,7 +559,7 @@ footer {
   border-radius:10px
 }
 
-.platform-tabs button {
+.platform-tabs button,.shell-tabs button {
   flex:1;
   border:0;
   border-radius:6px;
@@ -570,12 +570,12 @@ footer {
   cursor:pointer
 }
 
-.platform-tabs button[aria-selected=true] {
+.platform-tabs button[aria-selected=true],.shell-tabs button[aria-selected=true] {
   background:var(--accent);
   color:var(--bg)
 }
 
-.platform-tabs button:hover {
+.platform-tabs button:hover,.shell-tabs button:hover {
   box-shadow:inset 0 0 0 1px var(--accent)
 }
 
@@ -583,12 +583,16 @@ footer {
   margin-top:26px
 }
 
+.shell-panel>h3:first-child {
+  margin-top:26px
+}
+
 @media print {
-  .platform-tabs {
+  .platform-tabs,.shell-tabs {
     display:none!important
   }
 
-  .platform-panel[hidden] {
+  .platform-panel[hidden],.shell-panel[hidden] {
     display:block!important
   }
 
