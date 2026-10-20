@@ -61,7 +61,8 @@ reachability or credentials.
 The documentation build runs release-mode benchmarks for route parsing, PAC
 matching, and DNS resolution. The generated report below records results from
 the same machine and build that produced this guide. These synthetic workloads
-show the case count and median and maximum time for each use case. They do not
+show the case count, median, and maximum time for each use case. Timing values
+are rounded to whole units. They do not
 represent full request latency or proxy connection time.
 
 <!-- PAC_PERFORMANCE_RESULTS -->

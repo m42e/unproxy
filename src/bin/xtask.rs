@@ -784,7 +784,7 @@ fn pac_performance_line(line: &str) -> Option<&str> {
 
 fn pac_performance_report(lines: &[String], host: &str, generated: &str) -> Result<String> {
     let mut report = format!(
-        "Measured during this documentation build with release-mode PAC tests on `{host}` at `{generated}`.\n\n| Use case | Load / cases tested | Timing (median / max) |\n| --- | --- | --- |\n"
+        "Measured during this documentation build with release-mode PAC tests on `{host}` at `{generated}`.\n\n| Use case | Load / cases tested | Median | Max |\n| --- | --- | --- | --- |\n"
     );
     for line in lines {
         let mut fields = line
@@ -802,7 +802,7 @@ fn pac_performance_report(lines: &[String], host: &str, generated: &str) -> Resu
             "PAC report has more than four fields: {line}"
         );
         report.push_str(&format!(
-            "| {} | {} | {} / {} |\n",
+            "| {} | {} | {} | {} |\n",
             use_case.trim().replace('|', "\\|"),
             load.trim().replace('|', "\\|"),
             median.trim().replace('|', "\\|"),
@@ -941,9 +941,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(report.contains("| Use case | Load / cases tested | Timing (median / max) |"));
-        assert!(report.contains("| four route entries | 600 evaluations | 1us / 2us |"));
-        assert!(report.contains("| route parsing (uncached) | 100,000 parses | 30ns / 40ns |"));
+        assert!(report.contains("| Use case | Load / cases tested | Median | Max |"));
+        assert!(report.contains("| four route entries | 600 evaluations | 1us | 2us |"));
+        assert!(report.contains("| route parsing (uncached) | 100,000 parses | 30ns | 40ns |"));
         assert!(
             pac_performance_report(
                 &["PAC report: bad row | missing max".into()],

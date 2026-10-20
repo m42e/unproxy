@@ -688,9 +688,12 @@ printf 'fixture archive' > "$1"
     assert!(nav.find("user-guide.html").unwrap() < nav.find("routing.html").unwrap());
     assert!(nav.contains("<th>Use case</th>"));
     assert!(nav.contains("<th>Load / cases tested</th>"));
-    assert!(nav.contains("<th>Timing (median / max)</th>"));
-    assert!(nav.contains("<td>Fixture parsing</td><td>100 parses</td><td>1us / 2us</td>"));
-    assert!(nav.contains("<td>Fixture matching</td><td>50 evaluations</td><td>3us / 4us</td>"));
+    assert!(nav.contains("<th>Median</th>"));
+    assert!(nav.contains("<th>Max</th>"));
+    assert!(nav.contains("<td>Fixture parsing</td><td>100 parses</td><td>1us</td><td>2us</td>"));
+    assert!(
+        nav.contains("<td>Fixture matching</td><td>50 evaluations</td><td>3us</td><td>4us</td>")
+    );
     assert!(!nav.contains("Internal first"));
     assert!(!nav.contains("Internal last"));
     assert!(!f.root.path().join("dist/site/docs/a.html").exists());

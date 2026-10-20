@@ -196,7 +196,8 @@ fn docs_command_generates_pages_landing_page_and_source_archive() {
     assert!(routing.contains("Measured during this documentation build"));
     assert!(routing.contains("<th>Use case</th>"));
     assert!(routing.contains("<th>Load / cases tested</th>"));
-    assert!(routing.contains("<th>Timing (median / max)</th>"));
+    assert!(routing.contains("<th>Median</th>"));
+    assert!(routing.contains("<th>Max</th>"));
     assert!(routing.contains("<td>Route result parsing (uncached)</td>"));
     assert!(routing.contains("<td>PAC matching: 96 substr calls, unique hosts and routes</td>"));
     assert!(!routing.contains("PAC_PERFORMANCE_RESULTS"));

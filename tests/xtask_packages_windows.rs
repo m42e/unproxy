@@ -558,8 +558,15 @@ fn windows_docs_command_uses_pac_reports_and_writes_the_site() {
     );
 
     let routing = std::fs::read_to_string(root.join("dist/site/docs/routing.html")).unwrap();
-    assert!(routing.contains("<td>Fixture parsing</td><td>100 parses</td><td>1us / 2us</td>"));
-    assert!(routing.contains("<td>Fixture matching</td><td>50 evaluations</td><td>3us / 4us</td>"));
+    assert!(routing.contains("<th>Median</th>"));
+    assert!(routing.contains("<th>Max</th>"));
+    assert!(
+        routing.contains("<td>Fixture parsing</td><td>100 parses</td><td>1us</td><td>2us</td>")
+    );
+    assert!(
+        routing
+            .contains("<td>Fixture matching</td><td>50 evaluations</td><td>3us</td><td>4us</td>")
+    );
     assert!(root.join("dist/site/docs/user-guide.html").is_file());
     assert!(root.join("dist/site/unproxy-icon.png").is_file());
     assert!(root.join("dist/site/source.zip").is_file());

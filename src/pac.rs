@@ -1389,11 +1389,11 @@ mod tests {
             5 * ITERATIONS
         );
         println!(
-            "PAC report: Route result parsing (uncached) | {load} | {:?} | {:?}",
+            "PAC report: Route result parsing (uncached) | {load} | {:.0?} | {:.0?}",
             uncached[2], uncached[4]
         );
         println!(
-            "PAC report: Route result parsing (cached) | {load} | {:?} | {:?}",
+            "PAC report: Route result parsing (cached) | {load} | {:.0?} | {:.0?}",
             cached[2], cached[4]
         );
     }
@@ -1635,7 +1635,7 @@ mod tests {
             }
             samples.sort_unstable();
             println!(
-                "PAC report: Warm DNS cache | {size} filler entries + 1 hot entry; 500 evaluations × 32 DNS hits | {:?} | {:?}",
+                "PAC report: Warm DNS cache | {size} filler entries + 1 hot entry; 500 evaluations × 32 DNS hits | {:.0?} | {:.0?}",
                 samples[250], samples[499]
             );
         }
@@ -1689,12 +1689,12 @@ mod tests {
             queue_latency.sort_unstable();
             execution_time.sort_unstable();
             println!(
-                "PAC report: Fast DNS queue latency ({worker_count} resolver workers) | {SAMPLES} fast/slow lookup pairs | {:?} | {:?}",
+                "PAC report: Fast DNS queue latency ({worker_count} resolver workers) | {SAMPLES} fast/slow lookup pairs | {:.0?} | {:.0?}",
                 queue_latency[SAMPLES / 2],
                 queue_latency[SAMPLES - 1]
             );
             println!(
-                "PAC report: Fast DNS resolver execution ({worker_count} resolver workers) | {SAMPLES} fast/slow lookup pairs | {:?} | {:?}",
+                "PAC report: Fast DNS resolver execution ({worker_count} resolver workers) | {SAMPLES} fast/slow lookup pairs | {:.0?} | {:.0?}",
                 execution_time[SAMPLES / 2],
                 execution_time[SAMPLES - 1]
             );
@@ -1790,12 +1790,12 @@ mod tests {
             execution_time.sort_unstable();
             let workload = if canceled { "canceled" } else { "live" };
             println!(
-                "PAC report: PAC queue drain after DNS release ({workload}) | {QUEUED} queued requests per sample × {SAMPLES} samples | {:?} | {:?}",
+                "PAC report: PAC queue drain after DNS release ({workload}) | {QUEUED} queued requests per sample × {SAMPLES} samples | {:.0?} | {:.0?}",
                 queue_latency[SAMPLES / 2],
                 queue_latency[SAMPLES - 1]
             );
             println!(
-                "PAC report: Isolated PAC evaluation after {workload} queue | 1 evaluation per sample × {SAMPLES} samples | {:?} | {:?}",
+                "PAC report: Isolated PAC evaluation after {workload} queue | 1 evaluation per sample × {SAMPLES} samples | {:.0?} | {:.0?}",
                 execution_time[SAMPLES / 2],
                 execution_time[SAMPLES - 1]
             );

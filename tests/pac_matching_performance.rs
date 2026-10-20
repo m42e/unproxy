@@ -97,7 +97,7 @@ fn report(label: &str, timings: &[Duration]) {
     let median = ordered[ordered.len() / 2] / BATCH_SIZE as u32;
     let max = *ordered.last().unwrap() / BATCH_SIZE as u32;
     println!(
-        "PAC report: PAC matching: {label} | {count} evaluations ({BATCH_SIZE} per sample × {} samples) | {median:.2?} | {max:.2?}",
+        "PAC report: PAC matching: {label} | {count} evaluations ({BATCH_SIZE} per sample × {} samples) | {median:.0?} | {max:.0?}",
         timings.len()
     );
 }

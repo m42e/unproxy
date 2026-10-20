@@ -214,7 +214,7 @@ fn report(label: &str, timings: &[Duration], operations: usize) {
     let median = ordered[ordered.len() / 2] / operations as u32;
     let max = *ordered.last().unwrap() / operations as u32;
     println!(
-        "PAC report: PAC evaluation: {label} | {count} evaluations ({operations} per sample × {} samples) | {median:.2?} | {max:.2?}",
+        "PAC report: PAC evaluation: {label} | {count} evaluations ({operations} per sample × {} samples) | {median:.0?} | {max:.0?}",
         timings.len()
     );
 }

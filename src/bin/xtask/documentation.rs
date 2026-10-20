@@ -329,7 +329,7 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
         generate(
             output.path(),
-            "Measured during this documentation build.\n\n| Use case | Load / cases tested | Timing (median / max) |\n| --- | --- | --- |\n| Example PAC evaluation | 10 cases | 1us / 2us |\n",
+            "Measured during this documentation build.\n\n| Use case | Load / cases tested | Median | Max |\n| --- | --- | --- | --- |\n| Example PAC evaluation | 10 cases | 1us | 2us |\n",
         )
         .unwrap();
 
@@ -359,9 +359,12 @@ mod tests {
         let routing = std::fs::read_to_string(output.path().join("routing.html")).unwrap();
         assert!(routing.contains("<th>Use case</th>"));
         assert!(routing.contains("<th>Load / cases tested</th>"));
-        assert!(routing.contains("<th>Timing (median / max)</th>"));
+        assert!(routing.contains("<th>Median</th>"));
+        assert!(routing.contains("<th>Max</th>"));
         assert!(
-            routing.contains("<td>Example PAC evaluation</td><td>10 cases</td><td>1us / 2us</td>")
+            routing.contains(
+                "<td>Example PAC evaluation</td><td>10 cases</td><td>1us</td><td>2us</td>"
+            )
         );
         assert!(!routing.contains("PAC_PERFORMANCE_RESULTS"));
     }
