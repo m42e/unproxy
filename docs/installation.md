@@ -13,7 +13,7 @@ the macOS package for your Mac.
 4. In PowerShell, run:
 
    ```powershell
-   Set-ExecutionPolicy -Scope Process Bypass
+   Unblock-File .\install.ps1
    .\install.ps1
    ```
 
