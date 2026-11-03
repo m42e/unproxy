@@ -3,7 +3,10 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -146,6 +149,7 @@ pub struct ContextBuilder {
     header_timeout: Duration,
     idle_timeout: Duration,
     strict_policy: bool,
+    require_loaded_policy: Arc<AtomicBool>,
     runtime_status: RuntimeStatus,
     log_stream: LogStream,
     pac_cache: Arc<tokio::sync::Mutex<HashMap<String, net::CachedRemotePac>>>,
@@ -176,6 +180,7 @@ impl Clone for ContextBuilder {
             header_timeout: self.header_timeout,
             idle_timeout: self.idle_timeout,
             strict_policy: self.strict_policy,
+            require_loaded_policy: self.require_loaded_policy.clone(),
             runtime_status: self.runtime_status.clone(),
             log_stream: self.log_stream.clone(),
             pac_cache: self.pac_cache.clone(),
@@ -209,6 +214,7 @@ impl ContextBuilder {
             header_timeout: Duration::from_secs(15),
             idle_timeout: Duration::from_secs(60),
             strict_policy: false,
+            require_loaded_policy: Arc::new(AtomicBool::new(false)),
             runtime_status,
             log_stream: LogStream::new(),
             pac_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -311,20 +317,38 @@ impl ContextBuilder {
         self.initialize_inline = self.pac_sources.is_empty();
         self
     }
-    async fn initialize_policy(&self) -> Result<()> {
+    async fn initialize_policy(&mut self) -> Result<bool> {
         if !self.pac_sources.is_empty() {
-            let scripts = load_pac_sources_cached(&self.pac_sources, &self.pac_cache).await?;
+            let scripts =
+                match load_pac_sources_cached_inner(&self.pac_sources, &self.pac_cache).await {
+                    Ok(scripts) => scripts,
+                    Err((source @ PathOrUri::Uri(_), error)) => {
+                        let error = error.context(format!("loading PAC source {source}"));
+                        tracing::warn!(
+                            source = %source,
+                            error = %format!("{error:#}"),
+                            "initial remote PAC load failed; keeping the proxy running and retrying"
+                        );
+                        self.require_loaded_policy.store(true, Ordering::Release);
+                        return Ok(true);
+                    }
+                    Err((source, error)) => {
+                        return Err(error.context(format!("loading PAC source {source}")));
+                    }
+                };
             self.policy.set_scripts(scripts).await?;
             self.runtime_status
                 .set_pac_files(self.pac_sources.iter().map(ToString::to_string).collect());
+            self.require_loaded_policy.store(false, Ordering::Release);
         } else if self.initialize_inline {
             self.policy.set_scripts(self.inline_scripts.clone()).await?;
             self.runtime_status.set_pac_files(Vec::new());
+            self.require_loaded_policy.store(false, Ordering::Release);
         }
-        Ok(())
+        Ok(false)
     }
     pub async fn bind(mut self) -> Result<Context> {
-        self.initialize_policy().await?;
+        let retry_pac = self.initialize_policy().await?;
         let mut listeners = std::mem::take(&mut self.sockets);
         let addrs = if !listeners.is_empty() {
             vec![]
@@ -370,7 +394,7 @@ impl ContextBuilder {
         }
         let pac_sources = self.pac_sources.clone();
         let inline_scripts = self.inline_scripts.clone();
-        Ok(Context {
+        let context = Context {
             shutdown_timeout: self.shutdown_timeout,
             local_addrs,
             events,
@@ -378,21 +402,26 @@ impl ContextBuilder {
             tracker,
             joins,
             policy: self.policy.clone(),
+            require_loaded_policy: self.require_loaded_policy.clone(),
             pac_sources,
             inline_scripts,
             runtime_status: self.runtime_status.clone(),
             pac_cache: self.pac_cache.clone(),
             relay_handles: self.relay_handles.clone(),
             filter_list: self.filter_list.clone(),
-        })
+        };
+        if retry_pac {
+            context.retry_pac_sources_after(Duration::from_secs(5));
+        }
+        Ok(context)
     }
     /// Serve one already-connected client stream. The returned context exposes
     /// shutdown and completion just like a listener-backed server.
-    pub async fn serve_stream<S>(self, stream: S, peer: SocketAddr) -> Result<Context>
+    pub async fn serve_stream<S>(mut self, stream: S, peer: SocketAddr) -> Result<Context>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        self.initialize_policy().await?;
+        let retry_pac = self.initialize_policy().await?;
         let (shutdown, rx) = watch::channel(false);
         let (events, _) = broadcast::channel(16);
         let tracker = TaskTracker::new();
@@ -400,6 +429,7 @@ impl ContextBuilder {
         let pac_sources = self.pac_sources.clone();
         let inline_scripts = self.inline_scripts.clone();
         let runtime_status = self.runtime_status.clone();
+        let require_loaded_policy = self.require_loaded_policy.clone();
         let pac_cache = self.pac_cache.clone();
         let filter_list = self.filter_list.clone();
         let shutdown_timeout = self.shutdown_timeout;
@@ -410,7 +440,7 @@ impl ContextBuilder {
         let join = tokio::spawn(async move {
             serve_io(stream, peer, None, cfg, ev, task_tracker, rx).await;
         });
-        Ok(Context {
+        let context = Context {
             shutdown_timeout,
             local_addrs: vec![],
             events,
@@ -418,21 +448,26 @@ impl ContextBuilder {
             tracker,
             joins: vec![join],
             policy,
+            require_loaded_policy,
             pac_sources,
             inline_scripts,
             runtime_status,
             pac_cache,
             relay_handles,
             filter_list,
-        })
+        };
+        if retry_pac {
+            context.retry_pac_sources_after(Duration::from_secs(5));
+        }
+        Ok(context)
     }
 
-    pub async fn serve_connections<S, St>(self, mut input: St) -> Result<Context>
+    pub async fn serve_connections<S, St>(mut self, mut input: St) -> Result<Context>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
         St: futures_util::Stream<Item = std::io::Result<(S, SocketAddr)>> + Unpin + Send + 'static,
     {
-        self.initialize_policy().await?;
+        let retry_pac = self.initialize_policy().await?;
         let (shutdown, mut rx) = watch::channel(false);
         let (events, _) = broadcast::channel(16);
         let tracker = TaskTracker::new();
@@ -440,6 +475,7 @@ impl ContextBuilder {
         let ev = events.clone();
         let tasks = tracker.clone();
         let policy = self.policy.clone();
+        let require_loaded_policy = self.require_loaded_policy.clone();
         let shutdown_timeout = self.shutdown_timeout;
         let sources = self.pac_sources.clone();
         let inline_scripts = self.inline_scripts.clone();
@@ -454,7 +490,7 @@ impl ContextBuilder {
             }
             while sessions.join_next().await.is_some() {}
         });
-        Ok(Context {
+        let context = Context {
             shutdown_timeout,
             local_addrs: vec![],
             events,
@@ -462,13 +498,18 @@ impl ContextBuilder {
             tracker,
             joins: vec![join],
             policy,
+            require_loaded_policy,
             pac_sources: sources,
             inline_scripts,
             runtime_status,
             pac_cache,
             relay_handles,
             filter_list,
-        })
+        };
+        if retry_pac {
+            context.retry_pac_sources_after(Duration::from_secs(5));
+        }
+        Ok(context)
     }
 }
 
@@ -480,6 +521,7 @@ pub struct Context {
     tracker: TaskTracker,
     joins: Vec<JoinHandle<()>>,
     policy: Arc<Policy>,
+    require_loaded_policy: Arc<AtomicBool>,
     pac_sources: Vec<PathOrUri>,
     inline_scripts: Vec<String>,
     runtime_status: RuntimeStatus,
@@ -518,6 +560,15 @@ async fn load_pac_sources_cached(
     sources: &[PathOrUri],
     cache: &Arc<tokio::sync::Mutex<HashMap<String, net::CachedRemotePac>>>,
 ) -> Result<Vec<String>> {
+    load_pac_sources_cached_inner(sources, cache)
+        .await
+        .map_err(|(source, error)| error.context(format!("loading PAC source {source}")))
+}
+
+async fn load_pac_sources_cached_inner(
+    sources: &[PathOrUri],
+    cache: &Arc<tokio::sync::Mutex<HashMap<String, net::CachedRemotePac>>>,
+) -> std::result::Result<Vec<String>, (PathOrUri, anyhow::Error)> {
     let mut updated = HashMap::new();
     let mut scripts = Vec::with_capacity(sources.len());
     for source in sources {
@@ -535,11 +586,25 @@ async fn load_pac_sources_cached(
                     })
             }
         }
-        .with_context(|| format!("loading PAC source {source}"))?;
+        .map_err(|error| (source.clone(), error))?;
         scripts.push(loaded);
     }
     cache.lock().await.extend(updated);
     Ok(scripts)
+}
+
+async fn load_pacs_into_policy(
+    sources: &[PathOrUri],
+    cache: &Arc<tokio::sync::Mutex<HashMap<String, net::CachedRemotePac>>>,
+    policy: &Policy,
+    runtime_status: &RuntimeStatus,
+    require_loaded_policy: &AtomicBool,
+) -> Result<()> {
+    let scripts = load_pac_sources_cached(sources, cache).await?;
+    policy.set_scripts(scripts).await?;
+    runtime_status.set_pac_files(sources.iter().map(ToString::to_string).collect());
+    require_loaded_policy.store(false, Ordering::Release);
+    Ok(())
 }
 
 impl Context {
@@ -573,6 +638,63 @@ impl Context {
     }
     pub fn policy(&self) -> Arc<Policy> {
         self.policy.clone()
+    }
+    fn retry_pac_sources_after(&self, initial_delay: Duration) {
+        if self.pac_sources.is_empty() {
+            return;
+        }
+        let sources = self.pac_sources.clone();
+        let cache = self.pac_cache.clone();
+        let policy = self.policy.clone();
+        let runtime_status = self.runtime_status.clone();
+        let require_loaded_policy = self.require_loaded_policy.clone();
+        let mut shutdown = self.shutdown.subscribe();
+        tokio::spawn(async move {
+            let mut delay = initial_delay;
+            loop {
+                if *shutdown.borrow() {
+                    return;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            return;
+                        }
+                    }
+                }
+                let result = tokio::select! {
+                    result = load_pacs_into_policy(
+                        &sources,
+                        &cache,
+                        &policy,
+                        &runtime_status,
+                        &require_loaded_policy,
+                    ) => result,
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            return;
+                        }
+                        continue;
+                    }
+                };
+                match result {
+                    Ok(()) => {
+                        tracing::info!(sources = ?sources, "remote PAC sources loaded after retry");
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            sources = ?sources,
+                            error = %format!("{error:#}"),
+                            retry_after = ?delay,
+                            "remote PAC retry failed; retaining the current policy"
+                        );
+                        delay = delay.saturating_mul(2).min(Duration::from_secs(300));
+                    }
+                }
+            }
+        });
     }
     pub(crate) fn retry_filter_lists_after(&self, sources: Vec<String>, initial_delay: Duration) {
         let Some(proxy) = self.local_addrs.first().copied() else {
@@ -636,6 +758,7 @@ impl Context {
     pub async fn set_script(&self, script: Option<String>) -> Result<()> {
         self.policy.set_script(script).await?;
         self.runtime_status.set_pac_files(Vec::new());
+        self.require_loaded_policy.store(false, Ordering::Release);
         Ok(())
     }
     pub async fn set_ip(&self, ip: std::net::IpAddr) -> Result<()> {
@@ -644,17 +767,21 @@ impl Context {
     pub async fn set_scripts(&self, scripts: Vec<String>) -> Result<()> {
         self.policy.set_scripts(scripts).await?;
         self.runtime_status.set_pac_files(Vec::new());
+        self.require_loaded_policy.store(false, Ordering::Release);
         Ok(())
     }
     pub async fn load_pac(&self, source: &PathOrUri) -> Result<()> {
         self.load_pacs(std::slice::from_ref(source)).await
     }
     pub async fn load_pacs(&self, sources: &[PathOrUri]) -> Result<()> {
-        let scripts = load_pac_sources_cached(sources, &self.pac_cache).await?;
-        self.policy.set_scripts(scripts).await?;
-        self.runtime_status
-            .set_pac_files(sources.iter().map(ToString::to_string).collect());
-        Ok(())
+        load_pacs_into_policy(
+            sources,
+            &self.pac_cache,
+            &self.policy,
+            &self.runtime_status,
+            &self.require_loaded_policy,
+        )
+        .await
     }
     pub async fn reload_pac(&self) -> Result<()> {
         if !self.pac_sources.is_empty() {
@@ -662,12 +789,14 @@ impl Context {
         } else {
             self.policy.set_scripts(self.inline_scripts.clone()).await?;
             self.runtime_status.set_pac_files(Vec::new());
+            self.require_loaded_policy.store(false, Ordering::Release);
             Ok(())
         }
     }
     pub async fn clear_policy(&self) -> Result<()> {
         self.policy.set_scripts(vec![]).await?;
         self.runtime_status.set_pac_files(Vec::new());
+        self.require_loaded_policy.store(false, Ordering::Release);
         Ok(())
     }
     pub async fn wait(mut self) {
@@ -1179,7 +1308,9 @@ async fn handle(
     } else {
         destination.pac_url.clone()
     };
-    if cfg.strict_policy && !cfg.policy.is_loaded() {
+    if (cfg.strict_policy || cfg.require_loaded_policy.load(Ordering::Acquire))
+        && !cfg.policy.is_loaded()
+    {
         return Ok(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Routing policy has not loaded",
