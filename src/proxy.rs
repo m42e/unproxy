@@ -1328,8 +1328,7 @@ async fn handle(
     let mut routes = match evaluation {
         Ok(routes) => routes,
         Err(e) => {
-            tracing::warn!("PAC evaluation failed: {e:#}");
-            let message = format!("PAC evaluation failed: {e:#}");
+            let message = format!("PAC evaluation failed for URL {route_input}: {e:#}");
             tracing::warn!("{message}");
             publish(
                 &events,

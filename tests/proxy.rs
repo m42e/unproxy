@@ -1524,6 +1524,7 @@ async fn policy_errors_return_502_without_origin_connections_and_publish_access(
         ] {
             let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let target = origin.local_addr().unwrap();
+            let pac_url = format!("http://{target}/");
             let policy =
                 Policy::new(Some(format!("function FindProxyForURL(){{{body};}}"))).unwrap();
             let context = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
@@ -1542,6 +1543,7 @@ async fn policy_errors_return_502_without_origin_connections_and_publish_access(
                 .unwrap();
             assert!(response.starts_with("HTTP/1.1 502"), "{response}");
             assert!(response.contains("PAC evaluation failed"), "{response}");
+            assert!(response.contains(&pac_url), "{response}");
             let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
                 .await
                 .unwrap()
@@ -1550,6 +1552,7 @@ async fn policy_errors_return_502_without_origin_connections_and_publish_access(
                 event.contains("error:") && event.contains("PAC evaluation failed"),
                 "{event}"
             );
+            assert!(event.contains(&pac_url), "{event}");
             assert!(
                 tokio::time::timeout(Duration::from_millis(50), origin.accept())
                     .await
