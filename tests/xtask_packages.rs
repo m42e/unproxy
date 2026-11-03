@@ -123,6 +123,12 @@ cp -R ./. "$CAPTURE_DIR/zip-$n/"
 "#,
     );
     std::fs::write(f.root.path().join("README.md"), "fixture README").unwrap();
+    std::fs::create_dir_all(f.root.path().join("docs")).unwrap();
+    std::fs::write(
+        f.root.path().join("docs/installation.md"),
+        "fixture installation guide",
+    )
+    .unwrap();
     f.asset("proxy.pac", "function FindProxyForURL(){return 'DIRECT';}");
     f.asset("install.ps1", "install");
     f.asset("uninstall.ps1", "uninstall");
@@ -163,6 +169,7 @@ fn portable_and_windows_packages_stage_expected_files() {
         "undns",
         "proxy.pac.sample",
         "README.md",
+        "docs/installation.md",
     ] {
         assert!(portable.join(name).is_file(), "missing {name}");
     }
@@ -194,6 +201,7 @@ fn portable_and_windows_packages_stage_expected_files() {
     assert!(!staged.join("unproxy-tray.exe").exists());
     assert!(staged.join("install.ps1").is_file());
     assert!(staged.join("uninstall.ps1").is_file());
+    assert!(staged.join("docs/installation.md").is_file());
     assert!(
         std::fs::read_to_string(staged.join("metadata.json"))
             .unwrap()
@@ -234,7 +242,7 @@ fn portable_package_is_a_readable_archive_with_the_expected_payload() {
 import json, sys, zipfile
 with zipfile.ZipFile(sys.argv[1]) as package:
     names = {name.removeprefix('./') for name in package.namelist() if not name.endswith('/')}
-    assert names == {'README.md', 'metadata.json', 'paceval', 'proxy.pac.sample', 'undns', 'unproxy'}, names
+    assert names == {'README.md', 'docs/installation.md', 'metadata.json', 'paceval', 'proxy.pac.sample', 'undns', 'unproxy'}, names
     assert package.read('unproxy') == b'fixture unproxy'
     assert package.read('paceval') == b'fixture paceval'
     assert package.read('undns') == b'fixture undns'
@@ -290,6 +298,11 @@ cp -R "$root"/. "$CAPTURE_DIR/deb/"
             .is_file()
     );
     assert!(staged.join("usr/share/doc/unproxy/README.md").is_file());
+    assert!(
+        staged
+            .join("usr/share/doc/unproxy/docs/installation.md")
+            .is_file()
+    );
 }
 
 #[test]
@@ -349,6 +362,11 @@ printf 'fixture pkg' > "$out"
                 .join("pkgroot-1/Library/LaunchAgents/de.m42e.unproxy.plist")
                 .is_file()
         );
+        assert!(
+            f.capture
+                .join("pkgroot-1/opt/unproxy/share/doc/unproxy/docs/installation.md")
+                .is_file()
+        );
         assert!(f.capture.join("hooks-1/preinstall").is_file());
         assert!(f.capture.join("hooks-1/postinstall").is_file());
         assert!(
@@ -358,6 +376,11 @@ printf 'fixture pkg' > "$out"
         );
     } else {
         assert!(f.capture.join("zip-1/opt/unproxy/bin/unproxy").is_file());
+        assert!(
+            f.capture
+                .join("zip-1/opt/unproxy/share/doc/unproxy/docs/installation.md")
+                .is_file()
+        );
     }
 
     f.reset_capture();
@@ -378,6 +401,11 @@ printf 'fixture pkg' > "$out"
         assert!(
             f.capture
                 .join("pkgroot-1/Applications/Unproxy.app/Contents/Resources/metadata.json")
+                .is_file()
+        );
+        assert!(
+            f.capture
+                .join("pkgroot-1/Applications/Unproxy.app/Contents/Resources/docs/installation.md")
                 .is_file()
         );
         assert!(
@@ -406,6 +434,11 @@ printf 'fixture pkg' > "$out"
         assert!(
             f.capture
                 .join("zip-1/Unproxy.app/Contents/Resources/Unproxy.icns")
+                .is_file()
+        );
+        assert!(
+            f.capture
+                .join("zip-1/Unproxy.app/Contents/Resources/docs/installation.md")
                 .is_file()
         );
         let plist =

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3
+
+- Keep the proxy available when a remote PAC source is unavailable at startup,
+  retrying the load in the background.
+- Include the request URL in PAC evaluation errors.
+- Include the OS-specific installation guide in the release packages.
+- Clarify Windows installer setup and PAC performance measurements in the
+  documentation.
+
 ## 0.4.2
 
 - Improve the documentation site with platform-specific setup and removal steps,

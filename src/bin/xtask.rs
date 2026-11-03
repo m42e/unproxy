@@ -535,6 +535,9 @@ fn package(
                         }
                     }
                 }
+                let docs = staging.join("docs");
+                std::fs::create_dir_all(&docs)?;
+                std::fs::copy("docs/installation.md", docs.join("installation.md"))?;
                 std::fs::copy("README.md", staging.join("README.md"))?;
                 std::fs::copy("assets/proxy.pac", staging.join("proxy.pac.sample"))?;
                 let mut metadata = serde_json::json!({
@@ -601,6 +604,9 @@ fn package(
                 let doc_dir = staging.join("usr/share/doc/unproxy");
                 std::fs::create_dir_all(&doc_dir)?;
                 std::fs::copy("README.md", doc_dir.join("README.md"))?;
+                let docs = doc_dir.join("docs");
+                std::fs::create_dir_all(&docs)?;
+                std::fs::copy("docs/installation.md", docs.join("installation.md"))?;
                 run(Command::new("dpkg-deb")
                     .arg("--root-owner-group")
                     .arg("--build")
@@ -624,6 +630,9 @@ fn package(
                     )?;
                     sign_macos_code(&staging.join("opt/unproxy/bin").join(name), None)?;
                 }
+                let docs = staging.join("opt/unproxy/share/doc/unproxy/docs");
+                std::fs::create_dir_all(&docs)?;
+                std::fs::copy("docs/installation.md", docs.join("installation.md"))?;
                 let agents = staging.join("Library/LaunchAgents");
                 std::fs::create_dir_all(&agents)?;
                 std::fs::copy(
@@ -700,6 +709,9 @@ fn package(
                     ),
                 )?;
                 std::fs::create_dir_all(app.join("Resources"))?;
+                let docs = app.join("Resources/docs");
+                std::fs::create_dir_all(&docs)?;
+                std::fs::copy("docs/installation.md", docs.join("installation.md"))?;
                 std::fs::copy("assets/app-icon.icns", app.join("Resources/Unproxy.icns"))?;
                 let tray_icons = Path::new("assets/tray-icons");
                 if tray_icons.is_dir() {
