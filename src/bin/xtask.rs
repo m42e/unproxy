@@ -683,7 +683,12 @@ fn package(
                 )?;
                 std::fs::write(
                     app.join("Info.plist"),
-                    info_plist("de.m42e.unproxy.app", "unproxy-app", "11.1"),
+                    info_plist(
+                        "de.m42e.unproxy.app",
+                        "unproxy-app",
+                        "11.1",
+                        Some("Unproxy"),
+                    ),
                 )?;
                 std::fs::write(
                     helper.join("Info.plist"),
@@ -691,9 +696,11 @@ fn package(
                         "de.m42e.unproxy.login-helper",
                         "unproxy-login-helper",
                         "10.14",
+                        None,
                     ),
                 )?;
                 std::fs::create_dir_all(app.join("Resources"))?;
+                std::fs::copy("assets/app-icon.icns", app.join("Resources/Unproxy.icns"))?;
                 let tray_icons = Path::new("assets/tray-icons");
                 if tray_icons.is_dir() {
                     let resources_icons = app.join("Resources/tray-icons");
@@ -758,46 +765,113 @@ fn package(
     println!("Artifacts written to {}", output.display());
     Ok(())
 }
-fn info_plist(id: &str, executable: &str, minimum: &str) -> String {
+fn info_plist(id: &str, executable: &str, minimum: &str, icon_file: Option<&str>) -> String {
     let version = unproxy::VERSION.split('+').next().unwrap();
+    let icon = icon_file.map_or_else(String::new, |file| {
+        format!(
+            "<key>CFBundleIconFile</key><string>{}</string>",
+            html_escape(file)
+        )
+    });
     format!(
-        "<?xml version=\"1.0\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>{id}</string><key>CFBundleName</key><string>Unproxy</string><key>CFBundleExecutable</key><string>{executable}</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleVersion</key><string>{version}</string><key>CFBundleShortVersionString</key><string>{version}</string><key>ProductBuildVersion</key><string>{}</string><key>LSUIElement</key><true/><key>LSMinimumSystemVersion</key><string>{minimum}</string></dict></plist>",
+        "<?xml version=\"1.0\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>{id}</string><key>CFBundleName</key><string>Unproxy</string><key>CFBundleExecutable</key><string>{executable}</string><key>CFBundlePackageType</key><string>APPL</string>{icon}<key>CFBundleVersion</key><string>{version}</string><key>CFBundleShortVersionString</key><string>{version}</string><key>ProductBuildVersion</key><string>{}</string><key>LSUIElement</key><true/><key>LSMinimumSystemVersion</key><string>{minimum}</string></dict></plist>",
         html_escape(unproxy::VERSION)
     )
 }
-fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
-    let book = output.join("docs");
-    std::fs::create_dir_all(&book)?;
-    let mut pages = std::fs::read_dir("docs")?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|s| s == "md"))
-        .collect::<Vec<_>>();
-    pages.sort();
-    let nav = pages
-        .iter()
-        .map(|p| {
-            let name = p.file_stem().unwrap().to_string_lossy();
-            format!("<a href='{name}.html'>{name}</a> ")
-        })
-        .collect::<String>();
-    for page in pages {
-        let text = std::fs::read_to_string(&page)?;
-        let name = page.file_stem().unwrap().to_string_lossy();
-        std::fs::write(
-            book.join(format!("{name}.html")),
-            format!(
-                "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>Unproxy {name}</title><style>body{{max-width:70em;margin:2em auto;padding:1em;font:16px system-ui}}pre{{white-space:pre-wrap}}nav a{{padding:.3em}}</style><nav>{nav}</nav><main>{}</main>",
-                markdown(&text)
-            ),
-        )?;
+fn pac_performance_line(line: &str) -> Option<&str> {
+    line.find("PAC report:").map(|index| &line[index..])
+}
+
+fn pac_performance_report(lines: &[String], host: &str, generated: &str) -> Result<String> {
+    let mut report = format!(
+        "Measured during this documentation build with release-mode PAC tests on `{host}` at `{generated}`.\n\n| Use case | Load / cases tested | Median | Max |\n| --- | --- | --- | --- |\n"
+    );
+    for line in lines {
+        let mut fields = line
+            .strip_prefix("PAC report: ")
+            .context("invalid PAC performance report line")?
+            .split(" | ");
+        let use_case = fields
+            .next()
+            .context("PAC report is missing its use case")?;
+        let load = fields.next().context("PAC report is missing its load")?;
+        let median = fields.next().context("PAC report is missing its median")?;
+        let max = fields.next().context("PAC report is missing its maximum")?;
+        anyhow::ensure!(
+            fields.next().is_none(),
+            "PAC report has more than four fields: {line}"
+        );
+        report.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            use_case.trim().replace('|', "\\|"),
+            load.trim().replace('|', "\\|"),
+            median.trim().replace('|', "\\|"),
+            max.trim().replace('|', "\\|")
+        ));
     }
-    std::fs::write(
-        book.join("index.html"),
-        "<!doctype html><meta http-equiv=refresh content='0;url=user-guide.html'><a href=user-guide.html>Use Unproxy</a>",
-    )?;
-    let mut landing = std::fs::read_to_string("site/index.html")?
-        .replace("@VERSION@", &html_escape(unproxy::VERSION));
+    report.push('\n');
+    Ok(report)
+}
+
+fn pac_performance_results() -> Result<String> {
+    let commands: [&[&str]; 2] = [
+        &[
+            "test",
+            "--release",
+            "--locked",
+            "--lib",
+            "pac::tests::",
+            "--",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ],
+        &[
+            "test",
+            "--release",
+            "--locked",
+            "--test",
+            "pac_performance",
+            "--test",
+            "pac_matching_performance",
+            "--",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ],
+    ];
+    let mut lines = Vec::new();
+    for args in commands {
+        let description = args.join(" ");
+        let output = Command::new("cargo")
+            .args(args)
+            .output()
+            .with_context(|| format!("running cargo {description}"))?;
+        anyhow::ensure!(
+            output.status.success(),
+            "PAC performance command failed ({description}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("{stdout}\n{stderr}");
+        lines.extend(
+            combined
+                .lines()
+                .filter_map(pac_performance_line)
+                .map(str::to_owned),
+        );
+    }
+    anyhow::ensure!(
+        !lines.is_empty(),
+        "PAC performance tests completed without reporting results"
+    );
+    let host = format!("{} / {}", std::env::consts::OS, std::env::consts::ARCH);
+    let generated = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+    pac_performance_report(&lines, &host, &generated.to_string())
+}
+
+fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
     let repository = repository.unwrap_or("");
     anyhow::ensure!(
         repository.is_empty()
@@ -808,6 +882,13 @@ fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
                 && !repository.contains(' ')),
         "repository must be OWNER/NAME"
     );
+    let book = output.join("docs");
+    std::fs::create_dir_all(&book)?;
+    let pac_performance_results = pac_performance_results()?;
+    documentation::generate(&book, &pac_performance_results)?;
+    std::fs::copy("assets/app-icon.png", output.join("unproxy-icon.png"))?;
+    let mut landing = std::fs::read_to_string("site/index.html")?
+        .replace("@VERSION@", &html_escape(unproxy::VERSION));
     landing = landing.replace("@REPOSITORY@", &html_escape(repository));
     std::fs::write(output.join("index.html"), landing)?;
     let archive = if output.is_absolute() {
@@ -824,34 +905,8 @@ fn docs(output: &Path, repository: Option<&str>) -> Result<()> {
     );
     Ok(())
 }
-fn markdown(text: &str) -> String {
-    let mut output = String::new();
-    let mut code = false;
-    for line in text.lines() {
-        if line.starts_with("```") {
-            output.push_str(if code { "</code></pre>" } else { "<pre><code>" });
-            code = !code;
-            continue;
-        }
-        let escaped = html_escape(line);
-        if code {
-            output.push_str(&escaped);
-            output.push('\n');
-        } else if let Some(heading) = line.strip_prefix("# ") {
-            output.push_str(&format!("<h1>{}</h1>", html_escape(heading)));
-        } else if let Some(heading) = line.strip_prefix("## ") {
-            output.push_str(&format!("<h2>{}</h2>", html_escape(heading)));
-        } else if let Some(heading) = line.strip_prefix("### ") {
-            output.push_str(&format!("<h3>{}</h3>", html_escape(heading)));
-        } else if !line.is_empty() {
-            output.push_str(&format!("<p>{escaped}</p>"));
-        }
-    }
-    if code {
-        output.push_str("</code></pre>");
-    }
-    output
-}
+#[path = "xtask/documentation.rs"]
+mod documentation;
 
 #[cfg(test)]
 mod tests {
@@ -864,21 +919,52 @@ mod tests {
     }
 
     #[test]
-    fn markdown_renders_headings_paragraphs_and_unclosed_code_blocks() {
-        let html = markdown("# Title\n\n## Sub & heading\ntext <tag>\n```\n<code>");
-        assert!(html.contains("<h1>Title</h1>"));
-        assert!(html.contains("<h2>Sub &amp; heading</h2>"));
-        assert!(html.contains("<p>text &lt;tag&gt;</p>"));
-        assert!(html.ends_with("<pre><code>&lt;code&gt;\n</code></pre>"));
+    fn pac_performance_line_discards_test_harness_prefixes() {
+        assert_eq!(
+            pac_performance_line(
+                "test pac::tests::parser ... PAC report: route parsing | 100,000 parses | 30ns | 40ns"
+            ),
+            Some("PAC report: route parsing | 100,000 parses | 30ns | 40ns")
+        );
+        assert_eq!(pac_performance_line("test result: ok"), None);
+    }
+
+    #[test]
+    fn pac_performance_report_formats_measurements_as_a_table() {
+        let report = pac_performance_report(
+            &[
+                "PAC report: four route entries | 600 evaluations | 1us | 2us".into(),
+                "PAC report: route parsing (uncached) | 100,000 parses | 30ns | 40ns".into(),
+            ],
+            "macOS / aarch64",
+            "2026-10-19 12:00 UTC",
+        )
+        .unwrap();
+
+        assert!(report.contains("| Use case | Load / cases tested | Median | Max |"));
+        assert!(report.contains("| four route entries | 600 evaluations | 1us | 2us |"));
+        assert!(report.contains("| route parsing (uncached) | 100,000 parses | 30ns | 40ns |"));
+        assert!(
+            pac_performance_report(
+                &["PAC report: bad row | missing max".into()],
+                "macOS / aarch64",
+                "2026-10-19 12:00 UTC",
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn app_plist_escapes_version_and_includes_bundle_metadata() {
-        let plist = info_plist("example.bundle", "example", "11.1");
+        let plist = info_plist("example.bundle", "example", "11.1", Some("Unproxy"));
         assert!(plist.contains("<string>example.bundle</string>"));
         assert!(plist.contains("<string>example</string>"));
         assert!(plist.contains("<string>11.1</string>"));
+        assert!(plist.contains("<key>CFBundleIconFile</key><string>Unproxy</string>"));
         assert!(plist.contains(&html_escape(unproxy::VERSION)));
+
+        let helper = info_plist("example.helper", "helper", "10.14", None);
+        assert!(!helper.contains("CFBundleIconFile"));
     }
 
     #[cfg(windows)]

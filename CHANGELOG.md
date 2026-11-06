@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.2
+
+- Improve the documentation site with platform-specific setup and removal steps,
+  shell tabs, and a traffic-flow guide.
+- Include PAC parsing and matching measurements in the routing guide.
+
+## 0.4.1
+
+- Add the Unproxy icon to the macOS app bundle and documentation.
+- Publish the documentation site through GitHub Pages.
+
+## 0.4.0
+
+- Add `unproxy doctor` diagnostics for PAC routes, upstream connectivity,
+  credential readiness, filter lists, and live runtime status.
+- Add `unproxy shell-setup` to generate proxy environment settings and shell
+  completions for Bash, Zsh, Fish, PowerShell, and Command Prompt.
+- Expand installation, configuration, routing, authentication, desktop, and
+  troubleshooting guides with platform-specific instructions, status page
+  access, and tabbed removal steps.
+
 ## 0.3.1
 
 - Improve PAC performance with cached route directives, faster IP and glob

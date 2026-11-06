@@ -185,7 +185,10 @@ fn embedded_child_gets_no_rc_environment_without_suppressing_cli_arguments() {
     let mut child = ChildLifecycle::default();
     child.start(&program, &prefs).unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
-    while !marker.exists() && Instant::now() < deadline {
+    while Instant::now() < deadline {
+        if std::fs::read_to_string(&marker).is_ok_and(|value| value == "1") {
+            break;
+        }
         thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(std::fs::read_to_string(&marker).unwrap(), "1");
@@ -439,4 +442,41 @@ fn child_start_accepts_remote_pac_urls_without_treating_them_as_paths() {
 #[test]
 fn native_objc_bindings_validate_without_launching_or_mutating_settings() {
     unproxy::desktop::validate_native_bindings().unwrap();
+}
+
+#[test]
+fn status_page_url_tracks_the_current_primary_listener() {
+    let mut preferences = Preferences::default();
+    assert_eq!(preferences.status_url().unwrap(), "http://127.0.0.1:3128/");
+    for (listeners, expected) in [
+        (
+            vec!["127.0.0.1:8080", "[::1]:8080"],
+            "http://127.0.0.1:8080/",
+        ),
+        (vec!["[::1]:9090", "127.0.0.1:9090"], "http://[::1]:9090/"),
+        (vec!["192.0.2.10:8000"], "http://192.0.2.10:8000/"),
+    ] {
+        preferences.listeners = Some(listeners.into_iter().map(str::to_owned).collect());
+        assert_eq!(preferences.status_url().unwrap(), expected);
+    }
+    // Read the newly saved settings instead of remembering the address at startup.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("preferences.json");
+    preferences.save(&path).unwrap();
+    assert_eq!(
+        Preferences::load(&path).unwrap().status_url().unwrap(),
+        "http://192.0.2.10:8000/"
+    );
+    for invalid in [
+        "localhost:3128",
+        "0.0.0.0:3128",
+        "[::]:3128",
+        "https://example.org/",
+    ] {
+        preferences.listeners = Some(vec![invalid.to_owned()]);
+        assert!(
+            preferences.status_url().is_err(),
+            "invalid listener {invalid}"
+        );
+    }
 }

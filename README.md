@@ -5,8 +5,8 @@ local proxy running on your computer.
 
 ## Install
 
-Download the package for your operating system from the project's Releases
-page, then follow [the installation steps](docs/installation.md).
+Download the package for your operating system from [GitHub
+Releases](https://github.com/m42e/unproxy/releases), then follow [the installation steps](docs/installation.md).
 
 ### Windows
 
@@ -46,8 +46,31 @@ after unblocking the package. This installation requires administrator approval.
 3. If your organization gave you a PAC file, select it in the desktop app or
    start Unproxy with `--pac-file /path/to/company.pac`.
 
-See [Use Unproxy](docs/user-guide.md) for copyable setup steps, credentials, and
-troubleshooting.
+## Documentation
+
+Read the [online documentation](https://m42e.github.io/unproxy/) or start with
+[Quick start](docs/user-guide.md) to connect your first application.
+
+| Guide | What you’ll find |
+| --- | --- |
+| [Installation](docs/installation.md) | Windows, macOS, Linux, services, and removal. |
+| [Desktop app](docs/desktop.md) | Tray controls, status lights, and every preference. |
+| [Connect applications](docs/applications.md) | Browser settings, shell setup, and copyable commands. |
+| [PAC & routing](docs/routing.md) | Ordered policies, SOCKS upstreams, filters, and strict policy. |
+| [Authentication](docs/authentication.md) | Passwords, Negotiate, and service identities. |
+| [Configuration reference](docs/configuration.md) | Settings locations, CLI options, and defaults. |
+| [Troubleshooting](docs/troubleshooting.md) | Connection checks, errors, logs, and support reports. |
+
+Build the styled, offline-readable documentation with `cargo xtask docs`.
+Each documentation build runs the release PAC parsing, matching, and DNS
+resolution benchmarks and includes that run's measurements in the PAC & routing
+guide. Open `dist/site/docs/user-guide.html` to preview the site. The Markdown
+guides remain readable here on GitHub.
+
+To inspect CLI configuration, PAC routes, listeners, and authentication
+readiness, run `unproxy doctor`. Add `--url https://example.com/` to check
+host-specific routing, or `--json` for a machine-readable report. See
+[Troubleshooting](docs/troubleshooting.md) for desktop and service examples.
 
 ## Limitations
 

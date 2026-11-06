@@ -241,6 +241,59 @@ async fn startup_waits_for_remote_policy_before_accepting_connections() {
 }
 
 #[tokio::test]
+async fn unavailable_remote_policy_keeps_proxy_running_and_retries_until_loaded() {
+    let temp = tempfile::tempdir().unwrap();
+    let netrc = temp.path().join("netrc");
+    std::fs::write(&netrc, "").unwrap();
+    let remote = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pac_address = remote.local_addr().unwrap();
+    let (failed, failed_seen) = tokio::sync::oneshot::channel();
+    let fetch_task = tokio::spawn(async move {
+        let (mut first, _) = remote.accept().await.unwrap();
+        let mut request = [0; 1024];
+        let _ = first.read(&mut request).await.unwrap();
+        first
+            .write_all(
+                b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        failed.send(()).unwrap();
+
+        let (mut retry, _) = remote.accept().await.unwrap();
+        let mut request = [0; 1024];
+        let _ = retry.read(&mut request).await.unwrap();
+        let script = "function FindProxyForURL(){return 'DIRECT';}";
+        retry
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{script}",
+                    script.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let address = reserve_address();
+    let mut child = process(address, &format!("http://{pac_address}/proxy.pac"), &netrc);
+    tokio::time::timeout(Duration::from_secs(10), failed_seen)
+        .await
+        .unwrap()
+        .unwrap();
+    wait_for_listener(address, &mut child).await;
+    assert!(child.try_wait().unwrap().is_none());
+
+    let (origin_address, origin_task) = origin().await;
+    assert_eq!(response_status(address, origin_address).await, Some(503));
+    await_status(address, origin_address, 200).await;
+    fetch_task.await.unwrap();
+    stop_child(&mut child).await;
+    origin_task.abort();
+}
+
+#[tokio::test]
 async fn unavailable_filter_list_does_not_prevent_proxy_startup() {
     let temp = tempfile::tempdir().unwrap();
     let netrc = temp.path().join("netrc");

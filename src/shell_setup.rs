@@ -80,7 +80,7 @@ pub fn run(args: Vec<OsString>) -> Result<()> {
 
     let mut output = setup.shell.proxy_code(&proxy).into_bytes();
     if let Some(shell) = setup.shell.completion_shell() {
-        let mut command = crate::config::MainArgs::command();
+        let mut command = crate::config::CliArgs::command();
         command = command.subcommand(clap::Command::new("shell-setup").arg(
             clap::Arg::new("shell").required(true).value_parser([
                 "bash",

@@ -1,6 +1,6 @@
 //! Command-line options and settings-file discovery.
 use anyhow::{Result, anyhow};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use std::{
     env, fs,
     net::{IpAddr, SocketAddr},
@@ -112,14 +112,7 @@ fn pac_candidates(user_config: Option<PathBuf>, executable: Option<PathBuf>) -> 
 pub fn netrc_default() -> Option<PathBuf> {
     dirs::home_dir().map(|p| p.join(".netrc"))
 }
-#[derive(Parser, Debug, Clone)]
-#[command(
-    name = "unproxy",
-    version = crate::VERSION,
-    about = "Local HTTP proxy with PAC based routing and corporate authentication",
-    long_about = "Run a local HTTP proxy that routes requests through upstream proxies according to PAC scripts. By default it listens on 127.0.0.1:3128 and [::1]:3128. Options from the unproxy settings file are loaded first; command-line options take precedence. Set UNPROXY_NORC=1 to ignore the settings file. Use `unproxy shell-setup <bash|zsh|fish|powershell|cmd>` to print shell proxy variables and completion setup. Use paceval to inspect PAC routing and unproxyctl to control the system service.",
-    args_override_self = true
-)]
+#[derive(Args, Debug, Clone)]
 pub struct MainArgs {
     /// Increase log verbosity; repeat to enable DEBUG and TRACE output.
     #[arg(short='v',long="verbose",action=clap::ArgAction::Count)]
@@ -213,6 +206,59 @@ pub struct MainArgs {
     #[arg(long)]
     pub attach_console: bool,
 }
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "unproxy",
+    version = crate::VERSION,
+    about = "Local HTTP proxy with PAC based routing and corporate authentication",
+    long_about = "Run a local HTTP proxy that routes requests through upstream proxies according to PAC scripts. By default it listens on 127.0.0.1:3128 and [::1]:3128. Options from the unproxy settings file are loaded first; command-line options take precedence. Set UNPROXY_NORC=1 to ignore the settings file. Use `unproxy shell-setup <bash|zsh|fish|powershell|cmd>` to print shell proxy variables and completion setup. Use `unproxy doctor` to inspect configuration, routing, listener, and authentication health; use paceval to inspect PAC routing and unproxyctl to control the system service.",
+    args_override_self = true
+)]
+struct MainParser {
+    #[command(flatten)]
+    args: MainArgs,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "unproxy",
+    version = crate::VERSION,
+    about = "Local HTTP proxy with PAC based routing and corporate authentication",
+    long_about = "Run a local HTTP proxy that routes requests through upstream proxies according to PAC scripts. By default it listens on 127.0.0.1:3128 and [::1]:3128. Options from the unproxy settings file are loaded first; command-line options take precedence. Set UNPROXY_NORC=1 to ignore the settings file. Use `unproxy shell-setup <bash|zsh|fish|powershell|cmd>` to print shell proxy variables and completion setup. Use `unproxy doctor` to inspect configuration, routing, listener, and authentication health; use paceval to inspect PAC routing and unproxyctl to control the system service.",
+    args_override_self = true
+)]
+pub struct CliArgs {
+    #[command(flatten)]
+    pub server: MainArgs,
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CliCommand {
+    /// Check configuration, PAC routes, listeners, runtime state, and authentication.
+    Doctor(crate::doctor::DoctorArgs),
+}
+
+impl MainArgs {
+    /// Parse only server options, preserving the original parser API for embedders.
+    pub fn try_parse_from<I, T>(args: I) -> std::result::Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        MainParser::try_parse_from(args).map(|parser| parser.args)
+    }
+
+    pub fn parse_from<I, T>(args: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        Self::try_parse_from(args).unwrap_or_else(|error| error.exit())
+    }
+}
 fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
     let f: f64 = s
         .parse()
@@ -269,6 +315,13 @@ pub fn parse_main() -> Result<MainArgs> {
     let read = env::var_os("UNPROXY_NORC").is_none_or(|v| v.is_empty());
     Ok(MainArgs::parse_from(merged_args(args, read)))
 }
+
+/// Parse the primary CLI, including the diagnostic subcommand, and honor UNPROXY_NORC.
+pub fn parse_cli() -> Result<CliArgs> {
+    let args = env::args_os().collect::<Vec<_>>();
+    let read = env::var_os("UNPROXY_NORC").is_none_or(|v| v.is_empty());
+    Ok(CliArgs::parse_from(merged_args(args, read)))
+}
 /// Parse supplied arguments, optionally adding settings tokens. Intended for embedders.
 pub fn try_parse_main_from(
     args: Vec<std::ffi::OsString>,
@@ -278,6 +331,18 @@ pub fn try_parse_main_from(
 }
 pub fn parse_main_from(args: Vec<std::ffi::OsString>, read_settings: bool) -> Result<MainArgs> {
     try_parse_main_from(args, read_settings).map_err(|e| anyhow!(e.to_string()))
+}
+
+/// PAC sources selected by explicit options or the platform's default PAC path.
+pub fn pac_sources(args: &MainArgs) -> Result<Vec<crate::route::PathOrUri>> {
+    if args.pac_file.is_empty() {
+        Ok(pac_path()
+            .into_iter()
+            .map(crate::route::PathOrUri::Path)
+            .collect())
+    } else {
+        args.pac_file.iter().map(|source| source.parse()).collect()
+    }
 }
 pub fn verbosity_level(v: u8, q: u8) -> Option<&'static str> {
     match v as i16 - q as i16 {

@@ -26,12 +26,12 @@ func combinations(_ groups: [[String]]) -> [[String]] {
     }
 }
 
-for states in combinations(palettes.map { Array($0.1.keys).sorted() }) {
-    let key = states.joined(separator: "-")
+func renderIcon(states: [String], pixelsPerPoint: Int) -> NSBitmapImageRep {
+    let dimension = 64 * pixelsPerPoint
     let image = NSBitmapImageRep(
         bitmapDataPlanes: nil,
-        pixelsWide: 128,
-        pixelsHigh: 128,
+        pixelsWide: dimension,
+        pixelsHigh: dimension,
         bitsPerSample: 8,
         samplesPerPixel: 4,
         hasAlpha: true,
@@ -44,7 +44,7 @@ for states in combinations(palettes.map { Array($0.1.keys).sorted() }) {
     let graphics = NSGraphicsContext(bitmapImageRep: image)!
     NSGraphicsContext.current = graphics
     graphics.imageInterpolation = .high
-    graphics.cgContext.scaleBy(x: 2, y: 2)
+    graphics.cgContext.scaleBy(x: CGFloat(pixelsPerPoint), y: CGFloat(pixelsPerPoint))
     let flip = NSAffineTransform()
     flip.translateX(by: 0, yBy: 64)
     flip.scaleX(by: 1, yBy: -1)
@@ -100,9 +100,24 @@ for states in combinations(palettes.map { Array($0.1.keys).sorted() }) {
     }
 
     NSGraphicsContext.restoreGraphicsState()
-    let png = image.representation(using: .png, properties: [:])!
-    try png.write(to: output.appendingPathComponent("\(key).png"), options: .atomic)
+    return image
 }
+
+func writePNG(_ image: NSBitmapImageRep, to url: URL) throws {
+    let png = image.representation(using: .png, properties: [:])!
+    try png.write(to: url, options: .atomic)
+}
+
+for states in combinations(palettes.map { Array($0.1.keys).sorted() }) {
+    let key = states.joined(separator: "-")
+    try writePNG(renderIcon(states: states, pixelsPerPoint: 2), to: output.appendingPathComponent("\(key).png"))
+}
+
+let appIcon = renderIcon(
+    states: ["stopped", "unknown", "unknown", "disabled"],
+    pixelsPerPoint: 16
+)
+try writePNG(appIcon, to: output.deletingLastPathComponent().appendingPathComponent("app-icon.png"))
 
 extension NSColor {
     convenience init(hex: UInt32) {

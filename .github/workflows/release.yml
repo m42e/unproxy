@@ -4,8 +4,6 @@ on:
     tags: ['v*']
 permissions:
   contents: write
-  pages: write
-  id-token: write
 env:
   UNPROXY_REVISION: ${{ github.sha }}
   MACOS_SIGNING_SECRETS_PRESENT: ${{ secrets.APPLE_CERT_BASE64 != '' && secrets.APPLE_CERT_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
@@ -189,5 +187,3 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-      - run: cargo run --locked --bin xtask -- docs --repository "${{ github.repository }}"
-      - run: git archive --format=zip HEAD -o dist/site/source.zip

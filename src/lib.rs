@@ -5,6 +5,7 @@ pub mod config;
 pub mod connection;
 pub mod desktop;
 pub mod dns;
+pub mod doctor;
 pub mod filter_list;
 mod logging;
 pub mod net;

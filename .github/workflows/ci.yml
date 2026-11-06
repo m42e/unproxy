@@ -20,6 +20,7 @@ jobs:
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked --all-features
       - run: cargo test --locked --no-default-features
+      - run: node --test tests/documentation.mjs
       - run: cargo xtask docs --repository "${{ github.repository }}"
       - run: cargo xtask package --format native
       - uses: actions/upload-artifact@v6

@@ -129,6 +129,7 @@ cp -R ./. "$CAPTURE_DIR/zip-$n/"
     f.asset("unproxy-tray.ps1", "tray");
     f.asset("app-entitlements.plist", "app entitlements");
     f.asset("child-entitlements.plist", "child entitlements");
+    f.asset("app-icon.icns", "app icon");
     for hook in ["postinst", "prerm", "postrm"] {
         f.asset(&format!("debian-{hook}"), "#!/bin/sh\nexit 0");
     }
@@ -384,6 +385,17 @@ printf 'fixture pkg' > "$out"
                 .join("pkgroot-1/Applications/Unproxy.app/Contents/Info.plist")
                 .is_file()
         );
+        assert!(
+            f.capture
+                .join("pkgroot-1/Applications/Unproxy.app/Contents/Resources/Unproxy.icns")
+                .is_file()
+        );
+        let plist = std::fs::read_to_string(
+            f.capture
+                .join("pkgroot-1/Applications/Unproxy.app/Contents/Info.plist"),
+        )
+        .unwrap();
+        assert!(plist.contains("<key>CFBundleIconFile</key><string>Unproxy</string>"));
     } else {
         assert!(
             f.capture
@@ -391,6 +403,15 @@ printf 'fixture pkg' > "$out"
                 .is_file()
         );
         assert!(f.capture.join("zip-1/Unproxy.app/Contents/Library/LoginItems/UnproxyLoginHelper.app/Contents/MacOS/unproxy-login-helper").is_file());
+        assert!(
+            f.capture
+                .join("zip-1/Unproxy.app/Contents/Resources/Unproxy.icns")
+                .is_file()
+        );
+        let plist =
+            std::fs::read_to_string(f.capture.join("zip-1/Unproxy.app/Contents/Info.plist"))
+                .unwrap();
+        assert!(plist.contains("<key>CFBundleIconFile</key><string>Unproxy</string>"));
         assert!(
             f.capture
                 .join("zip-2/Applications/Unproxy.app/Contents/Info.plist")
@@ -619,8 +640,12 @@ fn package_rejects_incompatible_targets_and_reports_missing_binaries_and_collisi
 }
 
 #[test]
-fn documentation_generation_sorts_pages_and_validates_repository_names() {
+fn documentation_generation_publishes_user_pages_and_validates_repository_names() {
     let f = Fixture::new();
+    f.tool(
+        "cargo",
+        "printf '%s\\n' 'PAC report: Fixture parsing | 100 parses | 1us | 2us' 'PAC report: Fixture matching | 50 evaluations | 3us | 4us'",
+    );
     f.tool(
         "git",
         r#"
@@ -630,9 +655,16 @@ printf 'fixture archive' > "$1"
 "#,
     );
     std::fs::create_dir_all(f.root.path().join("docs")).unwrap();
-    std::fs::write(f.root.path().join("docs/z.md"), "# Last\n").unwrap();
-    std::fs::write(f.root.path().join("docs/a.md"), "# First\n").unwrap();
+    std::fs::write(f.root.path().join("docs/user-guide.md"), "# Quick start\n").unwrap();
+    std::fs::write(
+        f.root.path().join("docs/routing.md"),
+        "# PAC & routing\n\n<!-- PAC_PERFORMANCE_RESULTS -->\n",
+    )
+    .unwrap();
+    std::fs::write(f.root.path().join("docs/a.md"), "# Internal first\n").unwrap();
+    std::fs::write(f.root.path().join("docs/z.md"), "# Internal last\n").unwrap();
     std::fs::create_dir_all(f.root.path().join("site")).unwrap();
+    f.asset("app-icon.png", "app icon");
     std::fs::write(
         f.root.path().join("site/index.html"),
         "@VERSION@ @REPOSITORY@",
@@ -646,13 +678,26 @@ printf 'fixture archive' > "$1"
         "--repository",
         "owner/project",
     ]));
-    let page = std::fs::read_to_string(f.root.path().join("dist/site/docs/a.html")).unwrap();
-    assert!(page.contains("<h1>First</h1>"));
+    let page =
+        std::fs::read_to_string(f.root.path().join("dist/site/docs/user-guide.html")).unwrap();
+    assert!(page.contains("<h1 id=\"quick-start\">Quick start</h1>"));
     let landing = std::fs::read_to_string(f.root.path().join("dist/site/index.html")).unwrap();
     assert!(landing.contains("owner/project"));
     assert!(f.root.path().join("dist/site/source.zip").is_file());
-    let nav = std::fs::read_to_string(f.root.path().join("dist/site/docs/z.html")).unwrap();
-    assert!(nav.find("a.html").unwrap() < nav.find("z.html").unwrap());
+    let nav = std::fs::read_to_string(f.root.path().join("dist/site/docs/routing.html")).unwrap();
+    assert!(nav.find("user-guide.html").unwrap() < nav.find("routing.html").unwrap());
+    assert!(nav.contains("<th>Use case</th>"));
+    assert!(nav.contains("<th>Load / cases tested</th>"));
+    assert!(nav.contains("<th>Median</th>"));
+    assert!(nav.contains("<th>Max</th>"));
+    assert!(nav.contains("<td>Fixture parsing</td><td>100 parses</td><td>1us</td><td>2us</td>"));
+    assert!(
+        nav.contains("<td>Fixture matching</td><td>50 evaluations</td><td>3us</td><td>4us</td>")
+    );
+    assert!(!nav.contains("Internal first"));
+    assert!(!nav.contains("Internal last"));
+    assert!(!f.root.path().join("dist/site/docs/a.html").exists());
+    assert!(!f.root.path().join("dist/site/docs/z.html").exists());
 
     let invalid = f.command(&[
         "docs",

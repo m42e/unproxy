@@ -1,4 +1,3 @@
-use clap::Parser;
 use std::fs;
 use unproxy::config::{MainArgs, token_file};
 #[test]

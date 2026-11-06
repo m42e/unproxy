@@ -1,6 +1,8 @@
 use super::{
     CREATE_NO_WINDOW, ChildLifecycle, Preferences, default_pac_path, log_path, support_dir,
 };
+mod settings;
+
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::{
@@ -8,7 +10,7 @@ use std::{
     net::{SocketAddr, TcpStream},
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 use tray_icon::{
@@ -25,6 +27,7 @@ use windows_sys::Win32::{
 };
 
 const MENU_PROXY: &str = "proxy";
+const MENU_OPEN_STATUS: &str = "open-status";
 const MENU_OPEN_LOG: &str = "open-log";
 const MENU_COPY_ADDRESS: &str = "copy-address";
 const MENU_SETTINGS: &str = "settings";
@@ -58,7 +61,6 @@ struct Controller {
     settings_item: MenuItem,
     last_icon_key: String,
     last_error: Option<String>,
-    settings_process: Option<Child>,
     icon_directory: PathBuf,
 }
 
@@ -95,8 +97,15 @@ pub(super) fn run() -> Result<()> {
         show_error("Could not start Unproxy", &format!("{error:#}"));
     }
 
-    let (menu, proxy_item, open_log_item, copy_address_item, settings_item, quit_item) =
-        build_menu()?;
+    let (
+        menu,
+        proxy_item,
+        open_status_item,
+        open_log_item,
+        copy_address_item,
+        settings_item,
+        quit_item,
+    ) = build_menu()?;
     let initial_running = child.is_running();
     let initial_status = read_runtime_status(&preferences);
     let initial_icon_key = icon_key(
@@ -122,7 +131,6 @@ pub(super) fn run() -> Result<()> {
         settings_item,
         last_icon_key: initial_icon_key,
         last_error,
-        settings_process: None,
         icon_directory,
     };
     let mut last_refresh = Instant::now();
@@ -148,6 +156,8 @@ pub(super) fn run() -> Result<()> {
             }
             let result = if event_id == controller.proxy_item.id() {
                 controller.toggle_proxy()
+            } else if event_id == open_status_item.id() {
+                open_status_page(&controller.preferences)
             } else if event_id == open_log_item.id() {
                 open_log()
             } else if event_id == copy_address_item.id() {
@@ -159,16 +169,16 @@ pub(super) fn run() -> Result<()> {
             };
             if let Err(error) = result {
                 controller.last_error = Some(format!("{error:#}"));
-                show_error("Unproxy", &format!("{error:#}"));
+                let title = if event_id == controller.settings_item.id() {
+                    "Unproxy Settings"
+                } else {
+                    "Unproxy"
+                };
+                show_error(title, &format!("{error:#}"));
             }
         }
         if quit_requested {
             break;
-        }
-
-        if let Err(error) = controller.finish_settings_if_ready() {
-            controller.last_error = Some(format!("{error:#}"));
-            show_error("Unproxy Settings", &format!("{error:#}"));
         }
 
         if last_refresh.elapsed() >= Duration::from_secs(1) {
@@ -208,6 +218,9 @@ impl Controller {
             self.child.last_exit = None;
             self.last_error = None;
         } else {
+            if reload_preferences(&self.preferences_path, &mut self.preferences)? {
+                self.last_icon_key.clear();
+            }
             self.child
                 .start(&self.child_executable, &self.preferences)?;
             self.last_error = None;
@@ -216,51 +229,35 @@ impl Controller {
     }
 
     fn open_settings(&mut self) -> Result<()> {
-        if self.settings_process.is_some() {
-            return Ok(());
-        }
-        let script = settings_script_path(&std::env::current_exe()?)?;
-        let mut command = Command::new("powershell.exe");
-        command
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-STA",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-            ])
-            .arg(script)
-            .arg("-SettingsOnly")
-            .creation_flags(CREATE_NO_WINDOW);
-        self.settings_process = Some(command.spawn().context("open Unproxy settings")?);
-        self.settings_item.set_enabled(false);
-        Ok(())
-    }
-
-    fn finish_settings_if_ready(&mut self) -> Result<()> {
-        let Some(process) = self.settings_process.as_mut() else {
+        let Some(updated) =
+            settings::show_dialog(&self.preferences).context("open Unproxy settings")?
+        else {
             return Ok(());
         };
-        let Some(status) = process.try_wait()? else {
+        if updated == self.preferences {
             return Ok(());
-        };
-        self.settings_process = None;
-        self.settings_item.set_enabled(true);
-
-        if !status.success() {
-            anyhow::bail!("settings helper exited with {status}");
         }
 
-        let updated = Preferences::load(&self.preferences_path)?;
-        if updated != self.preferences {
-            if self.child.is_running() && child_restart_required(&self.preferences, &updated) {
-                self.child.restart(&self.child_executable, &updated)?;
+        updated
+            .save(&self.preferences_path)
+            .context("save Unproxy settings")?;
+        if updated.autostart != self.preferences.autostart {
+            let executable = std::env::current_exe().context("find Unproxy tray executable")?;
+            if let Err(error) = settings::set_login_startup(updated.autostart, &executable) {
+                if let Err(restore_error) = self.preferences.save(&self.preferences_path) {
+                    return Err(error.context(format!(
+                        "restoring the previous settings also failed: {restore_error:#}"
+                    )));
+                }
+                return Err(error);
             }
-            self.preferences = updated;
-            self.last_error = None;
-            self.last_icon_key.clear();
         }
+        if self.child.is_running() && child_restart_required(&self.preferences, &updated) {
+            self.child.restart(&self.child_executable, &updated)?;
+        }
+        self.preferences = updated;
+        self.last_error = None;
+        self.last_icon_key.clear();
         Ok(())
     }
 
@@ -282,9 +279,18 @@ impl Controller {
     }
 }
 
-fn build_menu() -> Result<(Menu, MenuItem, MenuItem, MenuItem, MenuItem, MenuItem)> {
+fn build_menu() -> Result<(
+    Menu,
+    MenuItem,
+    MenuItem,
+    MenuItem,
+    MenuItem,
+    MenuItem,
+    MenuItem,
+)> {
     let menu = Menu::new();
     let proxy = MenuItem::with_id(MENU_PROXY, "Proxy: Starting...", true, None);
+    let open_status = MenuItem::with_id(MENU_OPEN_STATUS, "Open Status Page", true, None);
     let open_log = MenuItem::with_id(MENU_OPEN_LOG, "Open Log", true, None);
     let copy_address = MenuItem::with_id(MENU_COPY_ADDRESS, "Copy Proxy Address", true, None);
     let settings = MenuItem::with_id(MENU_SETTINGS, "Settings...", true, None);
@@ -292,6 +298,8 @@ fn build_menu() -> Result<(Menu, MenuItem, MenuItem, MenuItem, MenuItem, MenuIte
     let separator = PredefinedMenuItem::separator();
 
     menu.append(&proxy).context("add proxy menu item")?;
+    menu.append(&open_status)
+        .context("add status-page menu item")?;
     menu.append(&open_log).context("add log menu item")?;
     menu.append(&copy_address)
         .context("add copy-address menu item")?;
@@ -299,7 +307,15 @@ fn build_menu() -> Result<(Menu, MenuItem, MenuItem, MenuItem, MenuItem, MenuIte
     menu.append(&settings).context("add settings menu item")?;
     menu.append(&separator).context("add menu separator")?;
     menu.append(&quit).context("add quit menu item")?;
-    Ok((menu, proxy, open_log, copy_address, settings, quit))
+    Ok((
+        menu,
+        proxy,
+        open_status,
+        open_log,
+        copy_address,
+        settings,
+        quit,
+    ))
 }
 
 fn child_restart_required(current: &Preferences, updated: &Preferences) -> bool {
@@ -309,6 +325,13 @@ fn child_restart_required(current: &Preferences, updated: &Preferences) -> bool 
         || current.proxytunnel != updated.proxytunnel
         || current.direct_fallback != updated.direct_fallback
         || (cfg!(feature = "negotiate") && current.negotiate != updated.negotiate)
+}
+
+fn reload_preferences(path: &Path, current: &mut Preferences) -> Result<bool> {
+    let updated = Preferences::load(path)?;
+    let changed = updated != *current;
+    *current = updated;
+    Ok(changed)
 }
 
 fn create_event(name: &str) -> Result<KernelHandle> {
@@ -348,24 +371,6 @@ fn tray_icon_directory(executable: &Path) -> Result<PathBuf> {
     let development = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tray-icons");
     ensure!(development.is_dir(), "tray icon assets are missing");
     Ok(development)
-}
-
-fn settings_script_path(executable: &Path) -> Result<PathBuf> {
-    let installed = executable
-        .parent()
-        .context("tray executable has no parent directory")?
-        .join("unproxy-tray.ps1");
-    let script = if installed.is_file() {
-        installed
-    } else {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/unproxy-tray.ps1")
-    };
-    ensure!(
-        script.is_file(),
-        "settings helper is missing: {}",
-        script.display()
-    );
-    Ok(script)
 }
 
 fn create_default_pac_if_needed(first_run: bool, preferences: &Preferences) -> Result<()> {
@@ -543,6 +548,32 @@ fn proxy_menu_text(running: bool, failed: bool) -> &'static str {
     }
 }
 
+fn open_status_page(preferences: &Preferences) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    let url = preferences.status_url()?;
+    let wide_url = std::ffi::OsStr::new(&url)
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // ShellExecute opens the URL through the user's default browser association.
+    let result = unsafe {
+        windows_sys::Win32::UI::Shell::ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            wide_url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        )
+    };
+    ensure!(
+        result as isize > 32,
+        "could not open the status page (ShellExecute error {})",
+        result as isize
+    );
+    Ok(())
+}
+
 fn open_log() -> Result<()> {
     Command::new("notepad.exe")
         .arg(log_path())
@@ -609,6 +640,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn menu_exposes_the_status_page_action() {
+        let (_, _, status, _, _, _, _) = build_menu().unwrap();
+        assert_eq!(status.id().0, MENU_OPEN_STATUS);
+        assert_eq!(status.text(), "Open Status Page");
+    }
+
+    #[test]
     fn runtime_status_uses_configured_listeners() {
         let unavailable_address = "127.0.0.1:3128".parse::<SocketAddr>().unwrap();
         let address = "[::1]:3128".parse::<SocketAddr>().unwrap();
@@ -673,5 +711,27 @@ mod tests {
         };
         assert!(child_restart_required(&current, &updated));
         assert!(!child_restart_required(&updated, &updated));
+    }
+
+    #[test]
+    fn restarting_proxy_reloads_preferences_from_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("preferences.json");
+        let original = Preferences {
+            filter_lists: Some(vec![PathBuf::from("C:\\lists\\hosts.txt")]),
+            ..Preferences::default()
+        };
+        original.save(&path).unwrap();
+
+        let updated = Preferences {
+            filter_lists: None,
+            ..original.clone()
+        };
+        updated.save(&path).unwrap();
+        let mut current = original;
+
+        assert!(reload_preferences(&path, &mut current).unwrap());
+        assert!(current.effective_filter_lists().is_empty());
+        assert!(!reload_preferences(&path, &mut current).unwrap());
     }
 }
