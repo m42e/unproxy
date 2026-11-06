@@ -258,6 +258,7 @@ async fn run_until(
     {
         tracing_subscriber::fmt()
             .compact()
+            .with_ansi(false)
             .with_timer(tracing_subscriber::fmt::time::uptime())
             .with_env_filter(filter)
             .with_writer(CapturedWriter::new(log, log_stream.clone()))
