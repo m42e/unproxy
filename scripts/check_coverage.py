@@ -22,12 +22,15 @@ PORTABLE_FILES = {
     "route.rs",
     "runtime.rs",
 }
-NATIVE_FILES = {
-    "auth/native.rs",
-    "network_notifications/macos.rs",
-    # The notification-area event loop talks directly to Win32 and is not
+NATIVE_UI_FILES = {
+    # The tray event loop and settings dialog use Win32 directly and are not
     # meaningfully exercised by the portable unit/integration test suite.
     "desktop/windows_tray.rs",
+    "desktop/windows_tray/settings.rs",
+}
+NATIVE_FILES = NATIVE_UI_FILES | {
+    "auth/native.rs",
+    "network_notifications/macos.rs",
 }
 
 
@@ -109,7 +112,10 @@ def main() -> int:
     gated_files = [
         file
         for file in files
-        if not source_path(file["filename"]).endswith("/src/desktop/windows_tray.rs")
+        if not any(
+            source_path(file["filename"]).endswith(f"/src/{name}")
+            for name in NATIVE_UI_FILES
+        )
         and not (
             has_macos_native_notifications
             and source_path(file["filename"]).endswith("/src/desktop.rs")
@@ -119,7 +125,7 @@ def main() -> int:
     total_scope = (
         "total (platform UI excluded)"
         if has_macos_native_notifications
-        else "total (tray excluded)"
+        else "total (native UI excluded)"
     )
     for scope, metrics, line_floor, region_floor in (
         (total_scope, None, 90.0, 85.0),

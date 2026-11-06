@@ -37,7 +37,7 @@ A listener is the local IP address and port your applications connect to. Defaul
 
 Add one numeric address and port per row. Enclose IPv6 addresses in brackets. To use port 8080, for example, use `127.0.0.1:8080` and `[::1]:8080`, then update your applications to match.
 
-On macOS, use **+** under Listeners to add a row and double-click a row to edit it. On Windows, edit the listener rows in Settings.
+On macOS, use **+** under Listeners to add a row and double-click a row to edit it. On Windows, enter one listener address per line in Settings.
 
 > **Keep listeners local unless you need network access.** There is no client authentication. Anyone who can reach a listener can use the proxy and read its status and logs. Unspecified addresses such as `0.0.0.0` and `[::]` are rejected. Use a specific interface address and firewall restrictions when sharing intentionally.
 
@@ -47,7 +47,7 @@ PAC sources are evaluated in their displayed order. A result containing a proxy 
 
 ### Windows
 
-Use **Add PAC File…** for a local file or **Add PAC URL…** for an HTTP(S) URL. Each row has **Open** for a local file or **View** to display a remote script. Use **Up**, **Down**, and **Remove** to arrange the list. Choose **Save** to apply.
+Enter one PAC file path or HTTP(S) URL per line. The line order sets the PAC evaluation order. Use **Browse PAC file…** to append a local file, then choose **Save** to apply.
 
 ### macOS
 
@@ -55,7 +55,7 @@ Use **+** under PAC files for a local file or **Add URL…** for an HTTP(S) URL.
 
 ## Add ad blocking lists
 
-In **Ad blocking lists**, add local files or remote HTTP(S) URLs. Windows uses **Add Local List…** and **Add Remote URL…**; macOS uses **+** and **Add URL…**. Remove a source to disable it. An empty list turns blocking off.
+In **Ad blocking lists**, add local files or remote HTTP(S) URLs. Windows accepts one path or URL per line and can append a local file with **Browse filter list…**; macOS uses **+** and **Add URL…**. Remove a source to disable it. An empty list turns blocking off.
 
 Lists support hosts-format mappings and plain domain names. A blocked domain and its subdomains receive HTTP 403. See [filter list behavior](routing.md#block-domains-with-filter-lists) for format and loading details.
 
@@ -74,7 +74,7 @@ Enable DIRECT fallback only if your network policy permits direct access. For in
 
 ## Save and apply changes
 
-On **Windows**, choose **Save**. On **macOS**, valid edits and checkbox changes save and apply immediately. Changes affecting a running proxy restart it, which can interrupt active requests or tunnels. If the proxy is stopped, the new preferences are used the next time you start it.
+On **Windows**, choose **Save**. On **macOS**, valid edits and checkbox changes save and apply immediately. Changes affecting a running proxy restart it, which can interrupt active requests or tunnels. If the proxy is stopped, the new preferences are used the next time you start it. When editing the Windows `preferences.json` file directly, stop and start the proxy from the tray to reload the saved settings.
 
 Desktop preferences persist across app launches. Windows stores them in `%LOCALAPPDATA%\Unproxy\preferences.json`; macOS uses native application preferences. Both apps keep PAC data and `unproxy.log` in their [support folders](configuration.md#desktop-files).
 

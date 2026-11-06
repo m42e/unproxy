@@ -5,6 +5,69 @@ use std::{
     process::{Command, Output},
 };
 
+#[test]
+fn windows_installation_instructions_unblock_downloaded_package_scripts() {
+    assert_installation_instructions_unblock_downloaded_scripts(include_str!(
+        "../docs/installation.md"
+    ));
+}
+
+#[test]
+fn windows_readme_instructions_unblock_downloaded_package_scripts() {
+    assert_installation_instructions_unblock_downloaded_scripts(include_str!("../README.md"));
+}
+
+fn assert_installation_instructions_unblock_downloaded_scripts(guide: &str) {
+    let commands = guide
+        .split_once("```powershell")
+        .unwrap()
+        .1
+        .split_once("```")
+        .unwrap()
+        .0;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("nested")).unwrap();
+    let scripts = ["install.ps1", "uninstall.ps1", "nested/helper.ps1"];
+    for script in scripts {
+        std::fs::write(
+            root.path().join(script),
+            "Write-Output 'fixture installer ran'",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join(format!("{script}:Zone.Identifier")),
+            "[ZoneTransfer]\r\nZoneId=3\r\n",
+        )
+        .unwrap();
+    }
+
+    let output = Command::new("powershell.exe")
+        .current_dir(root.path())
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "RemoteSigned",
+            "-Command",
+            commands,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("fixture installer ran"));
+    for script in scripts {
+        assert!(
+            std::fs::read(root.path().join(format!("{script}:Zone.Identifier"))).is_err(),
+            "{script} still has its Internet-zone marker"
+        );
+    }
+}
+
 fn package_version() -> &'static str {
     unproxy::VERSION.split('+').next().unwrap()
 }
@@ -219,7 +282,8 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
         b"fixture tray png",
     )
     .unwrap();
-    std::fs::write(root.join("README.md"), "fixture README").unwrap();
+    let readme = include_str!("../README.md");
+    std::fs::write(root.join("README.md"), readme).unwrap();
     std::fs::write(
         assets.join("proxy.pac"),
         "function FindProxyForURL(){return 'DIRECT';}",
@@ -227,7 +291,6 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
     .unwrap();
     std::fs::write(assets.join("install.ps1"), "install script").unwrap();
     std::fs::write(assets.join("uninstall.ps1"), "uninstall script").unwrap();
-    std::fs::write(assets.join("unproxy-tray.ps1"), "tray script").unwrap();
 
     let output = fixture.command(&[
         "package",
@@ -280,10 +343,23 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
         std::fs::read(extracted.join("tray-icons/stopped-unloaded-unknown-disabled.png")).unwrap(),
         b"fixture tray png"
     );
-    assert_eq!(
-        std::fs::read_to_string(extracted.join("README.md")).unwrap(),
-        "fixture README"
-    );
+    let packaged_readme = std::fs::read_to_string(extracted.join("README.md")).unwrap();
+    assert_eq!(packaged_readme, readme);
+    for guidance in [
+        "Get-ChildItem -File -Recurse | Unblock-File",
+        ".\\install.ps1",
+        "RemoteSigned",
+        "Get-ExecutionPolicy -List",
+        "MachinePolicy",
+        "UserPolicy",
+        "AllSigned",
+        "Restricted",
+    ] {
+        assert!(
+            packaged_readme.contains(guidance),
+            "packaged README is missing installation guidance: {guidance}"
+        );
+    }
     assert_eq!(
         std::fs::read_to_string(extracted.join("proxy.pac.sample")).unwrap(),
         "function FindProxyForURL(){return 'DIRECT';}"
@@ -296,10 +372,7 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
         std::fs::read_to_string(extracted.join("uninstall.ps1")).unwrap(),
         "uninstall script"
     );
-    assert_eq!(
-        std::fs::read_to_string(extracted.join("unproxy-tray.ps1")).unwrap(),
-        "tray script"
-    );
+    assert!(!extracted.join("unproxy-tray.ps1").exists());
     let metadata: serde_json::Value =
         serde_json::from_slice(&std::fs::read(extracted.join("metadata.json")).unwrap()).unwrap();
     assert_eq!(metadata["target"], target);
@@ -308,7 +381,6 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
     for component in [
         "unproxy.exe",
         "UnproxyTray.exe",
-        "unproxy-tray.ps1",
         "install.ps1",
         "uninstall.ps1",
         "metadata.json",
@@ -318,6 +390,10 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
             "package metadata is missing component {component}"
         );
     }
+    assert!(
+        !components.iter().any(|value| value == "unproxy-tray.ps1"),
+        "package metadata must not include the retired PowerShell settings helper"
+    );
     assert!(
         root.join(format!(
             "dist/windows package/unproxy-{}-{target}.zip",

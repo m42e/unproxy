@@ -487,7 +487,6 @@ fn package(
                 let mut windows_components = vec![
                     "unproxy.exe",
                     "UnproxyTray.exe",
-                    "unproxy-tray.ps1",
                     "tray-icons",
                     "install.ps1",
                     "uninstall.ps1",
@@ -519,7 +518,6 @@ fn package(
                 if matches!(format, Format::Windows) {
                     std::fs::copy("assets/install.ps1", staging.join("install.ps1"))?;
                     std::fs::copy("assets/uninstall.ps1", staging.join("uninstall.ps1"))?;
-                    std::fs::copy("assets/unproxy-tray.ps1", staging.join("unproxy-tray.ps1"))?;
                     let icons = Path::new("assets/tray-icons");
                     if icons.is_dir() {
                         let destination = staging.join("tray-icons");

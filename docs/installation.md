@@ -10,10 +10,11 @@ the macOS package for your Mac.
 1. Download and extract the Windows ZIP.
 2. Open the extracted folder in File Explorer.
 3. Right-click the folder background and choose **Open in Terminal**.
-4. In PowerShell, run:
+4. After verifying that the ZIP came from the project's Releases page, unblock
+   the extracted files and run the installer in PowerShell:
 
    ```powershell
-   Unblock-File .\install.ps1
+   Get-ChildItem -File -Recurse | Unblock-File
    .\install.ps1
    ```
 
@@ -22,6 +23,21 @@ the macOS package for your Mac.
    files, and proxy behavior. The installer adds Unproxy to your Start menu and
    starts it when you sign in; you can change that in Settings. Choose
    **Open Status Page** from the tray menu to check the connection.
+
+Downloaded files can carry an Internet-zone marker. Under `RemoteSigned`,
+unsigned PowerShell scripts with this marker cannot run; `Unblock-File` removes
+the marker from the trusted package's installer and uninstaller. The tray
+settings window is native and does not run a PowerShell helper.
+
+If PowerShell reports that running scripts is disabled and your organization
+does not enforce an execution policy, run
+`Set-ExecutionPolicy -Scope Process RemoteSigned` in the same terminal, then
+retry `.\install.ps1`. This change lasts only for
+that PowerShell session. Use `Get-ExecutionPolicy -List` to check policies:
+`MachinePolicy` and `UserPolicy` take precedence over process settings, so
+`Bypass` cannot override them. If either enforces `AllSigned` or `Restricted`,
+contact your IT administrator for an approved installation method; unblocking
+does not satisfy those policies.
 
 This standard tray installation is per-user and does not require administrator
 approval. Unproxy runs in the signed-in user's session and uses that user's

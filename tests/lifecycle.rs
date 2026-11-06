@@ -368,6 +368,10 @@ async fn logfile_is_preserved_and_receives_runtime_startup_messages() {
     assert!(log.contains("previous diagnostic history"));
     assert!(log.contains("proxy listening"), "{log}");
     assert_eq!(log.matches("proxy started").count(), 2, "{log}");
+    assert!(
+        !log.contains('\x1b'),
+        "ANSI escape sequence in log file: {log}"
+    );
 }
 
 #[cfg(unix)]
