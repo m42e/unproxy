@@ -307,7 +307,7 @@ impl Preferences {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn parse_listener(value: &str) -> Result<std::net::SocketAddr> {
     let address = value
         .trim()

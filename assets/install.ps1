@@ -142,7 +142,10 @@ $destination = Join-Path $root 'bin'
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 Copy-Item (Join-Path $PSScriptRoot 'unproxy.exe') (Join-Path $destination 'unproxy.exe') -Force
 Copy-Item (Join-Path $PSScriptRoot 'UnproxyTray.exe') (Join-Path $destination 'UnproxyTray.exe') -Force
-Copy-Item (Join-Path $PSScriptRoot 'unproxy-tray.ps1') (Join-Path $destination 'unproxy-tray.ps1') -Force
+$legacySettingsHelper = Join-Path $destination 'unproxy-tray.ps1'
+if (Test-Path -LiteralPath $legacySettingsHelper) {
+    Remove-Item -LiteralPath $legacySettingsHelper -Force
+}
 $trayIconDirectory = Join-Path $destination 'tray-icons'
 New-Item -ItemType Directory -Path $trayIconDirectory -Force | Out-Null
 Copy-Item (Join-Path (Join-Path $PSScriptRoot 'tray-icons') '*') $trayIconDirectory -Recurse -Force

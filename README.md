@@ -19,10 +19,11 @@ Get-ChildItem -File -Recurse | Unblock-File
 ```
 
 `Unblock-File` removes the Internet-zone markers from the trusted package
-files, including the installer and tray scripts. Under `RemoteSigned`, these
-markers prevent unsigned downloaded scripts from running. Unblocking does not
-change your execution policy. The standard tray installation is per-user and
-does not require administrator approval.
+files, including the PowerShell installer and uninstaller. Under `RemoteSigned`,
+these markers prevent unsigned downloaded scripts from running. The Windows
+tray settings window is native and does not depend on PowerShell. Unblocking
+does not change your execution policy. The standard tray installation is
+per-user and does not require administrator approval.
 
 If PowerShell reports that running scripts is disabled and your organization
 does not enforce an execution policy, run

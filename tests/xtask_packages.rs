@@ -126,7 +126,6 @@ cp -R ./. "$CAPTURE_DIR/zip-$n/"
     f.asset("proxy.pac", "function FindProxyForURL(){return 'DIRECT';}");
     f.asset("install.ps1", "install");
     f.asset("uninstall.ps1", "uninstall");
-    f.asset("unproxy-tray.ps1", "tray");
     f.asset("app-entitlements.plist", "app entitlements");
     f.asset("child-entitlements.plist", "child entitlements");
     f.asset("app-icon.icns", "app icon");
@@ -192,6 +191,7 @@ fn portable_and_windows_packages_stage_expected_files() {
     assert!(staged.join("unproxy.exe").is_file());
     assert!(staged.join("UnproxyTray.exe").is_file());
     assert!(!staged.join("unproxy-tray.exe").exists());
+    assert!(!staged.join("unproxy-tray.ps1").exists());
     assert!(staged.join("install.ps1").is_file());
     assert!(staged.join("uninstall.ps1").is_file());
     assert!(

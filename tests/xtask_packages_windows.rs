@@ -27,7 +27,7 @@ fn assert_installation_instructions_unblock_downloaded_scripts(guide: &str) {
         .0;
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("nested")).unwrap();
-    let scripts = ["install.ps1", "unproxy-tray.ps1", "nested/helper.ps1"];
+    let scripts = ["install.ps1", "uninstall.ps1", "nested/helper.ps1"];
     for script in scripts {
         std::fs::write(
             root.path().join(script),
@@ -291,7 +291,6 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
     .unwrap();
     std::fs::write(assets.join("install.ps1"), "install script").unwrap();
     std::fs::write(assets.join("uninstall.ps1"), "uninstall script").unwrap();
-    std::fs::write(assets.join("unproxy-tray.ps1"), "tray script").unwrap();
 
     let output = fixture.command(&[
         "package",
@@ -373,10 +372,7 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
         std::fs::read_to_string(extracted.join("uninstall.ps1")).unwrap(),
         "uninstall script"
     );
-    assert_eq!(
-        std::fs::read_to_string(extracted.join("unproxy-tray.ps1")).unwrap(),
-        "tray script"
-    );
+    assert!(!extracted.join("unproxy-tray.ps1").exists());
     let metadata: serde_json::Value =
         serde_json::from_slice(&std::fs::read(extracted.join("metadata.json")).unwrap()).unwrap();
     assert_eq!(metadata["target"], target);
@@ -385,7 +381,6 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
     for component in [
         "unproxy.exe",
         "UnproxyTray.exe",
-        "unproxy-tray.ps1",
         "install.ps1",
         "uninstall.ps1",
         "metadata.json",
@@ -395,6 +390,10 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
             "package metadata is missing component {component}"
         );
     }
+    assert!(
+        !components.iter().any(|value| value == "unproxy-tray.ps1"),
+        "package metadata must not include the retired PowerShell settings helper"
+    );
     assert!(
         root.join(format!(
             "dist/windows package/unproxy-{}-{target}.zip",
