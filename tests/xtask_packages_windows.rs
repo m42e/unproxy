@@ -164,6 +164,12 @@ fn main() {
         std::fs::write(path, bytes).unwrap();
     }
 
+    fn installation_guide(&self) {
+        let docs = self.root.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("installation.md"), "fixture installation guide").unwrap();
+    }
+
     fn command(&self, args: &[&str]) -> Output {
         self.command_with_pac_reports(args, false)
     }
@@ -268,6 +274,7 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
     fixture.binary(target, "unproxy-tray.exe", b"fixture tray");
 
     let root = fixture.root.path();
+    fixture.installation_guide();
     let assets = root.join("assets");
     std::fs::create_dir_all(&assets).unwrap();
     let tray_icons = assets.join("tray-icons");
@@ -345,6 +352,10 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
     );
     let packaged_readme = std::fs::read_to_string(extracted.join("README.md")).unwrap();
     assert_eq!(packaged_readme, readme);
+    assert_eq!(
+        std::fs::read_to_string(extracted.join("docs/installation.md")).unwrap(),
+        "fixture installation guide"
+    );
     for guidance in [
         "Get-ChildItem -File -Recurse | Unblock-File",
         ".\\install.ps1",
@@ -425,6 +436,7 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
 #[test]
 fn windows_host_stages_debian_and_macos_packages_from_fixture_binaries() {
     let fixture = Fixture::new();
+    fixture.installation_guide();
     let root = fixture.root.path();
     let target = root.join("target");
     let assets = root.join("assets");

@@ -2,12 +2,14 @@
 
 ## 0.4.3
 
+- Add a native Windows tray settings dialog and reload saved preferences when
+  the proxy restarts.
 - Keep the proxy available when a remote PAC source is unavailable at startup,
   retrying the load in the background.
 - Include the request URL in PAC evaluation errors.
-- Include the OS-specific installation guide in the release packages.
-- Clarify Windows installer setup and PAC performance measurements in the
-  documentation.
+- Strip ANSI escape sequences from persisted log files.
+- Include the OS-specific installation guide in release packages and clarify
+  Windows `RemoteSigned` installation and PAC performance measurements.
 
 ## 0.4.2
 
