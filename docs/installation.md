@@ -89,10 +89,18 @@ to change that setting.
 ## macOS
 
 1. Download the macOS app installer (`*-app.pkg`) and open it.
-2. Follow the installer prompts, then open **Unproxy** from Applications.
+2. Follow the installer prompts. The menu bar app opens automatically for the
+   signed-in user. If nobody is signed in during installation, open **Unproxy**
+   from Applications after signing in.
 3. Click the Unproxy icon in the menu bar. Its status row starts or stops the
    proxy. Choose **Open Status Page** to check the configured listener in
    your browser.
+
+The app installer replaces the current or legacy Unproxy proxy-only launch
+agent so that the app is the sole owner of the proxy. Do not also start the
+`unproxy` command or install the service-only package while using the app:
+they would compete for the same listener ports. The service-only macOS package
+remains available for headless setups and does not include a menu bar app.
 
 Choose **Settings…** to set listeners, ordered PAC files, optional ad blocking
 lists, and proxy behavior.

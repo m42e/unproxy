@@ -138,8 +138,13 @@ cp -R ./. "$CAPTURE_DIR/zip-$n/"
     for hook in ["postinst", "prerm", "postrm"] {
         f.asset(&format!("debian-{hook}"), "#!/bin/sh\nexit 0");
     }
-    for hook in ["preinstall", "postinstall"] {
-        f.asset(&format!("macos-{hook}"), "#!/bin/sh\nexit 0");
+    for prefix in ["macos", "macos-app"] {
+        for hook in ["preinstall", "postinstall"] {
+            f.asset(
+                &format!("{prefix}-{hook}"),
+                &format!("#!/bin/sh\n# {prefix}-{hook}\nexit 0"),
+            );
+        }
     }
     f.asset("de.m42e.unproxy.plist", "launch agent");
     f.asset("unproxy.service", "service");
@@ -305,6 +310,160 @@ cp -R "$root"/. "$CAPTURE_DIR/deb/"
     );
 }
 
+fn run_macos_app_hook(
+    f: &Fixture,
+    source: &str,
+    console_user: &str,
+    loaded: bool,
+    failed_command: &str,
+) -> Output {
+    f.tool("stat", "printf '%s\\n' \"$CONSOLE_USER\"");
+    f.tool("id", "printf '501\\n'");
+    f.tool(
+        "launchctl",
+        r#"
+printf '%s\n' "$*" >> "$CAPTURE_DIR/launchctl.args"
+if [ "$1" = "$FAILED_COMMAND" ]; then exit 23; fi
+if [ "$1" = print ]; then [ "$AGENT_LOADED" = 1 ]; exit; fi
+if [ "$1" = asuser ]; then shift 2; exec "$@"; fi
+"#,
+    );
+    f.tool(
+        "sudo",
+        r#"
+printf '%s\n' "$@" > "$CAPTURE_DIR/sudo.args"
+shift 3
+exec "$@"
+"#,
+    );
+    f.tool(
+        "open",
+        r#"
+printf '%s\n' "$@" > "$CAPTURE_DIR/open.args"
+if [ "$FAILED_COMMAND" = open ]; then exit 23; fi
+"#,
+    );
+    let mut script = source.replace(
+        "/Library/LaunchAgents",
+        &format!(
+            "\"{}\"",
+            f.root.path().join("Library/LaunchAgents").display()
+        ),
+    );
+    for (path, name) in [
+        ("/usr/bin/stat", "stat"),
+        ("/usr/bin/id", "id"),
+        ("/bin/launchctl", "launchctl"),
+        ("/usr/bin/sudo", "sudo"),
+        ("/usr/bin/open", "open"),
+    ] {
+        script = script.replace(path, &format!("\"{}\"", f.tools.join(name).display()));
+    }
+    f.tool("app-hook", &script);
+    Command::new(f.tools.join("app-hook"))
+        .env("CAPTURE_DIR", &f.capture)
+        .env("CONSOLE_USER", console_user)
+        .env("AGENT_LOADED", if loaded { "1" } else { "0" })
+        .env("FAILED_COMMAND", failed_command)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn macos_app_installer_replaces_proxy_agents_and_launches_the_app_as_console_user() {
+    let f = Fixture::new();
+    let agents = f.root.path().join("Library/LaunchAgents");
+    std::fs::create_dir_all(&agents).unwrap();
+    for label in ["de.m42e.unproxy", "com.github.m42e.unproxy", "unrelated"] {
+        std::fs::write(agents.join(format!("{label}.plist")), "fixture").unwrap();
+    }
+    assert_ok(run_macos_app_hook(
+        &f,
+        include_str!("../assets/macos-app-preinstall"),
+        "alice",
+        true,
+        "",
+    ));
+    let calls = std::fs::read_to_string(f.capture.join("launchctl.args")).unwrap();
+    assert!(calls.contains("bootout gui/501/de.m42e.unproxy\n"));
+    assert!(calls.contains("bootout gui/501/com.github.m42e.unproxy\n"));
+    assert!(!agents.join("de.m42e.unproxy.plist").exists());
+    assert!(!agents.join("com.github.m42e.unproxy.plist").exists());
+    assert!(agents.join("unrelated.plist").is_file());
+
+    assert_ok(run_macos_app_hook(
+        &f,
+        include_str!("../assets/macos-app-postinstall"),
+        "alice",
+        false,
+        "",
+    ));
+    let calls = std::fs::read_to_string(f.capture.join("launchctl.args")).unwrap();
+    assert!(calls.contains("asuser 501 "));
+    let sudo_args = std::fs::read_to_string(f.capture.join("sudo.args")).unwrap();
+    assert!(sudo_args.starts_with("-n\n-u\nalice\n"));
+    assert_eq!(
+        std::fs::read_to_string(f.capture.join("open.args")).unwrap(),
+        "-g\n/Applications/Unproxy.app\n"
+    );
+}
+
+#[test]
+fn macos_app_installer_handles_unloaded_agents_and_no_console_session() {
+    for console_user in ["alice", "root", "loginwindow", ""] {
+        let f = Fixture::new();
+        assert_ok(run_macos_app_hook(
+            &f,
+            include_str!("../assets/macos-app-preinstall"),
+            console_user,
+            false,
+            "",
+        ));
+        if console_user == "alice" {
+            let calls = std::fs::read_to_string(f.capture.join("launchctl.args")).unwrap();
+            assert!(!calls.contains("bootout"));
+        } else {
+            assert!(!f.capture.join("launchctl.args").exists());
+            assert_ok(run_macos_app_hook(
+                &f,
+                include_str!("../assets/macos-app-postinstall"),
+                console_user,
+                false,
+                "",
+            ));
+            assert!(!f.capture.join("launchctl.args").exists());
+            assert!(!f.capture.join("open.args").exists());
+        }
+    }
+}
+
+#[test]
+fn macos_app_installer_reports_agent_shutdown_and_app_launch_failures() {
+    let f = Fixture::new();
+    let agents = f.root.path().join("Library/LaunchAgents");
+    std::fs::create_dir_all(&agents).unwrap();
+    let current = agents.join("de.m42e.unproxy.plist");
+    std::fs::write(&current, "fixture").unwrap();
+    let output = run_macos_app_hook(
+        &f,
+        include_str!("../assets/macos-app-preinstall"),
+        "alice",
+        true,
+        "bootout",
+    );
+    assert!(!output.status.success());
+    assert!(current.is_file());
+
+    let output = run_macos_app_hook(
+        &f,
+        include_str!("../assets/macos-app-postinstall"),
+        "alice",
+        false,
+        "open",
+    );
+    assert!(!output.status.success());
+}
+
 #[test]
 fn macos_service_and_app_packages_stage_bundles_and_call_pkgbuild() {
     let f = Fixture::new();
@@ -387,10 +546,19 @@ printf 'fixture pkg' > "$out"
     for name in ["unproxy-app", "unproxy", "unproxy-login-helper"] {
         f.binary(Some(target), name);
     }
+    f.asset(
+        "tray-icons/running-loaded-ok-authenticated.png",
+        "legacy colored tray icon",
+    );
     let app = f.command(&[
         "package", "--format", "app", "--target", target, "--output", "dist/app",
     ]);
     assert_ok(app);
+    assert!(
+        !f.capture
+            .join("zip-1/Unproxy.app/Contents/Resources/tray-icons")
+            .exists()
+    );
     if cfg!(target_os = "macos") {
         assert!(
             f.capture
@@ -424,6 +592,17 @@ printf 'fixture pkg' > "$out"
         )
         .unwrap();
         assert!(plist.contains("<key>CFBundleIconFile</key><string>Unproxy</string>"));
+        assert!(f.capture.join("hooks-1/preinstall").is_file());
+        assert!(
+            std::fs::read_to_string(f.capture.join("hooks-1/postinstall"))
+                .unwrap()
+                .contains("macos-app-postinstall")
+        );
+        assert!(
+            std::fs::read_to_string(f.capture.join("pkgbuild.args"))
+                .unwrap()
+                .contains("--scripts")
+        );
     } else {
         assert!(
             f.capture

@@ -13,7 +13,7 @@ Download a package from [GitHub Releases](https://github.com/m42e/unproxy/releas
 | Platform | Start here |
 | --- | --- |
 | Windows | Extract the ZIP and run `install.ps1` in PowerShell. The tray app starts near the clock. |
-| macOS | Open the `*-app.pkg` installer, then open **Unproxy** from Applications. Look for its menu bar icon. |
+| macOS | Open the `*-app.pkg` installer. The menu bar app opens automatically for the signed-in user; otherwise, open **Unproxy** from Applications after signing in. |
 | Debian / Ubuntu | Install the `.deb`, then run `systemctl --user enable --now unproxy`. |
 | Terminal | Run `unproxy` and keep the terminal open. Press Ctrl+C to stop. |
 
@@ -49,6 +49,12 @@ Unproxy does not automatically configure every application. See [Connect applica
 ## 4. Check the connection
 
 While Unproxy is running, choose **Open Status Page** from its tray or menu bar menu. This opens the first configured listener in your default browser, including a custom address or port. The page shows the listener, PAC policy, upstream, and authentication state. Then open a website through your configured application.
+
+On macOS the icon is white only: filled white lights mean running, PAC loaded,
+upstream request succeeded, and authentication accepted, respectively. Empty
+lights mean stopped, failed, unknown, unverified, or not configured; the menu
+and tooltip distinguish these states. The icon is rendered by the app itself,
+so missing external icon files cannot hide the menu bar control.
 
 For a CLI or service instance, open the configured listener’s HTTP address; the default is `http://127.0.0.1:3128/`.
 
