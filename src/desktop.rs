@@ -4256,12 +4256,10 @@ mod tests {
                 rgba.len(),
                 MACOS_TRAY_ICON_PIXELS * MACOS_TRAY_ICON_PIXELS * 4
             );
-            assert!(rgba.chunks_exact(4).all(|pixel| pixel[..3] == [255; 3]));
-            assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] == 255));
-            assert!(
-                rgba.chunks_exact(4)
-                    .any(|pixel| (1..255).contains(&pixel[3]))
-            );
+            let pixels = rgba.as_chunks::<4>().0;
+            assert!(pixels.iter().all(|pixel| pixel[..3] == [255; 3]));
+            assert!(pixels.iter().any(|pixel| pixel[3] == 255));
+            assert!(pixels.iter().any(|pixel| (1..255).contains(&pixel[3])));
             for (index, x) in [20, 49, 79, 108].into_iter().enumerate() {
                 let alpha = rgba[(101 * MACOS_TRAY_ICON_PIXELS + x) * 4 + 3];
                 assert_eq!(alpha, if lights[index] { 255 } else { 0 }, "mask {mask}");
