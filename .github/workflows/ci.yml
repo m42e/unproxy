@@ -69,13 +69,10 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
-        with:
-          # Coverage instrumentation needs a fresh target, not restored non-coverage artifacts.
-          cache-targets: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
-      - run: cargo install cargo-llvm-cov --version 0.8.5 --locked
+      - run: cargo install cargo-llvm-cov --version 0.9.1 --locked
       - name: Collect and report default features
         shell: bash
         run: |
