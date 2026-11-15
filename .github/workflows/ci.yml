@@ -69,6 +69,9 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Coverage instrumentation needs a fresh target, not restored non-coverage artifacts.
+          cache-targets: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
