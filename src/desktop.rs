@@ -130,6 +130,87 @@ pub fn default_pac_path() -> PathBuf {
     support_dir().join("proxy.pac")
 }
 
+#[cfg(any(target_os = "macos", test))]
+const MACOS_TRAY_ICON_PIXELS: usize = 128;
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_tray_icon_rgba(lights: [bool; 4]) -> Vec<u8> {
+    let segments = [
+        ((6.5, 25.0), (23.5, 25.0)),
+        ((17.0, 18.5), (23.5, 25.0)),
+        ((23.5, 25.0), (17.0, 31.5)),
+        ((40.5, 25.0), (57.5, 25.0)),
+        ((51.0, 18.5), (57.5, 25.0)),
+        ((57.5, 25.0), (51.0, 31.5)),
+    ];
+    let rounded_square_distance = |x: f64, y: f64, cx: f64, cy: f64, half: f64, radius: f64| {
+        let dx = (x - cx).abs() - (half - radius);
+        let dy = (y - cy).abs() - (half - radius);
+        dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - radius
+    };
+    let is_white = |x: f64, y: f64| {
+        if rounded_square_distance(x, y, 32.0, 25.0, 8.5, 3.0).abs() <= 2.1 {
+            return true;
+        }
+        if segments.iter().any(|&((ax, ay), (bx, by))| {
+            let dx = bx - ax;
+            let dy = by - ay;
+            let t = ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy);
+            let t = t.clamp(0.0, 1.0);
+            (x - ax - t * dx).powi(2) + (y - ay - t * dy).powi(2) <= 2.1_f64.powi(2)
+        }) {
+            return true;
+        }
+        [10.0, 24.7, 39.3, 54.0]
+            .into_iter()
+            .zip(lights)
+            .any(|(center, filled)| {
+                let distance = rounded_square_distance(x, y, center, 50.5, 6.9, 2.5);
+                if filled {
+                    distance <= 0.4
+                } else {
+                    distance.abs() <= 0.4
+                }
+            })
+    };
+    let mut rgba = vec![255; MACOS_TRAY_ICON_PIXELS * MACOS_TRAY_ICON_PIXELS * 4];
+    for y in 0..MACOS_TRAY_ICON_PIXELS {
+        for x in 0..MACOS_TRAY_ICON_PIXELS {
+            let mut coverage = 0;
+            for sy in 0..2 {
+                for sx in 0..2 {
+                    let sample_x = (x as f64 + (sx as f64 + 0.5) / 2.0) / 2.0;
+                    let sample_y = (y as f64 + (sy as f64 + 0.5) / 2.0) / 2.0;
+                    coverage += usize::from(is_white(sample_x, sample_y));
+                }
+            }
+            rgba[(y * MACOS_TRAY_ICON_PIXELS + x) * 4 + 3] = (coverage * 255 / 4) as u8;
+        }
+    }
+    rgba
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn acquire_controller_lock(dir: &Path) -> Result<Option<std::fs::File>> {
+    use std::os::fd::AsRawFd;
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join("controller.lock"))
+        .context("open menu-bar controller lock")?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(file));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return Ok(None);
+    }
+    Err(error).context("lock menu-bar controller")
+}
+
 fn parse_remote_pac_uri(source: &str) -> Result<Option<http::Uri>> {
     let source = source.trim();
     let Some((scheme, remainder)) = source.split_once("://") else {
@@ -557,7 +638,7 @@ mod native {
     unsafe extern "C" {}
     use super::*;
     use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, Sel};
-    use objc2::{msg_send, sel};
+    use objc2::{msg_send, rc::Retained, sel};
     use std::sync::{Arc, Mutex};
     use std::{ffi::CString, ptr};
 
@@ -572,6 +653,7 @@ mod native {
     static PAC_FILE_TABLE: Mutex<usize> = Mutex::new(0);
     static FILTER_LIST_TABLE: Mutex<usize> = Mutex::new(0);
     const SETTINGS_TABLE_ROW_HEIGHT: f64 = 20.0;
+    const NS_ALPHA_NONPREMULTIPLIED_BITMAP_FORMAT: usize = 1 << 1;
     #[derive(Clone, Default)]
     struct TrayStatus {
         pac_loaded: Option<bool>,
@@ -979,6 +1061,37 @@ mod native {
         .to_owned();
         (process, pac, upstream, authentication)
     }
+    fn status_icon(lights: [bool; 4]) -> Result<Retained<AnyObject>> {
+        let bitmap: *mut AnyObject = unsafe {
+            let allocated: *mut AnyObject = msg_send![objc2::class!(NSBitmapImageRep), alloc];
+            msg_send![allocated,
+                initWithBitmapDataPlanes:ptr::null_mut::<*mut u8>(),
+                pixelsWide:MACOS_TRAY_ICON_PIXELS as isize,
+                pixelsHigh:MACOS_TRAY_ICON_PIXELS as isize,
+                bitsPerSample:8isize,
+                samplesPerPixel:4isize,
+                hasAlpha:objc2::runtime::Bool::YES,
+                isPlanar:objc2::runtime::Bool::NO,
+                colorSpaceName:cocoa_string("NSDeviceRGBColorSpace"),
+                bitmapFormat:NS_ALPHA_NONPREMULTIPLIED_BITMAP_FORMAT,
+                bytesPerRow:(MACOS_TRAY_ICON_PIXELS * 4) as isize,
+                bitsPerPixel:32isize
+            ]
+        };
+        let bitmap = unsafe { Retained::from_raw(bitmap) }.context("create status icon bitmap")?;
+        let pixels: *mut u8 = unsafe { msg_send![&*bitmap, bitmapData] };
+        anyhow::ensure!(!pixels.is_null(), "status icon bitmap has no pixel storage");
+        let rgba = macos_tray_icon_rgba(lights);
+        unsafe { ptr::copy_nonoverlapping(rgba.as_ptr(), pixels, rgba.len()) };
+        let image: *mut AnyObject = unsafe {
+            let allocated: *mut AnyObject = msg_send![objc2::class!(NSImage), alloc];
+            msg_send![allocated, initWithSize:Size { width: 18.0, height: 18.0 }]
+        };
+        let image = unsafe { Retained::from_raw(image) }.context("create status icon image")?;
+        let _: () = unsafe { msg_send![&*image, addRepresentation:&*bitmap] };
+        let _: () = unsafe { msg_send![&*image, setTemplate:objc2::runtime::Bool::NO] };
+        Ok(image)
+    }
     fn update_status_button(state: &mut State, running: bool) {
         let (service, pac, upstream, authentication) = icon_statuses(state, running);
         let key = format!("{service}-{pac}-{upstream}-{authentication}");
@@ -987,41 +1100,22 @@ mod native {
             return;
         }
         if key != state.last_icon_key {
-            let path = state
-                .child_exe
-                .parent()
-                .and_then(Path::parent)
-                .map(|contents| {
-                    contents
-                        .join("Resources/tray-icons")
-                        .join(format!("{key}.png"))
-                });
-            if let Some(path) = path.filter(|path| path.is_file()) {
-                let image: *mut AnyObject = unsafe {
-                    let allocated: *mut AnyObject = msg_send![objc2::class!(NSImage), alloc];
-                    let initialized: *mut AnyObject = msg_send![allocated, initWithContentsOfFile:cocoa_string(&path.to_string_lossy())];
-                    if initialized.is_null() {
-                        initialized
-                    } else {
-                        msg_send![initialized, autorelease]
-                    }
-                };
-                if !image.is_null() {
-                    #[repr(C)]
-                    struct Size {
-                        width: f64,
-                        height: f64,
-                    }
-                    unsafe impl objc2::encode::Encode for Size {
-                        const ENCODING: objc2::encode::Encoding = objc2::encode::Encoding::Struct(
-                            "CGSize",
-                            &[f64::ENCODING, f64::ENCODING],
-                        );
-                    }
-                    let _: () =
-                        unsafe { msg_send![image, setSize:Size { width: 18.0, height: 18.0 }] };
-                    let _: () = unsafe { msg_send![button, setImage:image] };
+            match status_icon([
+                service == "running",
+                pac == "loaded",
+                upstream == "ok",
+                authentication == "authenticated",
+            ]) {
+                Ok(image) => {
+                    let _: () = unsafe { msg_send![button, setImage:&*image] };
+                    let _: () = unsafe { msg_send![button, setTitle:cocoa_string("")] };
                     state.last_icon_key = key;
+                }
+                Err(error) => {
+                    let message = format!("Could not render the Unproxy status icon: {error:#}");
+                    eprintln!("unproxy-app: {message}");
+                    state.notice = Some(message);
+                    let _: () = unsafe { msg_send![button, setTitle:cocoa_string("Unproxy")] };
                 }
             }
         }
@@ -1047,7 +1141,6 @@ mod native {
                 .map(|message| format!(" · {message}"))
                 .unwrap_or_default()
         );
-        let _: () = unsafe { msg_send![button, setTitle:cocoa_string("")] };
         let _: () = unsafe { msg_send![button, setToolTip:cocoa_string(&tooltip)] };
     }
     unsafe extern "C-unwind" fn poll_child(
@@ -2711,16 +2804,9 @@ mod native {
     fn run_startup(options: StartupOptions) -> Result<()> {
         let dir = options.support_dir;
         std::fs::create_dir_all(&dir)?;
-        use std::os::fd::AsRawFd;
-        let instance_lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(dir.join("controller.lock"))?;
-        if unsafe { libc::flock(instance_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let Some(instance_lock) = acquire_controller_lock(&dir)? else {
             return Ok(());
-        }
+        };
         let path = dir.join("preferences.json");
         let (prefs, defaults) = if let Some(defaults) = options.defaults {
             let defaults = defaults as *mut AnyObject;
@@ -2737,15 +2823,23 @@ mod native {
             )?;
         }
         let auth_configured = auth_is_configured(&prefs);
+        let app: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSApplication), sharedApplication] };
+        let _: objc2::runtime::Bool = unsafe { msg_send![app, setActivationPolicy:1isize] };
+        let bar: *mut AnyObject = unsafe { msg_send![objc2::class!(NSStatusBar), systemStatusBar] };
+        let item: *mut AnyObject = unsafe { msg_send![bar, statusItemWithLength:-1.0f64] };
+        let item = unsafe { Retained::retain(item) }.context("create menu-bar status item")?;
+        let button: *mut AnyObject = unsafe { msg_send![&*item, button] };
+        anyhow::ensure!(!button.is_null(), "menu-bar status item has no button");
         let state = Arc::new(Mutex::new(State {
             prefs,
             prefs_path: path,
             defaults: defaults as usize,
-            child: ChildLifecycle::default(),
+            child: ChildLifecycle::with_support_dir(dir),
             child_exe: exe,
             network_available: None,
             _instance_lock: instance_lock,
-            status_button: 0,
+            status_button: button as usize,
             last_running: false,
             start_failed: false,
             notice: None,
@@ -2761,9 +2855,6 @@ mod native {
             last_icon_key: String::new(),
         }));
         *STATE.lock().unwrap() = Some(state.clone());
-        let app: *mut AnyObject =
-            unsafe { msg_send![objc2::class!(NSApplication), sharedApplication] };
-        let _: objc2::runtime::Bool = unsafe { msg_send![app, setActivationPolicy:1isize] };
         {
             let mut s = state.lock().unwrap();
             let exe = s.child_exe.clone();
@@ -2786,14 +2877,6 @@ mod native {
             }
             let running = s.last_running;
             refresh_runtime_status(&mut s, running);
-        }
-        let bar: *mut AnyObject = unsafe { msg_send![objc2::class!(NSStatusBar), systemStatusBar] };
-        let item: *mut AnyObject = unsafe { msg_send![bar, statusItemWithLength:-1.0f64] };
-        let button: *mut AnyObject = unsafe { msg_send![item, button] };
-        {
-            let mut s = state.lock().unwrap();
-            s.status_button = button as usize;
-            let running = s.last_running;
             update_status_button(&mut s, running);
         }
         let cls = action_class();
@@ -2824,13 +2907,14 @@ mod native {
         }
         let menu: *mut AnyObject = unsafe { msg_send![objc2::class!(NSMenu), new] };
         let _: () = unsafe { msg_send![menu, setDelegate:target] };
-        let _: () = unsafe { msg_send![item, setMenu:menu] };
+        let _: () = unsafe { msg_send![&*item, setMenu:menu] };
         if options.run_event_loop {
             let _: () = unsafe { msg_send![app, run] };
         }
-        let _ = state.lock().unwrap().child.stop();
+        let stopped = state.lock().unwrap().child.stop();
         *STATE.lock().unwrap() = None;
-        Ok(())
+        let _: () = unsafe { msg_send![bar, removeStatusItem:&*item] };
+        stopped
     }
 
     pub fn run_helper() -> Result<()> {
@@ -2862,10 +2946,7 @@ mod native {
         let _: () = unsafe {
             msg_send![center,addObserver:target,selector:sel!(terminateHelper:),name:cocoa_string(HELPER_TERMINATE_NOTIFICATION),object:ptr::null_mut::<AnyObject>()]
         };
-        let status = Command::new("open").args(["-b", APP_BUNDLE_ID]).status()?;
-        if !status.success() {
-            return Ok(());
-        }
+        launch_helper_main_app()?;
         let _: () = unsafe { msg_send![app, run] };
         Ok(())
     }
@@ -3781,7 +3862,47 @@ mod native {
         let mut state = state.lock().unwrap();
         let original_status = state.tray_status.clone();
         let original_start_failed = state.start_failed;
+        let original_button = state.status_button;
+        let original_icon_key = state.last_icon_key.clone();
+        let button: *mut AnyObject = unsafe { msg_send![objc2::class!(NSButton), new] };
+        let button = unsafe { Retained::from_raw(button) }.context("create status button probe")?;
+        let light_alphas = || -> Result<[u8; 4]> {
+            let image: *mut AnyObject = unsafe { msg_send![&*button, image] };
+            anyhow::ensure!(
+                !image.is_null(),
+                "status button is invisible without icon assets"
+            );
+            let template: objc2::runtime::Bool = unsafe { msg_send![image, isTemplate] };
+            anyhow::ensure!(
+                !template.as_bool(),
+                "macOS must not recolor the white status icon"
+            );
+            let representations: *mut AnyObject = unsafe { msg_send![image, representations] };
+            let bitmap: *mut AnyObject =
+                unsafe { msg_send![representations, objectAtIndex:0usize] };
+            let width: isize = unsafe { msg_send![bitmap, pixelsWide] };
+            let height: isize = unsafe { msg_send![bitmap, pixelsHigh] };
+            let row_bytes: isize = unsafe { msg_send![bitmap, bytesPerRow] };
+            anyhow::ensure!(
+                width == MACOS_TRAY_ICON_PIXELS as isize
+                    && height == width
+                    && row_bytes == width * 4,
+                "unexpected status bitmap layout"
+            );
+            let pixels: *const u8 = unsafe { msg_send![bitmap, bitmapData] };
+            anyhow::ensure!(!pixels.is_null());
+            let rgba = unsafe {
+                std::slice::from_raw_parts(
+                    pixels,
+                    MACOS_TRAY_ICON_PIXELS * MACOS_TRAY_ICON_PIXELS * 4,
+                )
+            };
+            anyhow::ensure!(rgba.chunks_exact(4).all(|pixel| pixel[..3] == [255; 3]));
+            Ok([20, 49, 79, 108].map(|x| rgba[(101 * MACOS_TRAY_ICON_PIXELS + x) * 4 + 3]))
+        };
         let result = (|| {
+            state.status_button = (&*button as *const AnyObject) as usize;
+            state.last_icon_key.clear();
             state.tray_status = TrayStatus::default();
             state.start_failed = false;
             anyhow::ensure!(
@@ -3791,6 +3912,8 @@ mod native {
             anyhow::ensure!(labels.0 == "Stopped" && labels.1 == "Not loaded");
             anyhow::ensure!(labels.2 == "No recent proxy request");
             anyhow::ensure!(labels.3 == "Not configured");
+            update_status_button(&mut state, false);
+            anyhow::ensure!(light_alphas()? == [0; 4]);
 
             state.start_failed = true;
             anyhow::ensure!(icon_statuses(&state, false).0 == "failed");
@@ -3811,6 +3934,8 @@ mod native {
             anyhow::ensure!(labels.0 == "Running" && labels.1 == "Loaded");
             anyhow::ensure!(labels.2 == "Last proxy request succeeded");
             anyhow::ensure!(labels.3 == "Accepted on last request");
+            update_status_button(&mut state, true);
+            anyhow::ensure!(light_alphas()? == [255; 4]);
 
             state.tray_status.upstream_state = "error".into();
             state.tray_status.authentication_state = "rejected".into();
@@ -3818,6 +3943,8 @@ mod native {
             anyhow::ensure!(icon_statuses(&state, true).3 == "rejected");
             anyhow::ensure!(status_labels(&state, true).2 == "Last proxy request failed");
             anyhow::ensure!(status_labels(&state, true).3 == "Rejected by upstream (407)");
+            update_status_button(&mut state, true);
+            anyhow::ensure!(light_alphas()? == [255, 255, 0, 0]);
 
             state.tray_status.upstream_checked_at =
                 Some(chrono::Utc::now().timestamp().saturating_sub(301));
@@ -3833,6 +3960,8 @@ mod native {
         })();
         state.tray_status = original_status;
         state.start_failed = original_start_failed;
+        state.status_button = original_button;
+        state.last_icon_key = original_icon_key;
         result
     }
 
@@ -4096,14 +4225,91 @@ mod native {
 pub fn launch_helper_main_app() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("open").args(["-b", APP_BUNDLE_ID]).status();
+        launch_helper_main_app_with(|program, args| Command::new(program).args(args).status())?;
     }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn launch_helper_main_app_with(
+    execute: impl FnOnce(&str, &[&str]) -> std::io::Result<std::process::ExitStatus>,
+) -> Result<()> {
+    let status = execute("/usr/bin/open", &["-g", "-b", APP_BUNDLE_ID])
+        .context("launch Unproxy menu-bar application")?;
+    anyhow::ensure!(
+        status.success(),
+        "launch Unproxy menu-bar application exited with {status}"
+    );
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macos_status_icons_use_only_white_and_keep_unhealthy_lights_empty() {
+        for mask in 0..16 {
+            let lights = std::array::from_fn(|index| mask & (1 << index) != 0);
+            let rgba = macos_tray_icon_rgba(lights);
+            assert_eq!(
+                rgba.len(),
+                MACOS_TRAY_ICON_PIXELS * MACOS_TRAY_ICON_PIXELS * 4
+            );
+            assert!(rgba.chunks_exact(4).all(|pixel| pixel[..3] == [255; 3]));
+            assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] == 255));
+            assert!(
+                rgba.chunks_exact(4)
+                    .any(|pixel| (1..255).contains(&pixel[3]))
+            );
+            for (index, x) in [20, 49, 79, 108].into_iter().enumerate() {
+                let alpha = rgba[(101 * MACOS_TRAY_ICON_PIXELS + x) * 4 + 3];
+                assert_eq!(alpha, if lights[index] { 255 } else { 0 }, "mask {mask}");
+            }
+            assert_eq!(rgba[(50 * MACOS_TRAY_ICON_PIXELS + 24) * 4 + 3], 255);
+            assert_eq!(rgba[3], 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn controller_lock_rejects_duplicates_but_allows_relaunch_and_reports_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = acquire_controller_lock(dir.path()).unwrap().unwrap();
+        assert!(acquire_controller_lock(dir.path()).unwrap().is_none());
+        drop(first);
+        assert!(acquire_controller_lock(dir.path()).unwrap().is_some());
+        std::fs::remove_file(dir.path().join("controller.lock")).unwrap();
+        std::fs::create_dir(dir.path().join("controller.lock")).unwrap();
+        assert!(
+            acquire_controller_lock(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("open menu-bar controller lock")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_helper_launches_the_menu_bar_app_and_reports_launch_failures() {
+        use std::os::unix::process::ExitStatusExt;
+
+        launch_helper_main_app_with(|program, args| {
+            assert_eq!(program, "/usr/bin/open");
+            assert_eq!(args, ["-g", "-b", APP_BUNDLE_ID]);
+            Ok(std::process::ExitStatus::from_raw(0))
+        })
+        .unwrap();
+        let failed =
+            launch_helper_main_app_with(|_, _| Ok(std::process::ExitStatus::from_raw(7 << 8)))
+                .unwrap_err();
+        assert!(failed.to_string().contains("exited with"));
+        let unavailable = launch_helper_main_app_with(|_, _| {
+            Err(std::io::Error::other("fixture launch failure"))
+        })
+        .unwrap_err();
+        assert!(format!("{unavailable:#}").contains("fixture launch failure"));
+    }
 
     #[test]
     fn remote_pac_uris_are_validated_and_scheme_is_normalized() {

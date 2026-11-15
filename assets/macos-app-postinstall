@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+console_user=$(/usr/bin/stat -f %Su /dev/console)
+if [ "$console_user" != root ] && [ "$console_user" != loginwindow ] && [ -n "$console_user" ]; then
+    uid=$(/usr/bin/id -u "$console_user")
+    /bin/launchctl asuser "$uid" /usr/bin/sudo -n -u "$console_user" /usr/bin/open -g /Applications/Unproxy.app
+fi

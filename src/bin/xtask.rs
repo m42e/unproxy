@@ -403,6 +403,17 @@ fn pkgbuild_signing_args(command: &mut Command) {
         command.arg("--sign").arg(identity);
     }
 }
+fn macos_installer_scripts(output: &Path, prefix: &str) -> Result<PathBuf> {
+    let hooks = output.join(format!(".{prefix}-hooks-{}", std::process::id()));
+    std::fs::create_dir_all(&hooks)?;
+    for hook in ["preinstall", "postinstall"] {
+        executable(
+            &PathBuf::from(format!("assets/{prefix}-{hook}")),
+            &hooks.join(hook),
+        )?;
+    }
+    Ok(hooks)
+}
 fn windows_desktop_defaults(defaults: Option<&DesktopDefaults>) -> serde_json::Value {
     let defaults = defaults.cloned().unwrap_or_default();
     serde_json::json!({
@@ -641,14 +652,7 @@ fn package(
                 std::fs::create_dir_all(&paths)?;
                 std::fs::write(paths.join("unproxy"), "/opt/unproxy/bin\n")?;
                 if cfg!(target_os = "macos") {
-                    let hooks = output.join(format!(".hooks-{}", std::process::id()));
-                    std::fs::create_dir_all(&hooks)?;
-                    for hook in ["preinstall", "postinstall"] {
-                        executable(
-                            &PathBuf::from(format!("assets/macos-{hook}")),
-                            &hooks.join(hook),
-                        )?;
-                    }
+                    let hooks = macos_installer_scripts(output, "macos")?;
                     let mut command = Command::new("pkgbuild");
                     command
                         .arg("--root")
@@ -711,17 +715,6 @@ fn package(
                 std::fs::create_dir_all(&docs)?;
                 std::fs::copy("docs/installation.md", docs.join("installation.md"))?;
                 std::fs::copy("assets/app-icon.icns", app.join("Resources/Unproxy.icns"))?;
-                let tray_icons = Path::new("assets/tray-icons");
-                if tray_icons.is_dir() {
-                    let resources_icons = app.join("Resources/tray-icons");
-                    std::fs::create_dir_all(&resources_icons)?;
-                    for icon in std::fs::read_dir(tray_icons)? {
-                        let icon = icon?.path();
-                        if icon.extension().is_some_and(|ext| ext == "png") {
-                            std::fs::copy(&icon, resources_icons.join(icon.file_name().unwrap()))?;
-                        }
-                    }
-                }
                 std::fs::write(
                     app.join("Resources/metadata.json"),
                     serde_json::to_vec_pretty(
@@ -744,6 +737,7 @@ fn package(
                     &pkg_root.join("Applications/Unproxy.app"),
                 )?;
                 if cfg!(target_os = "macos") {
+                    let hooks = macos_installer_scripts(output, "macos-app")?;
                     let mut command = Command::new("pkgbuild");
                     command
                         .arg("--root")
@@ -755,10 +749,13 @@ fn package(
                             unproxy::VERSION.split('+').next().unwrap(),
                             "--install-location",
                             "/",
+                            "--scripts",
                         ])
+                        .arg(&hooks)
                         .arg(output.join(format!("{package_name}-app.pkg")));
                     pkgbuild_signing_args(&mut command);
                     run_pkgbuild(&mut command)?;
+                    std::fs::remove_dir_all(hooks)?;
                 } else {
                     zip(
                         &pkg_root,
