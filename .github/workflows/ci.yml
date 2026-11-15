@@ -82,7 +82,9 @@ jobs:
           cargo llvm-cov report --lcov --output-path coverage-default.lcov
           cargo llvm-cov report --html --output-dir coverage-default-html
           cargo llvm-cov report --show-missing-lines > coverage-default-missing.txt
-          python3 scripts/check_coverage.py coverage-default.json
+      - name: Check default feature coverage
+        shell: bash
+        run: python3 scripts/check_coverage.py coverage-default.json
       - name: Collect and report all features
         shell: bash
         run: |
@@ -92,7 +94,9 @@ jobs:
           cargo llvm-cov report --lcov --output-path coverage-all-features.lcov
           cargo llvm-cov report --html --output-dir coverage-all-features-html
           cargo llvm-cov report --show-missing-lines > coverage-all-features-missing.txt
-          python3 scripts/check_coverage.py coverage-all-features.json
+      - name: Check all feature coverage
+        shell: bash
+        run: python3 scripts/check_coverage.py coverage-all-features.json
       - name: Collect and report no default features
         shell: bash
         run: |
@@ -102,7 +106,9 @@ jobs:
           cargo llvm-cov report --lcov --output-path coverage-no-default-features.lcov
           cargo llvm-cov report --html --output-dir coverage-no-default-features-html
           cargo llvm-cov report --show-missing-lines > coverage-no-default-features-missing.txt
-          python3 scripts/check_coverage.py coverage-no-default-features.json
+      - name: Check no default feature coverage
+        shell: bash
+        run: python3 scripts/check_coverage.py coverage-no-default-features.json
       - name: Record coverage environment
         if: always()
         shell: bash

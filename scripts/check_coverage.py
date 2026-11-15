@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -64,6 +65,12 @@ def percentage(covered: int, count: int) -> float:
     return 100.0 * covered / count if count else 100.0
 
 
+def report_error(title: str, message: str) -> None:
+    print(message, file=sys.stderr)
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::error title={title}::{message}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path, help="cargo llvm-cov JSON report")
@@ -75,7 +82,7 @@ def main() -> int:
         files = report["files"]
         totals = report["totals"]
     except (OSError, KeyError, IndexError, json.JSONDecodeError) as error:
-        print(f"cannot read LLVM coverage report {args.report}: {error}", file=sys.stderr)
+        report_error("Coverage report", f"cannot read LLVM coverage report {args.report}: {error}")
         return 2
 
     portable = [
@@ -86,7 +93,7 @@ def main() -> int:
     found = {source_path(file["filename"]).rsplit("/", 1)[-1] for file in portable}
     missing = sorted(PORTABLE_FILES - found)
     if missing:
-        print(f"report is missing portable source files: {', '.join(missing)}", file=sys.stderr)
+        report_error("Coverage report", f"report is missing portable source files: {', '.join(missing)}")
         return 2
 
     native = [
@@ -156,7 +163,7 @@ def main() -> int:
             )
     if failures:
         for failure in failures:
-            print(f"coverage gate failed: {failure}", file=sys.stderr)
+            report_error("Coverage gate", f"coverage gate failed: {failure}")
         return 1
     return 0
 
