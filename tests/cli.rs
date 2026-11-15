@@ -164,6 +164,40 @@ fn unproxy_norc_skips_settings_and_displays_help() {
     assert!(String::from_utf8_lossy(&ignored.stdout).contains("Usage:"));
 }
 
+#[test]
+fn doctor_json_reports_invalid_urls_and_uses_a_nonzero_exit_status() {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_unproxy"));
+    command
+        .args([
+            "--max-sessions",
+            "0",
+            "--activate-socket",
+            "unproxy-test",
+            "doctor",
+            "--json",
+            "--url",
+            "http://[invalid",
+        ])
+        .env("UNPROXY_NORC", "1");
+    inherit_coverage_profile(&mut command);
+    let output = command.output().unwrap();
+
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    let checks = report["checks"].as_array().unwrap();
+    assert!(
+        checks
+            .iter()
+            .any(|check| { check["name"] == "Route http://[invalid" && check["status"] == "fail" })
+    );
+    assert!(
+        checks
+            .iter()
+            .any(|check| { check["name"] == "Listeners" && check["status"] == "warn" })
+    );
+}
+
 #[cfg(not(windows))]
 #[test]
 fn undns_reads_the_isolated_rc_before_help() {

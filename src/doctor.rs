@@ -764,15 +764,50 @@ fn print_report(report: &DoctorReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn parse_args(options: &[&str]) -> MainArgs {
+        let mut args = vec!["unproxy"];
+        args.extend_from_slice(options);
+        MainArgs::try_parse_from(args).unwrap()
+    }
+
+    fn check<'a>(report: &'a DoctorReport, name: &str) -> &'a DoctorCheck {
+        report
+            .checks
+            .iter()
+            .find(|check| check.name == name)
+            .unwrap_or_else(|| panic!("missing doctor check {name:?}: {report:?}"))
+    }
+
+    fn status_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    async fn serve_status_response(response: String) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        (address, server)
+    }
 
     #[test]
     fn report_only_fails_for_failed_checks() {
         let mut report = DoctorReport::new();
+        report.add("passed", CheckStatus::Pass, "ready");
         report.add("warning", CheckStatus::Warn, "pending");
         assert!(report.ok);
         report.add("failed", CheckStatus::Fail, "unavailable");
         assert!(!report.ok);
-        assert_eq!(report.counts(), (0, 1, 1));
+        assert_eq!(report.counts(), (1, 1, 1));
     }
 
     #[test]
@@ -784,5 +819,329 @@ mod tests {
         assert_eq!(status.pac_loaded, Some(false));
         assert_eq!(status.authentication_configured, Some(false));
         assert_eq!(status.upstream_state.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn live_status_reports_matching_state_and_detects_configuration_drift() {
+        let sources = [PathOrUri::Path("site.pac".into())];
+        let matching: LiveStatus = serde_json::from_str(
+            r#"{"pac_loaded":true,"pac_files":["site.pac"],"authentication_configured":true,"upstream_state":"ok","upstream_route":"HTTP proxy.corp.test:8080","authentication_state":"authenticated","authentication_sent":true}"#,
+        )
+        .unwrap();
+        let mut report = DoctorReport::new();
+        check_live_state(&matching, true, &sources, &mut report);
+        assert!(report.ok);
+        assert_eq!(report.counts(), (4, 0, 0));
+        assert!(
+            check(&report, "Last upstream state")
+                .message
+                .contains("via HTTP")
+        );
+        assert!(
+            check(&report, "Last authentication state")
+                .message
+                .contains("token")
+        );
+
+        let drifted: LiveStatus = serde_json::from_str(
+            r#"{"pac_loaded":false,"pac_files":[],"authentication_configured":false,"upstream_state":"error","upstream_route":"HTTP proxy.corp.test:8080","authentication_state":"rejected"}"#,
+        )
+        .unwrap();
+        let mut report = DoctorReport::new();
+        check_live_state(&drifted, true, &sources, &mut report);
+        assert!(!report.ok);
+        assert_eq!(report.counts(), (0, 2, 2));
+    }
+
+    #[test]
+    fn live_status_defaults_missing_fields_and_reports_unknown_and_disabled_states() {
+        let missing: LiveStatus = serde_json::from_str("{}").unwrap();
+        let mut report = DoctorReport::new();
+        check_live_state(&missing, false, &[], &mut report);
+        assert!(report.ok);
+        assert_eq!(report.counts(), (2, 2, 0));
+
+        let disabled: LiveStatus = serde_json::from_str(
+            r#"{"pac_loaded":false,"authentication_configured":false,"upstream_state":"ok","authentication_state":"disabled"}"#,
+        )
+        .unwrap();
+        let mut report = DoctorReport::new();
+        check_live_state(&disabled, false, &[], &mut report);
+        assert_eq!(report.counts(), (4, 0, 0));
+        assert!(
+            check(&report, "Last upstream state")
+                .message
+                .contains("succeeded")
+        );
+        assert!(
+            check(&report, "Last authentication state")
+                .message
+                .contains("no upstream")
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_list_check_reports_loaded_domains_and_optional_source_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let available = temp.path().join("hosts.txt");
+        tokio::fs::write(&available, "0.0.0.0 ads.example.test\n")
+            .await
+            .unwrap();
+        let args = parse_args(&["--filter-list", available.to_str().unwrap()]);
+        let mut report = DoctorReport::new();
+        check_filter_lists(&args, &mut report).await;
+        assert_eq!(report.counts(), (1, 0, 0));
+        assert!(
+            check(&report, "Filter lists")
+                .message
+                .contains("covering 1 domains")
+        );
+
+        let missing = temp.path().join("missing.txt");
+        let args = parse_args(&["--filter-list", missing.to_str().unwrap()]);
+        let mut report = DoctorReport::new();
+        check_filter_lists(&args, &mut report).await;
+        assert_eq!(report.counts(), (0, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn route_authentication_reports_basic_socks_and_unconfigured_routes() {
+        use crate::auth::{AuthFactory, CredentialStore};
+
+        let endpoint = Endpoint {
+            host: "proxy.example.test".into(),
+            port: 8080,
+        };
+        let no_auth = AuthFactory::no_auth();
+        let mut report = DoctorReport::new();
+        check_route_authentication(&Route::Direct, &no_auth, &mut report).await;
+        check_route_authentication(&Route::Socks4(endpoint.clone()), &no_auth, &mut report).await;
+        check_route_authentication(&Route::Socks5(endpoint.clone()), &no_auth, &mut report).await;
+        check_route_authentication(&Route::Http(endpoint.clone()), &no_auth, &mut report).await;
+        assert_eq!(report.counts(), (1, 2, 0));
+
+        let credentials = CredentialStore::parse(
+            "machine proxy.example.test login alice password private-secret",
+        )
+        .unwrap();
+        let basic = AuthFactory::basic(credentials);
+        let mut report = DoctorReport::new();
+        check_route_authentication(&Route::Http(endpoint.clone()), &basic, &mut report).await;
+        check_route_authentication(&Route::Socks5(endpoint.clone()), &basic, &mut report).await;
+        assert_eq!(report.counts(), (2, 0, 0));
+        assert!(
+            report
+                .checks
+                .iter()
+                .all(|check| !check.message.contains("private-secret"))
+        );
+
+        let unmatched = AuthFactory::basic(
+            CredentialStore::parse("machine another.example.test login alice password x").unwrap(),
+        );
+        let mut report = DoctorReport::new();
+        check_route_authentication(&Route::Http(endpoint), &unmatched, &mut report).await;
+        assert_eq!(report.counts(), (0, 1, 0));
+    }
+
+    #[cfg(feature = "negotiate")]
+    #[tokio::test]
+    async fn route_authentication_warns_when_negotiate_is_not_enabled_for_the_host() {
+        use crate::auth::AuthFactory;
+
+        let route = Route::Http(Endpoint {
+            host: "proxy.example.test".into(),
+            port: 8080,
+        });
+        let auth = AuthFactory::negotiate(vec!["other.example.test".into()]);
+        let mut report = DoctorReport::new();
+        check_route_authentication(&route, &auth, &mut report).await;
+        assert_eq!(report.counts(), (0, 1, 0));
+        assert!(
+            check(&report, "Authentication for HTTP proxy.example.test:8080")
+                .message
+                .contains("not enabled for this host")
+        );
+    }
+
+    #[tokio::test]
+    async fn listener_check_handles_activation_ephemeral_invalid_and_unreachable_addresses() {
+        let mut report = DoctorReport::new();
+        check_listeners(
+            &parse_args(&["--activate-socket", "unproxy-test"]),
+            &[],
+            false,
+            &mut report,
+        )
+        .await;
+        assert_eq!(report.counts(), (0, 1, 0));
+
+        let mut report = DoctorReport::new();
+        check_listeners(
+            &parse_args(&["--listen", "127.0.0.1:0"]),
+            &[],
+            false,
+            &mut report,
+        )
+        .await;
+        assert_eq!(report.counts(), (0, 1, 0));
+        assert!(
+            check(&report, "Listeners")
+                .message
+                .contains("port 0 is ephemeral")
+        );
+
+        let mut report = DoctorReport::new();
+        check_listeners(
+            &parse_args(&["--listen", "not-an-address"]),
+            &[],
+            false,
+            &mut report,
+        )
+        .await;
+        assert_eq!(report.counts(), (0, 0, 1));
+
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let mut report = DoctorReport::new();
+        check_listeners(
+            &parse_args(&["--listen", &address.to_string()]),
+            &[],
+            false,
+            &mut report,
+        )
+        .await;
+        assert_eq!(report.counts(), (0, 0, 1));
+    }
+
+    #[tokio::test]
+    async fn listener_check_reads_runtime_status_from_a_reachable_loopback_listener() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = r#"{"pac_loaded":false,"pac_files":[],"authentication_configured":false,"upstream_state":"ok","authentication_state":"disabled"}"#;
+        let server = tokio::spawn(async move {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                if index == 1 {
+                    let mut request = [0; 1024];
+                    let _ = stream.read(&mut request).await.unwrap();
+                    stream
+                        .write_all(status_response(body).as_bytes())
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+
+        let mut report = DoctorReport::new();
+        check_listeners(
+            &parse_args(&["--listen", &address.to_string()]),
+            &[],
+            false,
+            &mut report,
+        )
+        .await;
+        server.await.unwrap();
+        assert!(report.ok, "{report:?}");
+        assert_eq!(report.counts(), (5, 0, 0));
+        assert!(
+            check(&report, "Running PAC state")
+                .message
+                .contains("no PAC policy")
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_status_rejects_bad_status_json_missing_fields_and_oversized_bodies() {
+        for (response, expected_error) in [
+            (
+                "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_owned(),
+                "returned HTTP 503",
+            ),
+            (status_response("not-json"), "parsing /status.json"),
+            (
+                status_response(r#"{"pac_loaded":false,"authentication_configured":false}"#),
+                "missing expected Unproxy state fields",
+            ),
+        ] {
+            let (address, server) = serve_status_response(response).await;
+            let error = read_runtime_status(address, Duration::from_secs(1))
+                .await
+                .unwrap_err();
+            server.await.unwrap();
+            assert!(format!("{error:#}").contains(expected_error), "{error:#}");
+        }
+
+        let body = "x".repeat(MAX_STATUS_BYTES + 1);
+        let (address, server) = serve_status_response(status_response(&body)).await;
+        let error = read_runtime_status(address, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(format!("{error:#}").contains("exceeded 65536 bytes"));
+    }
+
+    #[tokio::test]
+    async fn inspect_reports_configuration_failures_and_a_successful_direct_pac_route() {
+        let args = parse_args(&[
+            "--max-sessions",
+            "0",
+            "--strict-policy",
+            "--activate-socket",
+            "unproxy-test",
+        ]);
+        let report = inspect(
+            args,
+            vec!["http://[invalid".into(), "file://example.test/path".into()],
+        )
+        .await;
+        assert!(!report.ok);
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .filter(|check| matches!(check.status, CheckStatus::Fail))
+                .count(),
+            5
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.message.contains("invalid URL"))
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.message.contains("invalid destination"))
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let pac = temp.path().join("direct.pac");
+        tokio::fs::write(
+            &pac,
+            "function FindProxyForURL(url, host) { return 'DIRECT'; }",
+        )
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let args = parse_args(&[
+            "--pac-file",
+            pac.to_str().unwrap(),
+            "--my-ip-address",
+            "127.0.0.1",
+            "--activate-socket",
+            "unproxy-test",
+        ]);
+        let report = inspect(args, vec![format!("http://{address}/health")]).await;
+        assert!(report.ok, "{report:?}");
+        assert!(report.checks.iter().any(|check| {
+            check.name.starts_with("Routes for") && matches!(check.status, CheckStatus::Pass)
+        }));
+        drop(listener);
     }
 }
