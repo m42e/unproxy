@@ -3897,7 +3897,12 @@ mod native {
                     MACOS_TRAY_ICON_PIXELS * MACOS_TRAY_ICON_PIXELS * 4,
                 )
             };
-            anyhow::ensure!(rgba.chunks_exact(4).all(|pixel| pixel[..3] == [255; 3]));
+            anyhow::ensure!(
+                rgba.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|pixel| pixel[..3] == [255; 3])
+            );
             Ok([20, 49, 79, 108].map(|x| rgba[(101 * MACOS_TRAY_ICON_PIXELS + x) * 4 + 3]))
         };
         let result = (|| {
