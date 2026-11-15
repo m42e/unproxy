@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.4
+
+- Fix the macOS menu bar icon in light mode and launch the app automatically
+  after installation.
+
 ## 0.4.3
 
 - Add a native Windows tray settings dialog and reload saved preferences when
