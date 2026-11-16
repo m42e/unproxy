@@ -667,12 +667,12 @@ fn package(
                             "--scripts",
                         ])
                         .arg(&hooks)
-                        .arg(output.join(format!("{package_name}.pkg")));
+                        .arg(output.join(format!("{package_name}-cli.pkg")));
                     pkgbuild_signing_args(&mut command);
                     run_pkgbuild(&mut command)?;
                     std::fs::remove_dir_all(hooks)?;
                 } else {
-                    package_name.push_str("-staging");
+                    package_name.push_str("-cli-staging");
                     zip(&staging, &output.join(format!("{package_name}.zip")))?;
                     println!(
                         "Created an installer staging archive; pkgbuild on macOS is required for a native .pkg."

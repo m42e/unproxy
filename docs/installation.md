@@ -99,8 +99,8 @@ to change that setting.
 The app installer replaces the current or legacy Unproxy proxy-only launch
 agent so that the app is the sole owner of the proxy. Do not also start the
 `unproxy` command or install the service-only package while using the app:
-they would compete for the same listener ports. The service-only macOS package
-remains available for headless setups and does not include a menu bar app.
+they would compete for the same listener ports. For a CLI/service-style setup,
+download the `*-cli.pkg` package. It does not include a menu bar app.
 
 Choose **Settings…** to set listeners, ordered PAC files, optional ad blocking
 lists, and proxy behavior.

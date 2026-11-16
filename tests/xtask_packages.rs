@@ -510,6 +510,25 @@ printf 'fixture pkg' > "$out"
         "dist/macos",
     ]);
     assert_ok(service);
+    let versioned = format!(
+        "unproxy-{}-{target}",
+        unproxy::VERSION.split('+').next().unwrap()
+    );
+    if cfg!(target_os = "macos") {
+        assert!(
+            f.root
+                .path()
+                .join(format!("dist/macos/{versioned}-cli.pkg"))
+                .is_file()
+        );
+    } else {
+        assert!(
+            f.root
+                .path()
+                .join(format!("dist/macos/{versioned}-cli-staging.zip"))
+                .is_file()
+        );
+    }
     if cfg!(target_os = "macos") {
         assert!(
             f.capture
@@ -675,8 +694,14 @@ printf 'fixture pkg' > "$out"
     assert!(
         f.root
             .path()
-            .join(format!("dist/native/{versioned}.pkg"))
+            .join(format!("dist/native/{versioned}-cli.pkg"))
             .is_file()
+    );
+    assert!(
+        !f.root
+            .path()
+            .join(format!("dist/native/{versioned}.pkg"))
+            .exists()
     );
     assert!(
         f.root
