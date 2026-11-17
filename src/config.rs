@@ -146,6 +146,9 @@ pub struct MainArgs {
     #[arg(long = "netrc-file")]
     #[cfg_attr(feature = "negotiate", arg(conflicts_with = "negotiate"))]
     pub netrc_file: Option<PathBuf>,
+    /// Custom JSON release metadata endpoint used by `check-upgrade`.
+    #[arg(long = "release-info-url")]
+    pub release_info_url: Option<String>,
     #[cfg(feature = "negotiate")]
     /// Use Negotiate authentication; optionally restrict it to a host, repeatable.
     #[arg(short='n',long="negotiate",num_args=0..=1,default_missing_value="",action=clap::ArgAction::Append)]
@@ -212,7 +215,7 @@ pub struct MainArgs {
     name = "unproxy",
     version = crate::VERSION,
     about = "Local HTTP proxy with PAC based routing and corporate authentication",
-    long_about = "Run a local HTTP proxy that routes requests through upstream proxies according to PAC scripts. By default it listens on 127.0.0.1:3128 and [::1]:3128. Options from the unproxy settings file are loaded first; command-line options take precedence. Set UNPROXY_NORC=1 to ignore the settings file. Use `unproxy shell-setup <bash|zsh|fish|powershell|cmd>` to print shell proxy variables and completion setup. Use `unproxy doctor` to inspect configuration, routing, listener, and authentication health; use paceval to inspect PAC routing and unproxyctl to control the system service.",
+    long_about = "Run a local HTTP proxy that routes requests through upstream proxies according to PAC scripts. By default it listens on 127.0.0.1:3128 and [::1]:3128. Options from the unproxy settings file are loaded first; command-line options take precedence. Set UNPROXY_NORC=1 to ignore the settings file. Use `unproxy shell-setup <bash|zsh|fish|powershell|cmd>` to print shell proxy variables and completion setup. Use `unproxy doctor` to inspect configuration, routing, listener, and authentication health, and `unproxy check-upgrade` to check for a newer release; use paceval to inspect PAC routing and unproxyctl to control the system service.",
     args_override_self = true
 )]
 struct MainParser {
@@ -225,7 +228,7 @@ struct MainParser {
     name = "unproxy",
     version = crate::VERSION,
     about = "Local HTTP proxy with PAC based routing and corporate authentication",
-    long_about = "Run a local HTTP proxy that routes requests through upstream proxies according to PAC scripts. By default it listens on 127.0.0.1:3128 and [::1]:3128. Options from the unproxy settings file are loaded first; command-line options take precedence. Set UNPROXY_NORC=1 to ignore the settings file. Use `unproxy shell-setup <bash|zsh|fish|powershell|cmd>` to print shell proxy variables and completion setup. Use `unproxy doctor` to inspect configuration, routing, listener, and authentication health; use paceval to inspect PAC routing and unproxyctl to control the system service.",
+    long_about = "Run a local HTTP proxy that routes requests through upstream proxies according to PAC scripts. By default it listens on 127.0.0.1:3128 and [::1]:3128. Options from the unproxy settings file are loaded first; command-line options take precedence. Set UNPROXY_NORC=1 to ignore the settings file. Use `unproxy shell-setup <bash|zsh|fish|powershell|cmd>` to print shell proxy variables and completion setup. Use `unproxy doctor` to inspect configuration, routing, listener, and authentication health, and `unproxy check-upgrade` to check for a newer release; use paceval to inspect PAC routing and unproxyctl to control the system service.",
     args_override_self = true
 )]
 pub struct CliArgs {
@@ -239,6 +242,8 @@ pub struct CliArgs {
 pub enum CliCommand {
     /// Check configuration, PAC routes, listeners, runtime state, and authentication.
     Doctor(crate::doctor::DoctorArgs),
+    /// Check GitHub Releases or a configured release info endpoint for a newer version.
+    CheckUpgrade,
 }
 
 impl MainArgs {

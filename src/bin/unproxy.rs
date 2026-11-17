@@ -25,6 +25,12 @@ async fn run_cli() -> Result<bool> {
         Some(unproxy::config::CliCommand::Doctor(args)) => {
             unproxy::doctor::run(cli.server, args).await
         }
+        Some(unproxy::config::CliCommand::CheckUpgrade) => {
+            let status =
+                unproxy::upgrade::check_for_upgrade(cli.server.release_info_url.as_deref()).await?;
+            println!("{status}");
+            Ok(true)
+        }
     }
 }
 
@@ -49,7 +55,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
     #[cfg(windows)]
-    if std::env::args_os().any(|arg| arg == "--attach-console" || arg == "doctor") {
+    if std::env::args_os()
+        .any(|arg| arg == "--attach-console" || arg == "doctor" || arg == "check-upgrade")
+    {
         unproxy::platform::attach_console()?;
     }
     let success = tokio::runtime::Builder::new_multi_thread()

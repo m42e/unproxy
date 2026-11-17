@@ -45,7 +45,7 @@ fn build_validates_and_passes_embedded_desktop_defaults() {
     let defaults = temp.path().join("defaults.toml");
     std::fs::write(
         &defaults,
-        "port = 4242\npac_file = 'corp.pac'\nnegotiate = false\nproxytunnel = true\ndirect_fallback = true\nautostart = false\n",
+        "port = 4242\npac_file = 'corp.pac'\nnegotiate = false\nproxytunnel = true\ndirect_fallback = true\nautostart = false\nrelease_info_url = 'https://updates.example.test/unproxy.json'\n",
     )
     .unwrap();
     let output = xtask_with_tool(
@@ -87,6 +87,20 @@ fn build_validates_and_passes_embedded_desktop_defaults() {
     let output = xtask(&["build", "--defaults", unknown.to_str().unwrap()]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown field"));
+
+    let invalid_release_info_url = temp.path().join("invalid-release-info-url.toml");
+    std::fs::write(
+        &invalid_release_info_url,
+        "release_info_url = 'ftp://updates.example.test/unproxy.json'\n",
+    )
+    .unwrap();
+    let output = xtask(&[
+        "build",
+        "--defaults",
+        invalid_release_info_url.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("HTTP(S) URL"));
 }
 
 #[test]

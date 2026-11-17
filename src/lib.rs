@@ -18,6 +18,7 @@ pub mod runtime;
 pub mod shell_setup;
 mod socks;
 pub mod tools;
+pub mod upgrade;
 pub const VERSION: &str = env!("PRODUCT_VERSION");
 pub const DNS_VERSION: &str = "0.6.0";
 pub const PLATFORM: &str = env!("PRODUCT_PLATFORM");

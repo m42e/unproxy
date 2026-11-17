@@ -2997,6 +2997,7 @@ dependencies = [
  "native-tls",
  "objc2",
  "pulldown-cmark",
+ "semver",
  "serde",
  "serde_json",
  "socket2",

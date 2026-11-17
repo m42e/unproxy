@@ -47,7 +47,7 @@ use windows_sys::Win32::{
 
 const WINDOW_CLASS: &str = "UnproxySettingsWindow";
 const CLIENT_WIDTH: i32 = 760;
-const CLIENT_HEIGHT: i32 = 680;
+const CLIENT_HEIGHT: i32 = 740;
 
 const ID_LISTENERS: u16 = 1001;
 const ID_PAC_FILES: u16 = 1002;
@@ -60,6 +60,7 @@ const ID_DIRECT_FALLBACK: u16 = 1008;
 const ID_AUTOSTART: u16 = 1009;
 const ID_SAVE: u16 = 1010;
 const ID_CANCEL: u16 = 1011;
+const ID_RELEASE_INFO_URL: u16 = 1012;
 
 struct Controls {
     listeners: HWND,
@@ -69,6 +70,7 @@ struct Controls {
     tunnel: HWND,
     direct_fallback: HWND,
     autostart: HWND,
+    release_info_url: HWND,
 }
 
 #[derive(Clone, Copy)]
@@ -94,6 +96,7 @@ struct SettingsFields {
     tunnel: bool,
     direct_fallback: bool,
     autostart: bool,
+    release_info_url: String,
 }
 
 impl SettingsDialog {
@@ -108,6 +111,7 @@ impl SettingsDialog {
                 tunnel: null_mut(),
                 direct_fallback: null_mut(),
                 autostart: null_mut(),
+                release_info_url: null_mut(),
             },
             result: None,
             initialization_error: None,
@@ -125,6 +129,7 @@ impl SettingsDialog {
                 tunnel: control_checked(self.controls.tunnel),
                 direct_fallback: control_checked(self.controls.direct_fallback),
                 autostart: control_checked(self.controls.autostart),
+                release_info_url: control_text(self.controls.release_info_url),
             },
         )
     }
@@ -307,6 +312,13 @@ fn build_preferences(current: &Preferences, fields: SettingsFields) -> Result<Pr
     updated.proxytunnel = fields.tunnel;
     updated.direct_fallback = fields.direct_fallback;
     updated.autostart = fields.autostart;
+    updated.release_info_url = if fields.release_info_url.trim().is_empty() {
+        None
+    } else {
+        Some(crate::upgrade::validate_release_info_url(
+            &fields.release_info_url,
+        )?)
+    };
     Ok(updated)
 }
 
@@ -622,12 +634,45 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
     create_control(
         window,
         instance,
+        "STATIC",
+        "Release info JSON URL (blank uses GitHub Releases)",
+        WS_CHILD | WS_VISIBLE,
+        ControlBounds {
+            x: 18,
+            y: 598,
+            width: 724,
+            height: 20,
+        },
+        0,
+    )?;
+    state.controls.release_info_url = create_control(
+        window,
+        instance,
+        "EDIT",
+        state
+            .current
+            .release_info_url
+            .as_deref()
+            .unwrap_or_default(),
+        WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
+        ControlBounds {
+            x: 18,
+            y: 620,
+            width: 724,
+            height: 26,
+        },
+        ID_RELEASE_INFO_URL,
+    )?;
+
+    create_control(
+        window,
+        instance,
         "BUTTON",
         "Save",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
         ControlBounds {
             x: 572,
-            y: 628,
+            y: 692,
             width: 80,
             height: 30,
         },
@@ -641,7 +686,7 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         ControlBounds {
             x: 662,
-            y: 628,
+            y: 692,
             width: 80,
             height: 30,
         },
@@ -896,6 +941,7 @@ mod tests {
                 tunnel: true,
                 direct_fallback: true,
                 autostart: false,
+                release_info_url: "https://releases.example.test/unproxy.json".into(),
             },
         )
         .unwrap();
@@ -931,6 +977,10 @@ mod tests {
         assert!(updated.proxytunnel);
         assert!(updated.direct_fallback);
         assert!(!updated.autostart);
+        assert_eq!(
+            updated.release_info_url.as_deref(),
+            Some("https://releases.example.test/unproxy.json")
+        );
     }
 
     #[test]

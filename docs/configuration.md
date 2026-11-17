@@ -14,6 +14,9 @@ An `unproxyrc` file contains CLI options, with one or more options per line. Bla
 # Organization policy
 --pac-file "https://proxy.example.org/company.pac"
 --reload-pac-on-network-change
+
+# Optional custom release metadata for `unproxy check-upgrade`
+--release-info-url "https://updates.example.org/unproxy.json"
 ```
 
 Restart the CLI process or service after changing its options. PAC reload updates policy contents, not CLI options.
@@ -55,6 +58,7 @@ Desktop apps use their own preferences and launch their proxy with explicit sett
 | `--proxytunnel` | Use upstream CONNECT for every proxied request. | Off |
 | `--netrc-file PATH` | Read upstream password credentials from this file. | `~/.netrc` |
 | `--negotiate [HOST]` / `-n` | Integrated authentication; optionally restrict hosts, repeatable. | Off; requires Negotiate build |
+| `--release-info-url URL` | Custom JSON release metadata endpoint for `check-upgrade`. | GitHub Releases |
 
 See [PAC & routing](routing.md) and [Authentication](authentication.md) before changing policy or sign-in behavior.
 
@@ -85,6 +89,7 @@ Unproxy does not enforce a process memory limit. Memory use depends on traffic, 
 | --- | --- |
 | `unproxy --help` | Full options supported by the installed build. |
 | `unproxy doctor [--url URL] [--json]` | Check CLI settings, PAC routes, TCP reachability, credential readiness, and available runtime status. See [Troubleshooting](troubleshooting.md). |
+| `unproxy check-upgrade` | Check GitHub Releases for a newer version. |
 | `unproxy --version` | Installed version. |
 | `-v`, `-vv` | Debug and trace verbosity. |
 | `-q`, `-qq` | Reduce or disable logging. |
@@ -93,6 +98,36 @@ Unproxy does not enforce a process memory limit. Memory use depends on traffic, 
 | `paceval PAC_SOURCE URL` | Inspect a PAC decision for a destination. |
 | `unproxyctl --help` | Service control commands for your platform. |
 | `undns --help` | DNS utility options, including upstream proxy support. |
+
+## Check for upgrades
+
+Run `unproxy check-upgrade` to compare the installed version with the latest
+GitHub release. On Windows and macOS, choose **Check for Updates** from the tray
+or menu-bar menu. If an update is available, the desktop app opens its release
+page.
+
+To use a custom release metadata endpoint, set `--release-info-url` in the CLI
+settings file or pass it before the command:
+
+```sh
+unproxy --release-info-url https://updates.example.org/unproxy.json check-upgrade
+```
+
+Desktop users can set **Release info JSON URL** in **Settings…**. Leave the
+field blank to use GitHub Releases. The endpoint must return JSON in this
+shape:
+
+```json
+{
+  "version": "0.5.0",
+  "url": "https://downloads.example.org/unproxy/0.5.0",
+  "notes": "Optional release summary"
+}
+```
+
+`version` is a semantic version and may start with `v`. `url` is the page the
+desktop app opens when a newer version is found. `notes` is optional. The CLI
+prints the available version and URL without opening a browser.
 
 ## Listener access and privacy
 

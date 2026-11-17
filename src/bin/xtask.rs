@@ -293,6 +293,10 @@ fn read_desktop_defaults(path: Option<&Path>) -> Result<Option<DesktopDefaults>>
             "desktop default PAC path is empty"
         );
     }
+    if let Some(url) = &defaults.release_info_url {
+        unproxy::upgrade::validate_release_info_url(url)
+            .context("desktop default release_info_url must be an HTTP(S) URL")?;
+    }
     Ok(Some(defaults))
 }
 
@@ -423,6 +427,7 @@ fn windows_desktop_defaults(defaults: Option<&DesktopDefaults>) -> serde_json::V
         "proxytunnel": defaults.proxytunnel.unwrap_or(false),
         "directFallback": defaults.direct_fallback.unwrap_or(false),
         "autostart": defaults.autostart.unwrap_or(true),
+        "releaseInfoUrl": defaults.release_info_url,
     })
 }
 fn package(

@@ -30,6 +30,8 @@ pub struct Preferences {
         alias = "filter_lists"
     )]
     pub filter_lists: Option<Vec<PathBuf>>,
+    #[serde(default)]
+    pub release_info_url: Option<String>,
     pub negotiate: bool,
     pub proxytunnel: bool,
     #[serde(alias = "direct_fallback")]
@@ -50,6 +52,7 @@ pub struct DesktopDefaults {
     pub proxytunnel: Option<bool>,
     pub direct_fallback: Option<bool>,
     pub autostart: Option<bool>,
+    pub release_info_url: Option<String>,
 }
 
 impl DesktopDefaults {
@@ -76,6 +79,9 @@ impl DesktopDefaults {
         if let Some(autostart) = self.autostart {
             preferences.autostart = autostart;
         }
+        if let Some(release_info_url) = &self.release_info_url {
+            preferences.release_info_url = Some(release_info_url.clone());
+        }
     }
 }
 
@@ -94,6 +100,7 @@ impl Default for Preferences {
             pac_file: default_pac_path(),
             pac_files: None,
             filter_lists: None,
+            release_info_url: None,
             negotiate: false,
             proxytunnel: false,
             direct_fallback: false,
@@ -809,6 +816,7 @@ mod native {
     static LISTENER_TABLE: Mutex<usize> = Mutex::new(0);
     static PAC_FILE_TABLE: Mutex<usize> = Mutex::new(0);
     static FILTER_LIST_TABLE: Mutex<usize> = Mutex::new(0);
+    static RELEASE_INFO_URL_FIELD: Mutex<usize> = Mutex::new(0);
     static PAC_FETCH_STATUS: Mutex<usize> = Mutex::new(0);
     static PAC_FETCH: Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>> = Mutex::new(None);
     static PAC_FETCH_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -874,6 +882,13 @@ mod native {
                         let message = format!("Could not open the Unproxy status page: {error:#}");
                         notice = Some(message.clone());
                         show_message("Could not open the Unproxy status page", &message);
+                    }
+                }
+                14 => {
+                    if let Err(error) = check_for_upgrade(&s.prefs) {
+                        let message = format!("Could not check for Unproxy updates: {error:#}");
+                        notice = Some(message.clone());
+                        show_message("Check for Updates", &message);
                     }
                 }
                 11 => {
@@ -1351,6 +1366,7 @@ mod native {
             menu_item(menu, &status_line, status_action, false, true, target);
             menu_item(menu, "Open Status Page", 13, false, true, target);
             menu_item(menu, "Open Log", 10, false, true, target);
+            menu_item(menu, "Check for Updates", 14, false, true, target);
             menu_item(menu, "Start with Login", 9, s.prefs.autostart, true, target);
             menu_item(menu, "Copy Proxy Address", 11, false, true, target);
             menu_item(menu, "Settings…", 12, false, true, target);
@@ -1767,6 +1783,24 @@ mod native {
         let _: () = unsafe { msg_send![parent, addSubview:button] };
         let _: () = unsafe { msg_send![button, setToolTip:cocoa_string(tooltip)] };
         button
+    }
+    fn settings_text_field(
+        parent: *mut AnyObject,
+        target: *mut AnyObject,
+        tag: isize,
+        value: &str,
+        frame: Rect,
+    ) -> *mut AnyObject {
+        let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSTextField), alloc] };
+        let field: *mut AnyObject = unsafe { msg_send![allocated, initWithFrame:frame] };
+        let _: () = unsafe { msg_send![field, setStringValue:cocoa_string(value)] };
+        let _: () = unsafe { msg_send![field, setEditable:objc2::runtime::Bool::YES] };
+        let _: () = unsafe { msg_send![field, setSelectable:objc2::runtime::Bool::YES] };
+        let _: () = unsafe { msg_send![field, setTag:tag] };
+        let _: () = unsafe { msg_send![field, setTarget:target] };
+        let _: () = unsafe { msg_send![field, setAction:sel!(listEditorAction:)] };
+        let _: () = unsafe { msg_send![parent, addSubview:field] };
+        field
     }
     fn settings_list_table(
         content: *mut AnyObject,
@@ -2306,6 +2340,15 @@ mod native {
             }
             return;
         }
+        if action == 3004 {
+            if let Err(error) = commit_editor_preferences() {
+                show_message(
+                    "Could not apply the release info URL",
+                    &format!("{error:#}"),
+                );
+            }
+            return;
+        }
         if (3001..=3003).contains(&action) {
             change_editor_checkbox(sender, action);
             return;
@@ -2532,6 +2575,16 @@ mod native {
             filter_lists.push(path);
         }
         updated.filter_lists = Some(filter_lists);
+        let release_info_url = *RELEASE_INFO_URL_FIELD.lock().unwrap() as *mut AnyObject;
+        if !release_info_url.is_null() {
+            let value: *mut AnyObject = unsafe { msg_send![release_info_url, stringValue] };
+            let value = cocoa_text(value).unwrap_or_default();
+            updated.release_info_url = if value.trim().is_empty() {
+                None
+            } else {
+                Some(crate::upgrade::validate_release_info_url(&value)?)
+            };
+        }
         Ok(updated)
     }
     fn commit_editor_preferences() -> Result<()> {
@@ -2584,15 +2637,22 @@ mod native {
     ) -> Result<()> {
         let (window, target) = build_settings_window(prefs)?;
         let presented = present(window, target);
+        let committed = if presented.is_ok() {
+            commit_editor_preferences()
+        } else {
+            Ok(())
+        };
         cancel_remote_pac_fetch();
         *PAC_FETCH_STATUS.lock().unwrap() = 0;
-        presented?;
         unsafe {
             let _: () = msg_send![window, orderOut:ptr::null_mut::<AnyObject>()];
         }
         *LISTENER_TABLE.lock().unwrap() = 0;
         *PAC_FILE_TABLE.lock().unwrap() = 0;
         *FILTER_LIST_TABLE.lock().unwrap() = 0;
+        *RELEASE_INFO_URL_FIELD.lock().unwrap() = 0;
+        presented?;
+        committed?;
         Ok(())
     }
 
@@ -2736,6 +2796,23 @@ mod native {
             rect(676.0, 134.0, 106.0, 26.0),
             None,
         );
+        settings_label(
+            content,
+            "Release info JSON URL (blank uses GitHub Releases)",
+            676.0,
+            106.0,
+            300.0,
+            22.0,
+            false,
+        );
+        let release_info_url_field = settings_text_field(
+            content,
+            target,
+            3004,
+            prefs.release_info_url.as_deref().unwrap_or_default(),
+            rect(676.0, 78.0, 300.0, 24.0),
+        );
+        *RELEASE_INFO_URL_FIELD.lock().unwrap() = release_info_url_field as usize;
 
         settings_label(
             content,
@@ -2799,7 +2876,7 @@ mod native {
             prefs.negotiate,
             3003,
             540.0,
-            170.0,
+            130.0,
         );
         #[cfg(feature = "negotiate")]
         settings_label(
@@ -2844,6 +2921,27 @@ mod native {
             .status()
             .context("launch the default browser")?;
         anyhow::ensure!(status.success(), "browser launcher exited with {status}");
+        Ok(())
+    }
+    fn check_for_upgrade(preferences: &Preferences) -> Result<()> {
+        match crate::upgrade::check_for_upgrade_blocking(preferences.release_info_url.as_deref())? {
+            crate::upgrade::UpgradeStatus::UpToDate { current_version } => {
+                show_message(
+                    "Unproxy is Up to Date",
+                    &format!("You are using the latest version ({current_version})."),
+                );
+            }
+            crate::upgrade::UpgradeStatus::UpgradeAvailable(release) => {
+                show_message(
+                    "Unproxy Update Available",
+                    &format!(
+                        "Version {} is available. Opening the release page.",
+                        release.version
+                    ),
+                );
+                open_status_url(&release.url)?;
+            }
+        }
         Ok(())
     }
     fn pac_editor_command(path: &Path) -> Command {
@@ -3018,6 +3116,24 @@ mod native {
                 }
             }
         }
+        let release_info_url = get("releaseInfoUrl");
+        if release_info_url.is_null() {
+            if let Some(url) = &p.release_info_url {
+                let _: () = unsafe {
+                    msg_send![defaults,setObject:cocoa_string(url),forKey:key("releaseInfoUrl")]
+                };
+            }
+        } else {
+            let bytes: *const std::ffi::c_char = unsafe { msg_send![release_info_url, UTF8String] };
+            p.release_info_url = (!bytes.is_null()).then(|| {
+                unsafe { std::ffi::CStr::from_ptr(bytes) }
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            if p.release_info_url.as_deref().is_some_and(str::is_empty) {
+                p.release_info_url = None;
+            }
+        }
         p.save(defaults_path)?;
         Ok(p)
     }
@@ -3070,6 +3186,15 @@ mod native {
         let _: () = unsafe {
             msg_send![d,setBool:objc2::runtime::Bool::new(p.autostart),forKey:cocoa_string("autostart")]
         };
+        if let Some(url) = &p.release_info_url {
+            let _: () = unsafe {
+                msg_send![d,setObject:cocoa_string(url),forKey:cocoa_string("releaseInfoUrl")]
+            };
+        } else {
+            let _: () = unsafe {
+                msg_send![d,setObject:cocoa_string(""),forKey:cocoa_string("releaseInfoUrl")]
+            };
+        }
         let _: objc2::runtime::Bool = unsafe { msg_send![d, synchronize] };
         Ok(())
     }
@@ -3372,6 +3497,7 @@ mod native {
                 pac_file: pac_file.to_owned(),
                 pac_files: None,
                 filter_lists: None,
+                release_info_url: None,
                 negotiate: true,
                 proxytunnel: false,
                 direct_fallback: false,
@@ -3469,7 +3595,8 @@ mod native {
                     && menu_has_tag(menu, 10)
                     && menu_has_tag(menu, 11)
                     && menu_has_tag(menu, 12)
-                    && menu_has_tag(menu, 13),
+                    && menu_has_tag(menu, 13)
+                    && menu_has_tag(menu, 14),
                 "menu is missing a requested action"
             );
 
@@ -3714,6 +3841,7 @@ mod native {
             let mut has_cancel_fetch = false;
             let mut has_fetch_status = false;
             let mut has_filter_url = false;
+            let mut has_release_info_url = false;
             for index in 0..subview_count {
                 let subview: *mut AnyObject = unsafe { msg_send![subviews, objectAtIndex:index] };
                 let tag: isize = unsafe { msg_send![subview, tag] };
@@ -3723,6 +3851,7 @@ mod native {
                 has_cancel_fetch |= tag == 1209;
                 has_fetch_status |= tag == 1210;
                 has_filter_url |= tag == 1307;
+                has_release_info_url |= tag == 3004;
             }
             anyhow::ensure!(
                 has_open_view,
@@ -3741,6 +3870,10 @@ mod native {
             anyhow::ensure!(
                 has_filter_url,
                 "settings window has no Add filter-list URL button"
+            );
+            anyhow::ensure!(
+                has_release_info_url,
+                "settings window has no release info URL field"
             );
             let original_listeners = prefs.effective_listeners();
 
@@ -4136,6 +4269,21 @@ mod native {
             anyhow::ensure!(
                 state.lock().unwrap().prefs.effective_filter_lists() == vec![filter_file]
             );
+            let release_info_field = *RELEASE_INFO_URL_FIELD.lock().unwrap() as *mut AnyObject;
+            let test_release_info_url = "https://releases.example.test/unproxy.json";
+            unsafe {
+                let _: () = msg_send![release_info_field, setStringValue:cocoa_string(test_release_info_url)];
+            }
+            commit_editor_preferences()?;
+            anyhow::ensure!(
+                state.lock().unwrap().prefs.release_info_url.as_deref()
+                    == Some(test_release_info_url),
+                "release info URL was not applied"
+            );
+            unsafe {
+                let _: () = msg_send![release_info_field, setStringValue:cocoa_string(prefs.release_info_url.as_deref().unwrap_or_default())];
+            }
+            commit_editor_preferences()?;
             *EDITOR_PREFS.lock().unwrap() = None;
             anyhow::ensure!(
                 validated_editor_preferences()
@@ -4805,6 +4953,7 @@ mod tests {
             proxytunnel: Some(true),
             direct_fallback: Some(true),
             autostart: Some(false),
+            release_info_url: Some("https://updates.example.test/unproxy.json".into()),
         }
         .apply(&mut preferences);
 
@@ -4814,6 +4963,10 @@ mod tests {
         assert!(preferences.proxytunnel);
         assert!(preferences.direct_fallback);
         assert!(!preferences.autostart);
+        assert_eq!(
+            preferences.release_info_url.as_deref(),
+            Some("https://updates.example.test/unproxy.json")
+        );
 
         let original = preferences.clone();
         DesktopDefaults::default().apply(&mut preferences);

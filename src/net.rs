@@ -556,10 +556,20 @@ pub async fn fetch_remote_text(uri: &str) -> Result<String> {
     Ok(fetch_remote_pac_cached(uri, None).await?.script)
 }
 
+/// Download JSON metadata from a remote endpoint, including GitHub's preferred
+/// media type and a user agent required by its API.
+pub async fn fetch_remote_json(uri: &str) -> Result<String> {
+    Ok(
+        fetch_remote_resource(uri, None, None, 1024 * 1024, "application/vnd.github+json")
+            .await?
+            .script,
+    )
+}
+
 /// Download remote text through the local proxy so its PAC policy selects the route.
 pub async fn fetch_remote_text_via_proxy(uri: &str, proxy: SocketAddr) -> Result<String> {
     Ok(
-        fetch_remote_resource(uri, None, Some(proxy), 64 * 1024 * 1024)
+        fetch_remote_resource(uri, None, Some(proxy), 64 * 1024 * 1024, "*/*")
             .await?
             .script,
     )
@@ -570,7 +580,7 @@ pub async fn fetch_remote_pac_cached(
     uri: &str,
     cached: Option<&CachedRemotePac>,
 ) -> Result<CachedRemotePac> {
-    fetch_remote_resource(uri, cached, None, MAX_PAC_BYTES).await
+    fetch_remote_resource(uri, cached, None, MAX_PAC_BYTES, "*/*").await
 }
 
 async fn fetch_remote_resource(
@@ -578,6 +588,7 @@ async fn fetch_remote_resource(
     cached: Option<&CachedRemotePac>,
     proxy: Option<SocketAddr>,
     max_bytes: usize,
+    accept: &str,
 ) -> Result<CachedRemotePac> {
     let requested = uri.to_owned();
     time::timeout(Duration::from_secs(15), async move {
@@ -632,7 +643,7 @@ async fn fetch_remote_resource(
             let conditional = validator
                 .map(|etag| format!("If-None-Match: {etag}\r\n"))
                 .unwrap_or_default();
-            let request = format!("GET {request_target} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\nAccept: */*\r\n{conditional}\r\n");
+            let request = format!("GET {request_target} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\nAccept: {accept}\r\nUser-Agent: unproxy/{}\r\n{conditional}\r\n", crate::VERSION);
             io.write_all(request.as_bytes()).await?;
             let raw_header=read_http_head(&mut io).await?;
             let header = std::str::from_utf8(&raw_header).context("invalid remote response headers")?;

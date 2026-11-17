@@ -347,6 +347,7 @@ fn preferences_roundtrip_with_camel_case_settings_format_and_load_legacy_snake_c
             dir.path().join("hosts.txt"),
             "https://filters.example.test/hosts.txt".into(),
         ]),
+        release_info_url: Some("https://updates.example.test/unproxy.json".into()),
         direct_fallback: true,
         ..Preferences::default()
     };
@@ -356,6 +357,10 @@ fn preferences_roundtrip_with_camel_case_settings_format_and_load_legacy_snake_c
     assert!(saved.get("pacFile").is_some());
     assert!(saved.get("pacFiles").is_some());
     assert!(saved.get("filterLists").is_some());
+    assert_eq!(
+        saved["releaseInfoUrl"],
+        "https://updates.example.test/unproxy.json"
+    );
     assert_eq!(saved["directFallback"], true);
     assert!(saved.get("pac_file").is_none());
 
@@ -363,6 +368,7 @@ fn preferences_roundtrip_with_camel_case_settings_format_and_load_legacy_snake_c
         "pacFile": pac_file,
         "pacFiles": [pac_file],
         "filterLists": [dir.path().join("hosts.txt"), "https://filters.example.test/hosts.txt"],
+        "releaseInfoUrl": "https://updates.example.test/unproxy.json",
         "directFallback": true
     })
     .to_string();
@@ -374,6 +380,7 @@ fn preferences_roundtrip_with_camel_case_settings_format_and_load_legacy_snake_c
     assert_eq!(helper_preferences.pac_file, pac_file);
     assert_eq!(helper_preferences.pac_files, Some(vec![pac_file.clone()]));
     assert_eq!(helper_preferences.filter_lists, prefs.filter_lists);
+    assert_eq!(helper_preferences.release_info_url, prefs.release_info_url);
 
     std::fs::write(
         &path,

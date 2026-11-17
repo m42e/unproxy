@@ -1,5 +1,6 @@
+use clap::Parser;
 use std::fs;
-use unproxy::config::{MainArgs, token_file};
+use unproxy::config::{CliArgs, CliCommand, MainArgs, token_file};
 #[test]
 fn defaults_and_listener_validation() {
     let a = MainArgs::try_parse_from(["unproxy"]).unwrap();
@@ -60,4 +61,20 @@ fn repeated_pac_sources_append_settings_before_cli_in_order() {
             "fourth.pac"
         ]
     );
+}
+
+#[test]
+fn check_upgrade_accepts_a_custom_release_info_url() {
+    let cli = CliArgs::try_parse_from([
+        "unproxy",
+        "--release-info-url",
+        "https://updates.example.test/unproxy.json",
+        "check-upgrade",
+    ])
+    .unwrap();
+    assert_eq!(
+        cli.server.release_info_url.as_deref(),
+        Some("https://updates.example.test/unproxy.json")
+    );
+    assert!(matches!(cli.command, Some(CliCommand::CheckUpgrade)));
 }

@@ -169,6 +169,7 @@ negotiate = true
 proxytunnel = false
 direct_fallback = false
 autostart = true
+release_info_url = "https://updates.example.org/unproxy.json"
 ```
 
 Then pass it when packaging a Windows tray ZIP or macOS menu bar app:
@@ -187,6 +188,8 @@ paths are resolved under the user's Unproxy data folder (`%LOCALAPPDATA%\Unproxy
 on Windows and `~/Library/Application Support/Unproxy` on macOS); deploy the
 company PAC file at that path separately. The profile seeds new preferences
 only, so an existing user's choices are preserved when the app is updated.
+The optional `release_info_url` sets the custom JSON endpoint used by the
+desktop **Check for Updates** action; omit it to use GitHub Releases.
 
 ## Remove Unproxy
 

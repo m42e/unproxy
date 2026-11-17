@@ -30,6 +30,7 @@ const MENU_PROXY: &str = "proxy";
 const MENU_OPEN_STATUS: &str = "open-status";
 const MENU_OPEN_LOG: &str = "open-log";
 const MENU_COPY_ADDRESS: &str = "copy-address";
+const MENU_CHECK_UPDATES: &str = "check-updates";
 const MENU_SETTINGS: &str = "settings";
 const MENU_QUIT: &str = "quit";
 struct KernelHandle(HANDLE);
@@ -59,6 +60,7 @@ struct Controller {
     tray: TrayIcon,
     proxy_item: MenuItem,
     settings_item: MenuItem,
+    check_updates_item: MenuItem,
     last_icon_key: String,
     last_error: Option<String>,
     icon_directory: PathBuf,
@@ -105,6 +107,7 @@ pub(super) fn run() -> Result<()> {
         open_status_item,
         open_log_item,
         copy_address_item,
+        check_updates_item,
         settings_item,
         quit_item,
     ) = build_menu()?;
@@ -131,6 +134,7 @@ pub(super) fn run() -> Result<()> {
         tray,
         proxy_item,
         settings_item,
+        check_updates_item,
         last_icon_key: initial_icon_key,
         last_error,
         icon_directory,
@@ -164,6 +168,8 @@ pub(super) fn run() -> Result<()> {
                 open_log()
             } else if event_id == copy_address_item.id() {
                 copy_proxy_address(&controller.preferences.primary_listener())
+            } else if event_id == controller.check_updates_item.id() {
+                controller.check_for_upgrade()
             } else if event_id == controller.settings_item.id() {
                 controller.open_settings()
             } else {
@@ -173,6 +179,8 @@ pub(super) fn run() -> Result<()> {
                 controller.last_error = Some(format!("{error:#}"));
                 let title = if event_id == controller.settings_item.id() {
                     "Unproxy Settings"
+                } else if event_id == controller.check_updates_item.id() {
+                    "Check for Updates"
                 } else {
                     "Unproxy"
                 };
@@ -214,6 +222,30 @@ fn pump_messages() -> bool {
 }
 
 impl Controller {
+    fn check_for_upgrade(&self) -> Result<()> {
+        match crate::upgrade::check_for_upgrade_blocking(
+            self.preferences.release_info_url.as_deref(),
+        )? {
+            crate::upgrade::UpgradeStatus::UpToDate { current_version } => {
+                show_information(
+                    "Unproxy is Up to Date",
+                    &format!("You are using the latest version ({current_version})."),
+                );
+            }
+            crate::upgrade::UpgradeStatus::UpgradeAvailable(release) => {
+                show_information(
+                    "Unproxy Update Available",
+                    &format!(
+                        "Version {} is available. Opening the release page.",
+                        release.version
+                    ),
+                );
+                open_external_url(&release.url)?;
+            }
+        }
+        Ok(())
+    }
+
     fn toggle_proxy(&mut self) -> Result<()> {
         if self.child.is_running() {
             self.child.stop()?;
@@ -530,12 +562,14 @@ fn build_menu() -> Result<(
     MenuItem,
     MenuItem,
     MenuItem,
+    MenuItem,
 )> {
     let menu = Menu::new();
     let proxy = MenuItem::with_id(MENU_PROXY, "Proxy: Starting...", true, None);
     let open_status = MenuItem::with_id(MENU_OPEN_STATUS, "Open Status Page", true, None);
     let open_log = MenuItem::with_id(MENU_OPEN_LOG, "Open Log", true, None);
     let copy_address = MenuItem::with_id(MENU_COPY_ADDRESS, "Copy Proxy Address", true, None);
+    let check_updates = MenuItem::with_id(MENU_CHECK_UPDATES, "Check for Updates", true, None);
     let settings = MenuItem::with_id(MENU_SETTINGS, "Settings...", true, None);
     let quit = MenuItem::with_id(MENU_QUIT, "Quit Unproxy", true, None);
     let separator = PredefinedMenuItem::separator();
@@ -546,6 +580,8 @@ fn build_menu() -> Result<(
     menu.append(&open_log).context("add log menu item")?;
     menu.append(&copy_address)
         .context("add copy-address menu item")?;
+    menu.append(&check_updates)
+        .context("add check-updates menu item")?;
     menu.append(&separator).context("add menu separator")?;
     menu.append(&settings).context("add settings menu item")?;
     menu.append(&separator).context("add menu separator")?;
@@ -556,6 +592,7 @@ fn build_menu() -> Result<(
         open_status,
         open_log,
         copy_address,
+        check_updates,
         settings,
         quit,
     ))
@@ -793,9 +830,12 @@ fn proxy_menu_text(running: bool, failed: bool) -> &'static str {
 }
 
 fn open_status_page(preferences: &Preferences) -> Result<()> {
+    open_external_url(&preferences.status_url()?)
+}
+
+fn open_external_url(url: &str) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    let url = preferences.status_url()?;
-    let wide_url = std::ffi::OsStr::new(&url)
+    let wide_url = std::ffi::OsStr::new(url)
         .encode_wide()
         .chain(Some(0))
         .collect::<Vec<_>>();
@@ -812,7 +852,7 @@ fn open_status_page(preferences: &Preferences) -> Result<()> {
     };
     ensure!(
         result as isize > 32,
-        "could not open the status page (ShellExecute error {})",
+        "could not open the URL (ShellExecute error {})",
         result as isize
     );
     Ok(())
@@ -898,9 +938,11 @@ mod tests {
 
     #[test]
     fn menu_exposes_the_status_page_action() {
-        let (_, _, status, _, _, _, _) = build_menu().unwrap();
+        let (_, _, status, _, _, updates, _, _) = build_menu().unwrap();
         assert_eq!(status.id().0, MENU_OPEN_STATUS);
         assert_eq!(status.text(), "Open Status Page");
+        assert_eq!(updates.id().0, MENU_CHECK_UPDATES);
+        assert_eq!(updates.text(), "Check for Updates");
     }
 
     #[test]
