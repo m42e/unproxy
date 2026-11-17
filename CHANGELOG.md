@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.5
+
+- Add `unproxy check-upgrade` and desktop update checks, with GitHub Releases
+  as the default source and support for custom release metadata.
+- Improve desktop startup, settings recovery, and proxy lifecycle behavior.
+- Add a separately named macOS CLI package.
+
 ## 0.4.4
 
 - Fix the macOS menu bar icon in light mode and launch the app automatically
