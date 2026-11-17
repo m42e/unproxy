@@ -328,6 +328,20 @@ async fn run_until(
     if !filter_lists_complete {
         context.retry_filter_lists_after(a.filter_list.clone(), Duration::from_secs(5));
     }
+    if let Some(path) = std::env::var_os("UNPROXY_READY_FILE") {
+        if std::env::var_os("UNPROXY_READY_REQUIRE_PAC").is_some() && !policy.is_loaded() {
+            context.shutdown();
+            context.wait().await;
+            anyhow::bail!(
+                "replacement PAC policy could not be loaded; keeping previous desktop settings"
+            );
+        }
+        if let Err(error) = std::fs::write(path, b"ready") {
+            context.shutdown();
+            context.wait().await;
+            return Err(error).context("notify desktop controller that the proxy is ready");
+        }
+    }
     on_ready();
     for addr in context.local_addrs() {
         tracing::info!(%addr,"proxy listening")

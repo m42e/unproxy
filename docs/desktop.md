@@ -51,7 +51,7 @@ Enter one PAC file path or HTTP(S) URL per line. The line order sets the PAC eva
 
 ### macOS
 
-Use **+** under PAC files for a local file or **Add URL…** for an HTTP(S) URL. Select a row and use **Open / View** to open a local file in TextEdit or display a remote script. Double-click a row to edit it; use the ordering controls to change priority. Valid changes apply immediately.
+Use **+** under PAC files for a local file or **Add URL…** for an HTTP(S) URL. Select a row and use **Open / View** to open a local file in TextEdit or display a remote script. Remote scripts load in the background. Use **Cancel** below the PAC controls to stop a download. Closing Settings also cancels an in-progress download. Double-click a row to edit it; use the ordering controls to change priority. Valid changes apply immediately.
 
 ## Add ad blocking lists
 
@@ -66,7 +66,7 @@ Lists support hosts-format mappings and plain domain names. A blocked domain and
 | Negotiate | Uses integrated Windows or Kerberos credentials for upstream proxy authentication. Available in builds with Negotiate support. | Off |
 | Always use CONNECT | Uses an upstream HTTP CONNECT tunnel for proxied HTTP requests as well as HTTPS. | Off |
 | DIRECT fallback | Tries a direct connection after selected proxy routes fail. This can bypass the upstream proxy. | Off |
-| Start when signing in / Start with Login | Opens Unproxy at login. | On |
+| Start when signing in / Start with Login | Opens Unproxy at login. Opening the app manually starts the proxy even when this is off. | On |
 
 Company packages can supply different first-run defaults. Existing saved preferences take precedence when updating the app.
 
@@ -74,7 +74,7 @@ Enable DIRECT fallback only if your network policy permits direct access. For in
 
 ## Save and apply changes
 
-On **Windows**, choose **Save**. On **macOS**, valid edits and checkbox changes save and apply immediately. Changes affecting a running proxy restart it, which can interrupt active requests or tunnels. If the proxy is stopped, the new preferences are used the next time you start it. When editing the Windows `preferences.json` file directly, stop and start the proxy from the tray to reload the saved settings.
+On **Windows**, choose **Save**. On **macOS**, valid edits and checkbox changes save and apply immediately. Changes affecting a running proxy restart it, which can interrupt active requests or tunnels. Local PAC scripts and changed listener addresses are checked before stopping a running proxy. Unproxy saves the settings once the replacement is ready. If startup fails, Unproxy reports the error and attempts to restore the previous proxy configuration. If the proxy is stopped, the new preferences are used the next time you start it. When editing the Windows `preferences.json` file directly, stop and start the proxy from the tray to reload the saved settings.
 
 Desktop preferences persist across app launches. Windows stores them in `%LOCALAPPDATA%\Unproxy\preferences.json`; macOS uses native application preferences. Both apps keep PAC data and `unproxy.log` in their [support folders](configuration.md#desktop-files).
 

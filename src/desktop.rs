@@ -479,6 +479,16 @@ impl ChildLifecycle {
         self.child.is_some()
     }
     pub fn start(&mut self, exe: &Path, prefs: &Preferences) -> Result<()> {
+        self.spawn(exe, prefs, None, false)
+    }
+
+    fn spawn(
+        &mut self,
+        exe: &Path,
+        prefs: &Preferences,
+        ready: Option<&Path>,
+        require_pac: bool,
+    ) -> Result<()> {
         if self.is_running() {
             return Ok(());
         }
@@ -506,6 +516,16 @@ impl ChildLifecycle {
         let log_err = log.try_clone()?;
         self.last_exit = None;
         let mut c = Command::new(exe);
+        if let Some(ready) = ready {
+            c.env("UNPROXY_READY_FILE", ready);
+        } else {
+            c.env_remove("UNPROXY_READY_FILE");
+        }
+        if require_pac {
+            c.env("UNPROXY_READY_REQUIRE_PAC", "1");
+        } else {
+            c.env_remove("UNPROXY_READY_REQUIRE_PAC");
+        }
         c.args(prefs.child_args())
             .env("UNPROXY_NORC", "1")
             .stdin(Stdio::null())
@@ -565,6 +585,142 @@ impl ChildLifecycle {
         }
         Ok(())
     }
+    /// Apply desktop settings transactionally, retaining the last working setup.
+    pub fn apply_preferences(
+        &mut self,
+        exe: &Path,
+        previous: &Preferences,
+        updated: &Preferences,
+        mut persist: impl FnMut(&Preferences) -> Result<()>,
+    ) -> Result<()> {
+        let changed = previous.child_args() != updated.child_args();
+        let running = self.is_running();
+        if changed {
+            Self::validate_replacement(exe, previous, updated, running)?;
+        }
+        if changed && running {
+            self.stop()?;
+            if let Err(error) = self.start_confirmed(exe, updated, true) {
+                return match self.start_confirmed(exe, previous, false) {
+                    Ok(()) => Err(error.context("New settings failed; previous proxy settings restored")),
+                    Err(restore) => Err(error.context(format!(
+                        "New settings failed; restoring the previous proxy also failed: {restore:#}. Open Log for details"
+                    ))),
+                };
+            }
+        }
+        if let Err(error) = persist(updated) {
+            let saved = persist(previous);
+            let restored = if changed && running {
+                self.stop()
+                    .and_then(|()| self.start_confirmed(exe, previous, false))
+            } else {
+                Ok(())
+            };
+            return match (saved, restored) {
+                (Ok(()), Ok(())) => {
+                    Err(error.context("Could not save settings; previous settings restored"))
+                }
+                (saved, restored) => Err(error.context(format!(
+                    "Could not save settings; recovery errors: preferences={:?}, proxy={:?}",
+                    saved.err(),
+                    restored.err()
+                ))),
+            };
+        }
+        Ok(())
+    }
+
+    fn validate_replacement(
+        exe: &Path,
+        previous: &Preferences,
+        updated: &Preferences,
+        running: bool,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            exe.is_file(),
+            "cannot start proxy: executable is missing: {}",
+            exe.display()
+        );
+        // Compile local scripts before touching the working process. Remote sources
+        // are checked by the replacement, with rollback if its startup fails.
+        let mut scripts = Vec::new();
+        for path in updated.effective_pac_files() {
+            if parse_remote_pac_uri(&path.to_string_lossy())?.is_none() {
+                anyhow::ensure!(path.is_absolute(), "PAC path must be absolute");
+                scripts.push(
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("read PAC file {}", path.display()))?,
+                );
+            }
+        }
+        if !scripts.is_empty() {
+            crate::pac::Policy::new_scripts(scripts).context("validate PAC scripts")?;
+        }
+        let old = previous.effective_listeners();
+        let mut bound = Vec::new();
+        for listener in updated.effective_listeners() {
+            let address: std::net::SocketAddr = listener.parse().context("invalid listener")?;
+            anyhow::ensure!(
+                !address.ip().is_unspecified(),
+                "listener must use a concrete address"
+            );
+            if running
+                && !old
+                    .iter()
+                    .any(|old| old.parse::<std::net::SocketAddr>().ok() == Some(address))
+            {
+                bound.push(
+                    std::net::TcpListener::bind(address)
+                        .with_context(|| format!("listener {address} is unavailable"))?,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn start_confirmed(
+        &mut self,
+        exe: &Path,
+        prefs: &Preferences,
+        require_pac: bool,
+    ) -> Result<()> {
+        static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let attempt = ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ready = self
+            .log_path()
+            .with_file_name(format!("ready-{}-{attempt}", std::process::id()));
+        // Never accept a marker left behind by an earlier process.
+        match std::fs::remove_file(&ready) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let result = (|| {
+            self.spawn(exe, prefs, Some(&ready), require_pac)?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                anyhow::ensure!(
+                    self.is_running(),
+                    "Proxy failed during startup. Open Log for details"
+                );
+                if ready.is_file() {
+                    return Ok(());
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "Proxy did not become ready within 30 seconds. Open Log for details"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        })();
+        let _ = std::fs::remove_file(ready);
+        if result.is_err() {
+            self.stop()?;
+        }
+        result
+    }
+
     pub fn restart(&mut self, exe: &Path, prefs: &Preferences) -> Result<()> {
         self.stop()?;
         self.start(exe, prefs)
@@ -639,6 +795,7 @@ mod native {
     use super::*;
     use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, Sel};
     use objc2::{msg_send, rc::Retained, sel};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::{ffi::CString, ptr};
 
@@ -652,6 +809,9 @@ mod native {
     static LISTENER_TABLE: Mutex<usize> = Mutex::new(0);
     static PAC_FILE_TABLE: Mutex<usize> = Mutex::new(0);
     static FILTER_LIST_TABLE: Mutex<usize> = Mutex::new(0);
+    static PAC_FETCH_STATUS: Mutex<usize> = Mutex::new(0);
+    static PAC_FETCH: Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>> = Mutex::new(None);
+    static PAC_FETCH_GENERATION: AtomicU64 = AtomicU64::new(0);
     const SETTINGS_TABLE_ROW_HEIGHT: f64 = 20.0;
     const NS_ALPHA_NONPREMULTIPLIED_BITMAP_FORMAT: usize = 1 << 1;
     #[derive(Clone, Default)]
@@ -1257,6 +1417,10 @@ mod native {
                 list_editor_action as unsafe extern "C-unwind" fn(_, _, _),
             );
             cb.add_method(
+                sel!(remotePacFetchFinished:),
+                remote_pac_fetch_finished as unsafe extern "C-unwind" fn(_, _, _),
+            );
+            cb.add_method(
                 sel!(windowWillClose:),
                 list_editor_window_will_close as unsafe extern "C-unwind" fn(_, _, _),
             );
@@ -1320,6 +1484,7 @@ mod native {
         for selector in [
             sel!(clicked:),
             sel!(listEditorAction:),
+            sel!(remotePacFetchFinished:),
             sel!(windowWillClose:),
             sel!(menuNeedsUpdate:),
             sel!(pollChild:),
@@ -1816,17 +1981,148 @@ mod native {
             .cloned()
             .context("selected PAC source is unavailable")?;
         if let Some(uri) = parse_remote_pac_uri(&value)? {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("start PAC download runtime")?;
-            let content = runtime.block_on(crate::net::fetch_remote_pac(&uri.to_string()))?;
-            show_pac_content(target, &uri.to_string(), &content)
+            start_remote_pac_fetch(target, uri.to_string())
         } else {
             let path = PathBuf::from(value);
             anyhow::ensure!(path.is_absolute(), "PAC path must be absolute");
             anyhow::ensure!(path.is_file(), "PAC file is missing: {}", path.display());
             open_pac_file(&path)
+        }
+    }
+    fn set_pac_fetch_status(value: &str) {
+        let label = *PAC_FETCH_STATUS.lock().unwrap() as *mut AnyObject;
+        if !label.is_null() {
+            let _: () = unsafe { msg_send![label, setStringValue:cocoa_string(value)] };
+        }
+    }
+    fn cancel_remote_pac_fetch() {
+        if let Some((_, cancel)) = PAC_FETCH.lock().unwrap().take() {
+            let _ = cancel.send(());
+            set_pac_fetch_status("Download cancelled");
+        }
+    }
+    async fn fetch_pac_or_cancel<F>(
+        fetch: F,
+        cancelled: tokio::sync::oneshot::Receiver<()>,
+    ) -> Option<Result<String>>
+    where
+        F: std::future::Future<Output = Result<String>>,
+    {
+        tokio::select! {
+            biased;
+            _ = cancelled => None,
+            result = fetch => Some(result),
+        }
+    }
+    fn pac_fetch_completion_is_current(
+        active_generation: Option<u64>,
+        completion_generation: u64,
+    ) -> bool {
+        active_generation == Some(completion_generation)
+    }
+    fn start_remote_pac_fetch(target: *mut AnyObject, source: String) -> Result<()> {
+        cancel_remote_pac_fetch();
+        let generation = PAC_FETCH_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        *PAC_FETCH.lock().unwrap() = Some((generation, cancel));
+        set_pac_fetch_status("Downloading PAC file…");
+        let target = target as usize;
+        let request_source = source.clone();
+        let spawned = std::thread::Builder::new()
+            .name("unproxy-pac-view".into())
+            .spawn(move || {
+                let outcome = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime.block_on(fetch_pac_or_cancel(
+                        crate::net::fetch_remote_pac(&request_source),
+                        cancelled,
+                    )),
+                    Err(error) => Some(Err(error.into())),
+                };
+                let Some(outcome) = outcome else { return };
+                let payload = serde_json::json!({
+                    "generation": generation,
+                    "source": source,
+                    "result": match outcome {
+                        Ok(content) => serde_json::json!({"ok": content}),
+                        Err(error) => serde_json::json!({"error": format!("{error:#}")}),
+                    },
+                });
+                objc2::rc::autoreleasepool(|_| {
+                    let payload = cocoa_string(&payload.to_string());
+                    let target = target as *mut AnyObject;
+                    // Settings runs inside an AppKit modal loop.
+                    let modal_mode = cocoa_string("NSModalPanelRunLoopMode");
+                    let modes: *mut AnyObject = unsafe {
+                        msg_send![objc2::class!(NSArray), arrayWithObject:modal_mode]
+                    };
+                    let _: () = unsafe {
+                        msg_send![target, performSelectorOnMainThread:sel!(remotePacFetchFinished:), withObject:payload, waitUntilDone:objc2::runtime::Bool::NO, modes:modes]
+                    };
+                });
+            });
+        if let Err(error) = spawned {
+            if PAC_FETCH
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(id, _)| *id == generation)
+            {
+                PAC_FETCH.lock().unwrap().take();
+            }
+            set_pac_fetch_status("Could not start PAC download");
+            return Err(error).context("start PAC download");
+        }
+        Ok(())
+    }
+    unsafe extern "C-unwind" fn remote_pac_fetch_finished(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        payload: *mut AnyObject,
+    ) {
+        let Some(text) = cocoa_text(payload) else {
+            return;
+        };
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return;
+        };
+        let Some(generation) = payload
+            .get("generation")
+            .and_then(serde_json::Value::as_u64)
+        else {
+            return;
+        };
+        let current = PAC_FETCH.lock().unwrap().as_ref().map(|(id, _)| *id);
+        if !pac_fetch_completion_is_current(current, generation) {
+            return;
+        }
+        PAC_FETCH.lock().unwrap().take();
+        let source = payload
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("remote PAC");
+        match payload
+            .get("result")
+            .and_then(|result| result.get("ok"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(content) => {
+                set_pac_fetch_status("");
+                if let Err(error) = show_pac_content(_this, source, content) {
+                    show_message("Could not view PAC source", &format!("{error:#}"));
+                }
+            }
+            None => {
+                let error = payload
+                    .get("result")
+                    .and_then(|value| value.get("error"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("PAC download failed");
+                set_pac_fetch_status("Download failed");
+                show_message("Could not open PAC source", error);
+            }
         }
     }
     fn pac_source_to_copy(values: &[String], selected_row: isize) -> Result<&str> {
@@ -1998,6 +2294,10 @@ mod native {
             if let Err(error) = copy_selected_pac_source() {
                 show_message("Could not copy PAC source", &format!("{error:#}"));
             }
+            return;
+        }
+        if action == 1209 {
+            cancel_remote_pac_fetch();
             return;
         }
         if action == 1307 {
@@ -2246,34 +2546,24 @@ mod native {
         if state.prefs == updated {
             return Ok(());
         }
-        let restart_required = updated.effective_listeners() != state.prefs.effective_listeners()
-            || updated.effective_pac_files() != state.prefs.effective_pac_files()
-            || updated.effective_filter_lists() != state.prefs.effective_filter_lists()
-            || updated.negotiate != state.prefs.negotiate
-            || updated.proxytunnel != state.prefs.proxytunnel
-            || updated.direct_fallback != state.prefs.direct_fallback;
-        let running = state.child.is_running();
-        save_native_preferences(
-            &updated,
-            &state.prefs_path,
-            state.defaults as *mut AnyObject,
-        )?;
-        state.prefs = updated.clone();
-        *EDITOR_PREFS.lock().unwrap() = Some(updated.clone());
-        if running && restart_required {
-            let exe = state.child_exe.clone();
-            match state.child.restart(&exe, &updated) {
-                Ok(()) => {
-                    state.start_failed = false;
-                    reset_runtime_status(&mut state);
-                }
-                Err(error) => {
-                    state.start_failed = true;
-                    state.last_running = false;
-                    return Err(error);
-                }
-            }
+        let previous = state.prefs.clone();
+        let exe = state.child_exe.clone();
+        let path = state.prefs_path.clone();
+        let defaults = state.defaults as *mut AnyObject;
+        let was_running = state.child.is_running();
+        let result = state
+            .child
+            .apply_preferences(&exe, &previous, &updated, |prefs| {
+                save_native_preferences(prefs, &path, defaults)
+            });
+        state.last_running = state.child.is_running();
+        if was_running {
+            state.start_failed = !state.last_running;
         }
+        result?;
+        state.prefs = updated.clone();
+        *EDITOR_PREFS.lock().unwrap() = Some(updated);
+        reset_runtime_status(&mut state);
         state.last_running = state.child.is_running();
         Ok(())
     }
@@ -2293,7 +2583,10 @@ mod native {
         present: impl FnOnce(*mut AnyObject, *mut AnyObject) -> Result<()>,
     ) -> Result<()> {
         let (window, target) = build_settings_window(prefs)?;
-        present(window, target)?;
+        let presented = present(window, target);
+        cancel_remote_pac_fetch();
+        *PAC_FETCH_STATUS.lock().unwrap() = 0;
+        presented?;
         unsafe {
             let _: () = msg_send![window, orderOut:ptr::null_mut::<AnyObject>()];
         }
@@ -2326,6 +2619,8 @@ mod native {
         let _: () = unsafe { msg_send![window, setTitle:cocoa_string("Unproxy Settings")] };
         let _: () = unsafe { msg_send![window, center] };
         let content: *mut AnyObject = unsafe { msg_send![window, contentView] };
+        // Keep the +1 from `new`: remote PAC completions may arrive after the
+        // Settings window is ordered out, and use this target on the main thread.
         let target: *mut AnyObject = unsafe { msg_send![action_class(), new] };
         let _: () = unsafe { msg_send![window, setDelegate:target] };
 
@@ -2412,6 +2707,26 @@ mod native {
             rect(536.0, 134.0, 82.0, 26.0),
             None,
         );
+        settings_button(
+            content,
+            target,
+            "Cancel",
+            "Cancel the remote PAC download",
+            1209,
+            rect(350.0, 104.0, 68.0, 24.0),
+            None,
+        );
+        let status_allocated: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSTextField), alloc] };
+        let status: *mut AnyObject =
+            unsafe { msg_send![status_allocated, initWithFrame:rect(422.0, 105.0, 228.0, 22.0)] };
+        let _: () = unsafe { msg_send![status, setStringValue:cocoa_string("")] };
+        let _: () = unsafe { msg_send![status, setTag:1210isize] };
+        let _: () = unsafe { msg_send![status, setEditable:objc2::runtime::Bool::NO] };
+        let _: () = unsafe { msg_send![status, setBordered:objc2::runtime::Bool::NO] };
+        let _: () = unsafe { msg_send![status, setDrawsBackground:objc2::runtime::Bool::NO] };
+        let _: () = unsafe { msg_send![content, addSubview:status] };
+        *PAC_FETCH_STATUS.lock().unwrap() = status as usize;
         settings_button(
             content,
             target,
@@ -3386,11 +3701,18 @@ mod native {
                 "settings window has no filter-list table"
             );
             let content: *mut AnyObject = unsafe { msg_send![window, contentView] };
+            if let Ok(snapshot_path) = std::env::var("UNPROXY_SETTINGS_SNAPSHOT") {
+                set_pac_fetch_status("Downloading PAC file…");
+                capture_settings_snapshot(window, content, Path::new(&snapshot_path))?;
+                set_pac_fetch_status("");
+            }
             let subviews: *mut AnyObject = unsafe { msg_send![content, subviews] };
             let subview_count: usize = unsafe { msg_send![subviews, count] };
             let mut has_open_view = false;
             let mut has_add_url = false;
             let mut has_copy_path = false;
+            let mut has_cancel_fetch = false;
+            let mut has_fetch_status = false;
             let mut has_filter_url = false;
             for index in 0..subview_count {
                 let subview: *mut AnyObject = unsafe { msg_send![subviews, objectAtIndex:index] };
@@ -3398,6 +3720,8 @@ mod native {
                 has_open_view |= tag == 1206;
                 has_add_url |= tag == 1207;
                 has_copy_path |= tag == 1208;
+                has_cancel_fetch |= tag == 1209;
+                has_fetch_status |= tag == 1210;
                 has_filter_url |= tag == 1307;
             }
             anyhow::ensure!(
@@ -3406,6 +3730,14 @@ mod native {
             );
             anyhow::ensure!(has_add_url, "settings window has no Add URL button");
             anyhow::ensure!(has_copy_path, "settings window has no Copy Path button");
+            anyhow::ensure!(
+                has_cancel_fetch,
+                "settings window has no PAC download Cancel button"
+            );
+            anyhow::ensure!(
+                has_fetch_status,
+                "settings window has no PAC download status label"
+            );
             anyhow::ensure!(
                 has_filter_url,
                 "settings window has no Add filter-list URL button"
@@ -3495,7 +3827,7 @@ mod native {
             } else {
                 prefs.port + 1
             };
-            let alternate_listener = format!("127.0.0.2:{alternate_port}");
+            let alternate_listener = format!("127.0.0.1:{alternate_port}");
             unsafe {
                 list_set_object_value(
                     target,
@@ -3549,7 +3881,10 @@ mod native {
 
             use std::os::unix::fs::PermissionsExt;
             let fixture_child = support_dir.join("settings-probe-child");
-            std::fs::write(&fixture_child, "#!/bin/sh\nexec /bin/sleep 60\n")?;
+            std::fs::write(
+                &fixture_child,
+                "#!/bin/sh\nif [ -n \"$UNPROXY_READY_FILE\" ]; then touch \"$UNPROXY_READY_FILE\"; fi\nexec /bin/sleep 60\n",
+            )?;
             let mut permissions = std::fs::metadata(&fixture_child)?.permissions();
             permissions.set_mode(0o755);
             std::fs::set_permissions(&fixture_child, permissions)?;
@@ -3580,7 +3915,8 @@ mod native {
             );
             {
                 let mut current = state.lock().unwrap();
-                anyhow::ensure!(current.start_failed && !current.child.is_running());
+                anyhow::ensure!(!current.start_failed && current.child.is_running());
+                current.child.stop()?;
                 current.child_exe = original_child;
                 current.start_failed = false;
                 current.last_running = false;
@@ -3822,6 +4158,44 @@ mod native {
             *EDITOR_PREFS.lock().unwrap() = Some(prefs.clone());
             Ok(())
         })
+    }
+
+    fn capture_settings_snapshot(
+        window: *mut AnyObject,
+        view: *mut AnyObject,
+        path: &Path,
+    ) -> Result<()> {
+        let appearance: *mut AnyObject = unsafe {
+            msg_send![objc2::class!(NSAppearance), appearanceNamed:cocoa_string("NSAppearanceNameAqua")]
+        };
+        let _: () = unsafe { msg_send![window, setAppearance:appearance] };
+        let _: () = unsafe { msg_send![window, makeKeyAndOrderFront:ptr::null_mut::<AnyObject>()] };
+        let _: () = unsafe { msg_send![window, displayIfNeeded] };
+        let _: () = unsafe { msg_send![view, displayIfNeeded] };
+        let bitmap_bounds: Rect = unsafe { msg_send![view, bounds] };
+        let bitmap: *mut AnyObject =
+            unsafe { msg_send![view, bitmapImageRepForCachingDisplayInRect:bitmap_bounds] };
+        anyhow::ensure!(
+            !bitmap.is_null(),
+            "could not create settings snapshot bitmap"
+        );
+        let render_bounds: Rect = unsafe { msg_send![view, bounds] };
+        let _: () =
+            unsafe { msg_send![view, cacheDisplayInRect:render_bounds, toBitmapImageRep:bitmap] };
+        // NSBitmapImageFileTypePNG is 4 in AppKit's NSBitmapImageFileType enum.
+        let data: *mut AnyObject = unsafe {
+            msg_send![bitmap, representationUsingType:4usize, properties:ptr::null_mut::<AnyObject>()]
+        };
+        anyhow::ensure!(!data.is_null(), "could not encode settings snapshot as PNG");
+        let written: objc2::runtime::Bool = unsafe {
+            msg_send![data, writeToFile:cocoa_string(&path.to_string_lossy()), atomically:objc2::runtime::Bool::YES]
+        };
+        anyhow::ensure!(
+            written != objc2::runtime::Bool::NO,
+            "could not write settings snapshot to {}",
+            path.display()
+        );
+        Ok(())
     }
 
     fn exercise_runtime_status_probe() -> Result<()> {
@@ -4223,6 +4597,45 @@ mod native {
                 None
             );
             assert!(values.is_empty());
+        }
+
+        #[tokio::test]
+        async fn remote_pac_fetch_completion_and_cancellation_are_distinguished() {
+            let (_cancel, cancelled) = tokio::sync::oneshot::channel();
+            assert_eq!(
+                fetch_pac_or_cancel(
+                    async { Ok("function FindProxyForURL() {}".into()) },
+                    cancelled
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+                "function FindProxyForURL() {}"
+            );
+
+            let (_cancel, cancelled) = tokio::sync::oneshot::channel();
+            assert!(
+                fetch_pac_or_cancel(
+                    async { anyhow::bail!("server returned HTTP 503") },
+                    cancelled
+                )
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("HTTP 503")
+            );
+
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            cancel.send(()).unwrap();
+            assert!(
+                fetch_pac_or_cancel(std::future::pending::<Result<String>>(), cancelled,)
+                    .await
+                    .is_none()
+            );
+            assert!(pac_fetch_completion_is_current(Some(9), 9));
+            assert!(!pac_fetch_completion_is_current(Some(10), 9));
+            assert!(!pac_fetch_completion_is_current(None, 9));
         }
     }
 }

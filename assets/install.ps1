@@ -1,44 +1,75 @@
 param([switch]$DisableLoginStartup, [switch]$AsService)
 $ErrorActionPreference = 'Stop'
 
-function Get-ProxyPortOwners {
-    $connections = @(Get-NetTCPConnection -LocalPort 3128 -State Listen -ErrorAction SilentlyContinue)
-    $ownerIds = @($connections | Select-Object -ExpandProperty OwningProcess -Unique)
-    foreach ($ownerId in $ownerIds) {
-        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ownerId" -ErrorAction SilentlyContinue
-        if (-not $process) {
-            [pscustomobject]@{ ProcessId = $ownerId; Name = 'unknown'; Path = ''; Identity = "PID $ownerId" }
+function Test-ListenerAddressConflict([string]$configuredAddress, [string]$boundAddress) {
+    if ($configuredAddress -eq '*' -or $boundAddress -eq '*') { return $true }
+    try {
+        $configuredIp = [System.Net.IPAddress]::Parse($configuredAddress.Split('%')[0])
+        $boundIp = [System.Net.IPAddress]::Parse($boundAddress.Split('%')[0])
+        if ($configuredIp.AddressFamily -ne $boundIp.AddressFamily) { return $false }
+        return $configuredIp.Equals($boundIp) -or
+            $configuredIp.Equals([System.Net.IPAddress]::Any) -or
+            $boundIp.Equals([System.Net.IPAddress]::Any) -or
+            $configuredIp.Equals([System.Net.IPAddress]::IPv6Any) -or
+            $boundIp.Equals([System.Net.IPAddress]::IPv6Any)
+    } catch {
+        return $configuredAddress -ieq $boundAddress
+    }
+}
+
+function Get-ProxyPortOwners([string[]]$listeners) {
+    foreach ($listener in $listeners) {
+        if ($listener -match '^\[(?<address>[^\]]+)\]:(?<port>\d+)$') {
+            $configuredAddress = $Matches.address
+            $port = [int]$Matches.port
+        } elseif ($listener -match '^(?<address>[^:]+):(?<port>\d+)$') {
+            $configuredAddress = $Matches.address
+            $port = [int]$Matches.port
+        } else {
             continue
         }
-        $productInfo = ''
-        if ($process.ExecutablePath) {
-            try {
-                $versionInfo = (Get-Item -LiteralPath $process.ExecutablePath -ErrorAction Stop).VersionInfo
-                $productInfo = "$($versionInfo.ProductName) $($versionInfo.FileDescription)"
-            } catch { }
-        }
-        [pscustomobject]@{
-            ProcessId = $ownerId
-            Name = $process.Name
-            Path = $process.ExecutablePath
-            Identity = "$($process.Name) $($process.ExecutablePath) $productInfo"
+        $connections = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { Test-ListenerAddressConflict $configuredAddress $_.LocalAddress })
+        $ownerIds = @($connections | Select-Object -ExpandProperty OwningProcess -Unique)
+        foreach ($ownerId in $ownerIds) {
+            $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ownerId" -ErrorAction SilentlyContinue
+            if (-not $process) {
+                [pscustomobject]@{ ProcessId = $ownerId; Name = 'unknown'; Path = ''; Port = $port; Address = $configuredAddress; Identity = "PID $ownerId" }
+                continue
+            }
+            $productInfo = ''
+            if ($process.ExecutablePath) {
+                try {
+                    $versionInfo = (Get-Item -LiteralPath $process.ExecutablePath -ErrorAction Stop).VersionInfo
+                    $productInfo = "$($versionInfo.ProductName) $($versionInfo.FileDescription)"
+                } catch { }
+            }
+            [pscustomobject]@{
+                ProcessId = $ownerId
+                Name = $process.Name
+                Path = $process.ExecutablePath
+                Port = $port
+                Address = $configuredAddress
+                Identity = "$($process.Name) $($process.ExecutablePath) $productInfo"
+            }
         }
     }
 }
 
-function Assert-DefaultProxyPortAvailable {
+function Assert-ProxyListenersAvailable([string[]]$listeners) {
     $userProxyPath = Join-Path $env:LOCALAPPDATA 'Unproxy\bin\unproxy.exe'
     $serviceProxyPath = Join-Path $env:ProgramFiles 'Unproxy\unproxy.exe'
     while ($true) {
-        $owners = @(Get-ProxyPortOwners)
+        $owners = @(Get-ProxyPortOwners $listeners)
         if ($owners.Count -eq 0) { return }
 
         $proxyDetoxOwners = @($owners | Where-Object {
             $_.Identity -match '(?i)proxy[\s._-]*detox|detox[\s._-]*proxy'
         })
         if ($proxyDetoxOwners.Count -gt 0) {
-            Write-Warning 'Proxy Detox is listening on port 3128. Uninstall Proxy Detox before installing Unproxy.'
-            [void](Read-Host 'After uninstalling Proxy Detox, press Enter to check port 3128 again')
+            $endpoints = ($proxyDetoxOwners | ForEach-Object { "$($_.Address):$($_.Port)" } | Select-Object -Unique) -join ', '
+            Write-Warning "Proxy Detox is listening on $endpoints. Uninstall Proxy Detox before installing Unproxy."
+            [void](Read-Host "After uninstalling Proxy Detox, press Enter to check $endpoints again")
             continue
         }
 
@@ -49,11 +80,58 @@ function Assert-DefaultProxyPortAvailable {
         if ($otherOwners.Count -eq 0) { return }
 
         $details = ($otherOwners | ForEach-Object { "$($_.Name) (PID $($_.ProcessId))" }) -join ', '
-        throw "Port 3128 is already in use by $details. Stop that program before installing Unproxy."
+        $endpoints = ($otherOwners | ForEach-Object { "$($_.Address):$($_.Port)" } | Select-Object -Unique) -join ', '
+        throw "Unproxy listener $endpoints is already in use by $details. Stop that program before installing Unproxy."
     }
 }
 
-Assert-DefaultProxyPortAvailable
+function ConvertFrom-UnproxyConfigLine([string]$line) {
+    $tokens = [System.Collections.Generic.List[string]]::new()
+    $token = [System.Text.StringBuilder]::new()
+    $quoted = $false
+    $active = $false
+    foreach ($character in $line.ToCharArray()) {
+        if ($character -eq '"') {
+            $quoted = -not $quoted
+            $active = $true
+        } elseif ([char]::IsWhiteSpace($character) -and -not $quoted) {
+            if ($active) {
+                [void]$tokens.Add($token.ToString())
+                [void]$token.Clear()
+                $active = $false
+            }
+        } else {
+            [void]$token.Append($character)
+            $active = $true
+        }
+    }
+    if ($active) { [void]$tokens.Add($token.ToString()) }
+    return $tokens.ToArray()
+}
+
+function Get-ConfiguredServiceListeners([string]$configPath) {
+    $listeners = [System.Collections.Generic.List[string]]::new()
+    if (-not (Test-Path -LiteralPath $configPath)) { return $listeners.ToArray() }
+    $content = Get-Content -LiteralPath $configPath -Raw
+    foreach ($line in ($content -split "`r?`n")) {
+        $line = $line.TrimStart([char]0xFEFF).Trim()
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#')) { continue }
+        $tokens = @(ConvertFrom-UnproxyConfigLine $line)
+        for ($index = 0; $index -lt $tokens.Count; $index++) {
+            $token = [string]$tokens[$index]
+            if ($token -in @('--listen', '-L')) {
+                if ($index + 1 -lt $tokens.Count) {
+                    [void]$listeners.Add([string]$tokens[$index + 1])
+                    $index++
+                }
+            } elseif ($token.StartsWith('--listen=', [StringComparison]::Ordinal) -or
+                $token.StartsWith('-L=', [StringComparison]::Ordinal)) {
+                [void]$listeners.Add($token.Substring($token.IndexOf('=') + 1))
+            }
+        }
+    }
+    return $listeners.ToArray()
+}
 
 if ($AsService) {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -71,6 +149,9 @@ if ($AsService) {
     $servicePac = Join-Path $serviceData 'proxy.pac'
     $serviceLog = Join-Path $serviceData 'unproxy.log'
     $serviceConfig = Join-Path $serviceData 'unproxyrc'
+    $serviceListeners = @(Get-ConfiguredServiceListeners $serviceConfig)
+    if ($serviceListeners.Count -eq 0) { $serviceListeners = @('127.0.0.1:3128', '[::1]:3128') }
+    Assert-ProxyListenersAvailable $serviceListeners
     New-Item -ItemType Directory -Path $serviceRoot, $serviceData -Force | Out-Null
 
     $trayExecutable = Join-Path $env:LOCALAPPDATA 'Unproxy\bin\UnproxyTray.exe'
@@ -139,20 +220,8 @@ if ($AsService) {
 
 $root = Join-Path $env:LOCALAPPDATA 'Unproxy'
 $destination = Join-Path $root 'bin'
-New-Item -ItemType Directory -Path $destination -Force | Out-Null
-Copy-Item (Join-Path $PSScriptRoot 'unproxy.exe') (Join-Path $destination 'unproxy.exe') -Force
-Copy-Item (Join-Path $PSScriptRoot 'UnproxyTray.exe') (Join-Path $destination 'UnproxyTray.exe') -Force
-$legacySettingsHelper = Join-Path $destination 'unproxy-tray.ps1'
-if (Test-Path -LiteralPath $legacySettingsHelper) {
-    Remove-Item -LiteralPath $legacySettingsHelper -Force
-}
-$trayIconDirectory = Join-Path $destination 'tray-icons'
-New-Item -ItemType Directory -Path $trayIconDirectory -Force | Out-Null
-Copy-Item (Join-Path (Join-Path $PSScriptRoot 'tray-icons') '*') $trayIconDirectory -Recurse -Force
-Copy-Item (Join-Path $PSScriptRoot 'metadata.json') (Join-Path $destination 'metadata.json') -Force
-
 $prefsFile = Join-Path $root 'preferences.json'
-$metadataFile = Join-Path $destination 'metadata.json'
+$metadataFile = Join-Path $PSScriptRoot 'metadata.json'
 $metadata = if (Test-Path $metadataFile) {
     Get-Content $metadataFile -Raw | ConvertFrom-Json
 } else { $null }
@@ -179,6 +248,25 @@ if (-not ($preferences.PSObject.Properties.Name -contains 'pacFiles')) {
     $preferences | Add-Member -NotePropertyName pacFiles -NotePropertyValue @()
 }
 if (-not $preferences.pacFile) { $preferences.pacFile = Join-Path $root 'proxy.pac' }
+$configuredListeners = @($preferences.listeners | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+if ($configuredListeners.Count -eq 0) {
+    $configuredPort = [int]$preferences.port
+    if ($configuredPort -lt 1024 -or $configuredPort -gt 65534) { $configuredPort = 3128 }
+    $configuredListeners = @("127.0.0.1:$configuredPort", "[::1]:$configuredPort")
+}
+Assert-ProxyListenersAvailable $configuredListeners
+$metadataDestination = Join-Path $destination 'metadata.json'
+New-Item -ItemType Directory -Path $destination -Force | Out-Null
+Copy-Item (Join-Path $PSScriptRoot 'unproxy.exe') (Join-Path $destination 'unproxy.exe') -Force
+Copy-Item (Join-Path $PSScriptRoot 'UnproxyTray.exe') (Join-Path $destination 'UnproxyTray.exe') -Force
+$legacySettingsHelper = Join-Path $destination 'unproxy-tray.ps1'
+if (Test-Path -LiteralPath $legacySettingsHelper) {
+    Remove-Item -LiteralPath $legacySettingsHelper -Force
+}
+$trayIconDirectory = Join-Path $destination 'tray-icons'
+New-Item -ItemType Directory -Path $trayIconDirectory -Force | Out-Null
+Copy-Item (Join-Path (Join-Path $PSScriptRoot 'tray-icons') '*') $trayIconDirectory -Recurse -Force
+Copy-Item $metadataFile $metadataDestination -Force
 $pacUri = $null
 $isRemotePac = [Uri]::TryCreate(
     [string]$preferences.pacFile, [UriKind]::Absolute, [ref]$pacUri) -and

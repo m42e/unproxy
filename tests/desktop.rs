@@ -43,18 +43,30 @@ fn preferences_have_expected_defaults_and_supported_flags() {
 }
 
 #[test]
-fn windows_installer_checks_port_and_manages_user_proxy_environment() {
+fn windows_installer_checks_effective_listeners_and_manages_user_proxy_environment() {
     let installer = include_str!("../assets/install.ps1").replace("\r\n", "\n");
     let port_check = installer
-        .find("\nAssert-DefaultProxyPortAvailable\n")
+        .find("Assert-ProxyListenersAvailable $configuredListeners")
         .expect("installer port check");
-    let first_install_change = installer
-        .find("New-Item -ItemType Directory")
+    let first_install_change = installer[port_check..]
+        .find("Copy-Item (Join-Path $PSScriptRoot 'unproxy.exe')")
+        .map(|offset| port_check + offset)
         .expect("installer file changes");
     assert!(port_check < first_install_change);
-    assert!(installer.contains("Get-NetTCPConnection -LocalPort 3128 -State Listen"));
+    assert!(installer.contains("Get-NetTCPConnection -LocalPort $port -State Listen"));
+    assert!(installer.contains("Assert-ProxyListenersAvailable $configuredListeners"));
+    assert!(installer.contains("$configuredListeners = @($preferences.listeners"));
+    assert!(installer.contains(
+        "$configuredListeners = @(\"127.0.0.1:$configuredPort\", \"[::1]:$configuredPort\")"
+    ));
+    assert!(installer.contains("Test-ListenerAddressConflict $configuredAddress $_.LocalAddress"));
+    assert!(!installer.contains("Get-NetTCPConnection -LocalPort 3128"));
+    assert!(installer.contains("'127.0.0.1:3128', '[::1]:3128'"));
     assert!(installer.contains("proxy[\\s._-]*detox|detox[\\s._-]*proxy"));
-    assert!(installer.contains("After uninstalling Proxy Detox, press Enter"));
+    assert!(
+        installer.contains("After uninstalling Proxy Detox, press Enter to check $endpoints again")
+    );
+    assert!(installer.contains("Get-Content $metadataFile -Raw | ConvertFrom-Json"));
     assert!(installer.contains("http_proxy = $proxyUrl"));
     assert!(installer.contains("https_proxy = $proxyUrl"));
     assert!(installer.contains("no_proxy = 'localhost,127.0.0.1,::1'"));
@@ -66,6 +78,74 @@ fn windows_installer_checks_port_and_manages_user_proxy_environment() {
     assert!(uninstaller.contains("environment-before-install.json"));
     assert!(uninstaller.contains("$currentValue -ceq $installedValue"));
     assert!(uninstaller.contains("SetEnvironmentVariable($name, $previousValue, 'User')"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_installer_port_probe_uses_custom_ports_and_ignores_unrelated_addresses() {
+    let installer = include_str!("../assets/install.ps1");
+    let functions_start = installer
+        .find("function Test-ListenerAddressConflict")
+        .unwrap();
+    let installer_start = installer[functions_start..]
+        .find("if ($AsService)")
+        .map(|offset| functions_start + offset)
+        .unwrap();
+    let functions = &installer[functions_start..installer_start];
+    let script = format!(
+        r#"
+{functions}
+$script:queriedPorts = @()
+function Get-NetTCPConnection {{
+    param($LocalPort, $State, $ErrorAction)
+    $script:queriedPorts += $LocalPort
+    if ($LocalPort -eq 8080) {{
+        @(
+            [pscustomobject]@{{ LocalAddress = '127.0.0.2'; OwningProcess = 31 }},
+            [pscustomobject]@{{ LocalAddress = '127.0.0.1'; OwningProcess = 32 }}
+        )
+    }}
+}}
+function Get-CimInstance {{
+    param($Class, $Filter, $ErrorAction)
+    [pscustomobject]@{{ Name = "process$Filter"; ExecutablePath = '' }}
+}}
+$specific = @(Get-ProxyPortOwners @('127.0.0.1:8080'))
+if ($script:queriedPorts -notcontains 8080) {{ throw 'configured port was not queried' }}
+if ($specific.Count -ne 1 -or $specific[0].ProcessId -ne 32) {{ throw 'unrelated address caused a false conflict' }}
+$wildcard = @(Get-ProxyPortOwners @('0.0.0.0:8080'))
+if ($wildcard.Count -ne 2) {{ throw 'wildcard listener did not detect both conflicts' }}
+if (-not (Test-ListenerAddressConflict '::1' '::')) {{ throw 'IPv6 wildcard overlap was missed' }}
+if (Test-ListenerAddressConflict '127.0.0.1' '127.0.0.2') {{ throw 'distinct IPv4 addresses conflicted' }}
+$config = Join-Path $env:TEMP ('unproxy-config-' + [guid]::NewGuid().ToString() + '.rc')
+$configContents = @'
+# --listen 127.0.0.9:9000
+--pac-file "C:\path with spaces\pac --listen 127.0.0.8:9001"
+--listen 127.0.0.1:8081
+-L="[::1]:8082"
+-L [::1]:8083
+--listen "127.0.0.1:8084"
+'@
+[System.IO.File]::WriteAllText($config, [char]0xFEFF + $configContents, [System.Text.Encoding]::UTF8)
+$configuredServiceListeners = @(Get-ConfiguredServiceListeners $config)
+$expectedServiceListeners = @('127.0.0.1:8081', '[::1]:8082', '[::1]:8083', '127.0.0.1:8084')
+if (($configuredServiceListeners -join '|') -ne ($expectedServiceListeners -join '|')) {{ throw "service config listeners parsed incorrectly: $($configuredServiceListeners -join ', ')" }}
+Remove-Item -LiteralPath $config -Force
+"#
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("installer-port-probe.ps1");
+    std::fs::write(&script_path, script).unwrap();
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(script_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "PowerShell installer probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

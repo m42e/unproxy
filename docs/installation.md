@@ -52,7 +52,11 @@ the tray menu to change them.
 The per-user installer sets `http_proxy` and `https_proxy` to the configured
 listener and sets `no_proxy` to bypass localhost. It saves any previous
 per-user values and restores them on uninstall if they have not been changed
-since installation. Reopen existing terminals to pick up the new values.
+since installation. Reopen existing terminals and applications to pick up the new values.
+When you change the listener in tray Settings, Unproxy updates these per-user
+values only if they still match the values Unproxy installed; manually changed
+values are left alone. Windows notifies running applications, but most
+applications need to be reopened to read the updated environment.
 
 ### Windows service
 

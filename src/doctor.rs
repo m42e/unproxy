@@ -107,6 +107,15 @@ pub async fn run(args: MainArgs, doctor: DoctorArgs) -> Result<bool> {
 }
 
 async fn inspect(args: MainArgs, urls: Vec<String>) -> DoctorReport {
+    let sources = config::pac_sources(&args);
+    inspect_with_sources(args, urls, sources).await
+}
+
+async fn inspect_with_sources(
+    args: MainArgs,
+    urls: Vec<String>,
+    sources: Result<Vec<crate::route::PathOrUri>>,
+) -> DoctorReport {
     let mut report = DoctorReport::new();
     let settings = if std::env::var_os("UNPROXY_NORC").is_none_or(|value| value.is_empty()) {
         config::settings_path()
@@ -140,7 +149,7 @@ async fn inspect(args: MainArgs, urls: Vec<String>) -> DoctorReport {
         );
     }
 
-    let sources = match config::pac_sources(&args) {
+    let sources = match sources {
         Ok(sources) => {
             if sources.is_empty() {
                 if args.strict_policy {
@@ -1092,9 +1101,11 @@ mod tests {
             "--activate-socket",
             "unproxy-test",
         ]);
-        let report = inspect(
+        // Keep the no-policy case independent of an installed user/system PAC.
+        let report = inspect_with_sources(
             args,
             vec!["http://[invalid".into(), "file://example.test/path".into()],
+            Ok(Vec::new()),
         )
         .await;
         assert!(!report.ok);

@@ -21,8 +21,8 @@ use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED_0, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::Threading::{CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject},
     UI::WindowsAndMessaging::{
-        DispatchMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PM_REMOVE, PeekMessageW,
-        TranslateMessage, WM_QUIT,
+        DispatchMessageW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MSG, MessageBoxW, PM_REMOVE,
+        PeekMessageW, TranslateMessage, WM_QUIT,
     },
 };
 
@@ -90,9 +90,11 @@ pub(super) fn run() -> Result<()> {
 
     let mut child = ChildLifecycle::default();
     let mut last_error = None;
-    if preferences.autostart
-        && let Err(error) = child.start(&child_executable, &preferences)
-    {
+    // Autostart controls login registration only. Running the tray manually
+    // always starts the proxy child.
+    if let Err(error) = start_proxy_for_tray_launch(&preferences, |preferences| {
+        child.start(&child_executable, preferences)
+    }) {
         last_error = Some(format!("{error:#}"));
         show_error("Could not start Unproxy", &format!("{error:#}"));
     }
@@ -238,22 +240,31 @@ impl Controller {
             return Ok(());
         }
 
-        updated
-            .save(&self.preferences_path)
-            .context("save Unproxy settings")?;
-        if updated.autostart != self.preferences.autostart {
-            let executable = std::env::current_exe().context("find Unproxy tray executable")?;
-            if let Err(error) = settings::set_login_startup(updated.autostart, &executable) {
-                if let Err(restore_error) = self.preferences.save(&self.preferences_path) {
-                    return Err(error.context(format!(
-                        "restoring the previous settings also failed: {restore_error:#}"
-                    )));
+        let executable = std::env::current_exe().context("find Unproxy tray executable")?;
+        let preferences_path = self.preferences_path.clone();
+        let previous = self.preferences.clone();
+        self.child.apply_preferences(
+            &self.child_executable,
+            &previous,
+            &updated,
+            |preferences| {
+                preferences
+                    .save(&preferences_path)
+                    .context("save Unproxy settings")?;
+                if previous.effective_listeners() != updated.effective_listeners() {
+                    update_managed_proxy_environment(preferences)?;
                 }
-                return Err(error);
-            }
-        }
-        if self.child.is_running() && child_restart_required(&self.preferences, &updated) {
-            self.child.restart(&self.child_executable, &updated)?;
+                if updated.autostart != previous.autostart {
+                    settings::set_login_startup(preferences.autostart, &executable)?;
+                }
+                Ok(())
+            },
+        )?;
+        if previous.effective_listeners() != updated.effective_listeners() {
+            show_information(
+                "Unproxy Settings",
+                "The proxy listener changed. Reopen applications that use the installed proxy environment to pick up the updated address. Update any manually configured proxy addresses as well.",
+            );
         }
         self.preferences = updated;
         self.last_error = None;
@@ -276,6 +287,238 @@ impl Controller {
         }
         self.proxy_item.set_text(proxy_menu_text(running, failed));
         Ok(())
+    }
+}
+
+/// Update the installer's per-user proxy values only while they still match
+/// the values it installed. This preserves any later user or administrator edit.
+fn update_managed_proxy_environment(preferences: &Preferences) -> Result<()> {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, RegCloseKey, RegOpenKeyExW,
+    };
+
+    let state_path = support_dir().join("environment-before-install.json");
+    if !state_path.is_file() {
+        return Ok(());
+    }
+    let bytes = std::fs::read(&state_path).context("read installed environment tracking")?;
+    let mut state = parse_tracking_json(&bytes).context("parse installed environment tracking")?;
+    let installed = state
+        .get("installed")
+        .and_then(serde_json::Value::as_object)
+        .context("installed environment tracking has no installed values")?
+        .clone();
+    let proxy_url = proxy_environment_url(preferences)?;
+    let key_path = wide("Environment");
+    let mut key = std::ptr::null_mut();
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            key_path.as_ptr(),
+            0,
+            KEY_QUERY_VALUE | KEY_SET_VALUE,
+            &mut key,
+        )
+    };
+    if status != 0 {
+        anyhow::bail!("open per-user environment registry key failed ({status})");
+    }
+    let result = sync_managed_proxy_values(
+        installed,
+        &proxy_url,
+        |name| read_registry_string(key, name),
+        |name, value| write_registry_string(key, name, value),
+        |installed| {
+            state["installed"] = serde_json::Value::Object(installed.clone());
+            write_json_atomically(&state_path, &state)
+                .context("update installed environment tracking")
+        },
+    );
+    unsafe { RegCloseKey(key) };
+    result?;
+    notify_environment_changed();
+    Ok(())
+}
+
+fn parse_tracking_json(bytes: &[u8]) -> serde_json::Result<serde_json::Value> {
+    serde_json::from_slice(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes))
+}
+
+fn start_proxy_for_tray_launch(
+    preferences: &Preferences,
+    start: impl FnOnce(&Preferences) -> Result<()>,
+) -> Result<()> {
+    // Autostart controls login registration, never a manual tray launch.
+    start(preferences)
+}
+
+fn sync_managed_proxy_values(
+    mut installed: serde_json::Map<String, serde_json::Value>,
+    proxy_url: &str,
+    mut read: impl FnMut(&str) -> Result<Option<String>>,
+    mut write: impl FnMut(&str, &str) -> Result<()>,
+    mut persist: impl FnMut(&serde_json::Map<String, serde_json::Value>) -> Result<()>,
+) -> Result<()> {
+    let original_installed = installed.clone();
+    let mut changed = Vec::<(String, String)>::new();
+    let update = (|| {
+        for name in ["http_proxy", "https_proxy"] {
+            let Some(current) = read(name)? else {
+                continue;
+            };
+            if installed.get(name).and_then(serde_json::Value::as_str) != Some(&current) {
+                continue;
+            }
+            write(name, proxy_url)?;
+            changed.push((name.to_owned(), current));
+            installed.insert(
+                name.to_owned(),
+                serde_json::Value::String(proxy_url.to_owned()),
+            );
+        }
+        persist(&installed)
+    })();
+    if let Err(error) = update {
+        let mut rollback_errors = Vec::new();
+        for (name, old_value) in changed.iter().rev() {
+            if let Err(rollback) = write(name, old_value) {
+                rollback_errors.push(format!("restore {name}: {rollback:#}"));
+            }
+        }
+        if let Err(rollback) = persist(&original_installed) {
+            rollback_errors.push(format!("restore tracking: {rollback:#}"));
+        }
+        if rollback_errors.is_empty() {
+            return Err(error);
+        }
+        anyhow::bail!("{error:#}; rollback failed: {}", rollback_errors.join("; "));
+    }
+    Ok(())
+}
+
+fn read_registry_string(
+    key: windows_sys::Win32::System::Registry::HKEY,
+    name: &str,
+) -> Result<Option<String>> {
+    use windows_sys::Win32::System::Registry::{REG_SZ, RegQueryValueExW};
+    let name = wide(name);
+    let mut kind = 0;
+    let mut bytes = 0u32;
+    let query = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            std::ptr::null_mut(),
+            &mut bytes,
+        )
+    };
+    if query != 0 || kind != REG_SZ || bytes < 2 {
+        return Ok(None);
+    }
+    let mut data = vec![0u16; (bytes as usize).div_ceil(2)];
+    let query = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            data.as_mut_ptr().cast(),
+            &mut bytes,
+        )
+    };
+    if query != 0 {
+        return Ok(None);
+    }
+    let end = data
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(data.len());
+    Ok(Some(String::from_utf16_lossy(&data[..end])))
+}
+
+fn write_registry_string(
+    key: windows_sys::Win32::System::Registry::HKEY,
+    name: &str,
+    value: &str,
+) -> Result<()> {
+    use windows_sys::Win32::System::Registry::{REG_SZ, RegSetValueExW};
+    let name_wide = wide(name);
+    let value_wide = wide(value);
+    let status = unsafe {
+        RegSetValueExW(
+            key,
+            name_wide.as_ptr(),
+            0,
+            REG_SZ,
+            value_wide.as_ptr().cast(),
+            (value_wide.len() * 2) as u32,
+        )
+    };
+    if status != 0 {
+        anyhow::bail!("write per-user {name} failed ({status})");
+    }
+    Ok(())
+}
+
+fn write_json_atomically(path: &Path, value: &serde_json::Value) -> Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    std::fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
+    let source = wide(&temporary.to_string_lossy());
+    let destination = wide(&path.to_string_lossy());
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        let _ = std::fs::remove_file(&temporary);
+        anyhow::bail!("replace installed environment tracking failed");
+    }
+    Ok(())
+}
+
+fn proxy_environment_url(preferences: &Preferences) -> Result<String> {
+    let listener = preferences
+        .primary_listener()
+        .parse::<SocketAddr>()
+        .context("parse primary proxy listener")?;
+    let ip = match listener.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".parse().unwrap(),
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => "::1".parse().unwrap(),
+        ip => ip,
+    };
+    let host = match ip {
+        std::net::IpAddr::V4(ip) => ip.to_string(),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    Ok(format!("http://{host}:{}", listener.port()))
+}
+
+fn notify_environment_changed() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
+    };
+    let setting = wide("Environment");
+    let mut ignored = 0;
+    unsafe {
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            setting.as_ptr() as isize,
+            SMTO_ABORTIFHUNG,
+            2000,
+            &mut ignored,
+        );
     }
 }
 
@@ -318,6 +561,7 @@ fn build_menu() -> Result<(
     ))
 }
 
+#[cfg(test)]
 fn child_restart_required(current: &Preferences, updated: &Preferences) -> bool {
     current.effective_listeners() != updated.effective_listeners()
         || current.effective_pac_files() != updated.effective_pac_files()
@@ -631,6 +875,19 @@ fn show_error(title: &str, message: &str) {
     }
 }
 
+fn show_information(title: &str, message: &str) {
+    let title = wide(title);
+    let message = wide(message);
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
 pub(super) fn show_startup_error(message: &str) {
     show_error("Unproxy", message);
 }
@@ -700,6 +957,191 @@ mod tests {
             ..current.clone()
         };
         assert!(child_restart_required(&current, &updated));
+    }
+
+    #[test]
+    fn listener_settings_produce_a_local_proxy_environment_url() {
+        let preferences = Preferences {
+            listeners: Some(vec!["0.0.0.0:4321".to_owned()]),
+            ..Preferences::default()
+        };
+        assert_eq!(
+            proxy_environment_url(&preferences).unwrap(),
+            "http://127.0.0.1:4321"
+        );
+
+        let preferences = Preferences {
+            listeners: Some(vec!["[::]:8765".to_owned()]),
+            ..Preferences::default()
+        };
+        assert_eq!(
+            proxy_environment_url(&preferences).unwrap(),
+            "http://[::1]:8765"
+        );
+    }
+
+    #[test]
+    fn tracking_json_accepts_the_windows_powershell_utf8_bom() {
+        let bytes = b"\xef\xbb\xbf{\"original\":{\"http_proxy\":null},\"installed\":{}}";
+        let state = parse_tracking_json(bytes).unwrap();
+        assert!(state["original"]["http_proxy"].is_null());
+    }
+
+    #[test]
+    fn manual_tray_launch_starts_proxy_when_login_autostart_is_disabled() {
+        let preferences = Preferences {
+            autostart: false,
+            ..Preferences::default()
+        };
+        let mut started = false;
+        start_proxy_for_tray_launch(&preferences, |_| {
+            started = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(started);
+    }
+
+    #[test]
+    fn environment_sync_preserves_overrides_missing_values_and_uninstall_originals() {
+        let mut installed = serde_json::Map::new();
+        installed.insert("http_proxy".into(), "http://127.0.0.1:3128".into());
+        installed.insert("https_proxy".into(), "http://127.0.0.1:3128".into());
+        installed.insert("no_proxy".into(), "localhost".into());
+        let current = std::cell::RefCell::new(std::collections::HashMap::from([
+            (
+                "http_proxy".to_owned(),
+                "http://proxy.example:8080".to_owned(),
+            ),
+            ("https_proxy".to_owned(), "http://127.0.0.1:3128".to_owned()),
+        ]));
+        let mut state = serde_json::json!({
+            "original": {"http_proxy": "original-user-value"},
+            "installed": installed,
+        });
+        sync_managed_proxy_values(
+            state["installed"].as_object().unwrap().clone(),
+            "http://127.0.0.1:4444",
+            |name| Ok(current.borrow().get(name).cloned()),
+            |name, value| {
+                current
+                    .borrow_mut()
+                    .insert(name.to_owned(), value.to_owned());
+                Ok(())
+            },
+            |installed| {
+                state["installed"] = serde_json::Value::Object(installed.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(current.borrow()["http_proxy"], "http://proxy.example:8080");
+        assert_eq!(current.borrow()["https_proxy"], "http://127.0.0.1:4444");
+        assert_eq!(state["original"]["http_proxy"], "original-user-value");
+        assert_eq!(state["installed"]["https_proxy"], "http://127.0.0.1:4444");
+        assert_eq!(state["installed"]["http_proxy"], "http://127.0.0.1:3128");
+        assert_eq!(state["installed"]["no_proxy"], "localhost");
+    }
+
+    #[test]
+    fn environment_sync_does_not_create_a_missing_user_value() {
+        let old = "http://127.0.0.1:3128";
+        let installed = serde_json::Map::from_iter([
+            ("http_proxy".into(), old.into()),
+            ("https_proxy".into(), old.into()),
+        ]);
+        let current = std::cell::RefCell::new(std::collections::HashMap::from([(
+            "http_proxy".to_owned(),
+            old.to_owned(),
+        )]));
+        let mut persisted = None;
+        sync_managed_proxy_values(
+            installed,
+            "http://127.0.0.1:4444",
+            |name| Ok(current.borrow().get(name).cloned()),
+            |name, value| {
+                current
+                    .borrow_mut()
+                    .insert(name.to_owned(), value.to_owned());
+                Ok(())
+            },
+            |installed| {
+                persisted = Some(installed.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(current.borrow().get("https_proxy"), None);
+        assert_eq!(persisted.unwrap()["https_proxy"], old);
+    }
+
+    #[test]
+    fn environment_sync_rolls_back_prior_writes_after_a_partial_write_failure() {
+        let old = "http://127.0.0.1:3128";
+        let installed = serde_json::Map::from_iter([
+            ("http_proxy".into(), old.into()),
+            ("https_proxy".into(), old.into()),
+        ]);
+        let current = std::cell::RefCell::new(std::collections::HashMap::from([
+            ("http_proxy".to_owned(), old.to_owned()),
+            ("https_proxy".to_owned(), old.to_owned()),
+        ]));
+        let mut fail_https_once = true;
+        let result = sync_managed_proxy_values(
+            installed,
+            "http://127.0.0.1:4444",
+            |name| Ok(current.borrow().get(name).cloned()),
+            |name, value| {
+                if name == "https_proxy" && fail_https_once {
+                    fail_https_once = false;
+                    anyhow::bail!("injected registry write failure");
+                }
+                current
+                    .borrow_mut()
+                    .insert(name.to_owned(), value.to_owned());
+                Ok(())
+            },
+            |_| Ok(()),
+        );
+        assert!(result.is_err());
+        assert_eq!(current.borrow()["http_proxy"], old);
+        assert_eq!(current.borrow()["https_proxy"], old);
+    }
+
+    #[test]
+    fn environment_sync_rolls_back_registry_when_tracking_persistence_fails() {
+        let old = "http://127.0.0.1:3128";
+        let installed = serde_json::Map::from_iter([
+            ("http_proxy".into(), old.into()),
+            ("https_proxy".into(), old.into()),
+        ]);
+        let current = std::cell::RefCell::new(std::collections::HashMap::from([
+            ("http_proxy".to_owned(), old.to_owned()),
+            ("https_proxy".to_owned(), old.to_owned()),
+        ]));
+        let mut persistence_calls = 0;
+        let result = sync_managed_proxy_values(
+            installed,
+            "http://127.0.0.1:4444",
+            |name| Ok(current.borrow().get(name).cloned()),
+            |name, value| {
+                current
+                    .borrow_mut()
+                    .insert(name.to_owned(), value.to_owned());
+                Ok(())
+            },
+            |_| {
+                persistence_calls += 1;
+                if persistence_calls == 1 {
+                    anyhow::bail!("injected tracking write failure");
+                }
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(current.borrow()["http_proxy"], old);
+        assert_eq!(current.borrow()["https_proxy"], old);
+        assert_eq!(persistence_calls, 2);
     }
 
     #[test]
