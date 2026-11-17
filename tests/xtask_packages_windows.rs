@@ -570,7 +570,7 @@ fn main() {
     assert!(
         root.join("dist/macos")
             .join(format!(
-                "unproxy-{}-{darwin_target}-staging.zip",
+                "unproxy-{}-{darwin_target}-cli-staging.zip",
                 package_version()
             ))
             .is_file()
