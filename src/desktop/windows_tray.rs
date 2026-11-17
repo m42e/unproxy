@@ -101,16 +101,16 @@ pub(super) fn run() -> Result<()> {
         show_error("Could not start Unproxy", &format!("{error:#}"));
     }
 
-    let (
+    let TrayMenuItems {
         menu,
-        proxy_item,
-        open_status_item,
-        open_log_item,
-        copy_address_item,
-        check_updates_item,
-        settings_item,
-        quit_item,
-    ) = build_menu()?;
+        proxy: proxy_item,
+        open_status: open_status_item,
+        open_log: open_log_item,
+        copy_address: copy_address_item,
+        check_updates: check_updates_item,
+        settings: settings_item,
+        quit: quit_item,
+    } = build_menu()?;
     let initial_running = child.is_running();
     let initial_status = read_runtime_status(&preferences);
     let initial_icon_key = icon_key(
@@ -554,16 +554,18 @@ fn notify_environment_changed() {
     }
 }
 
-fn build_menu() -> Result<(
-    Menu,
-    MenuItem,
-    MenuItem,
-    MenuItem,
-    MenuItem,
-    MenuItem,
-    MenuItem,
-    MenuItem,
-)> {
+struct TrayMenuItems {
+    menu: Menu,
+    proxy: MenuItem,
+    open_status: MenuItem,
+    open_log: MenuItem,
+    copy_address: MenuItem,
+    check_updates: MenuItem,
+    settings: MenuItem,
+    quit: MenuItem,
+}
+
+fn build_menu() -> Result<TrayMenuItems> {
     let menu = Menu::new();
     let proxy = MenuItem::with_id(MENU_PROXY, "Proxy: Starting...", true, None);
     let open_status = MenuItem::with_id(MENU_OPEN_STATUS, "Open Status Page", true, None);
@@ -586,7 +588,7 @@ fn build_menu() -> Result<(
     menu.append(&settings).context("add settings menu item")?;
     menu.append(&separator).context("add menu separator")?;
     menu.append(&quit).context("add quit menu item")?;
-    Ok((
+    Ok(TrayMenuItems {
         menu,
         proxy,
         open_status,
@@ -595,7 +597,7 @@ fn build_menu() -> Result<(
         check_updates,
         settings,
         quit,
-    ))
+    })
 }
 
 #[cfg(test)]
@@ -938,11 +940,11 @@ mod tests {
 
     #[test]
     fn menu_exposes_the_status_page_action() {
-        let (_, _, status, _, _, updates, _, _) = build_menu().unwrap();
-        assert_eq!(status.id().0, MENU_OPEN_STATUS);
-        assert_eq!(status.text(), "Open Status Page");
-        assert_eq!(updates.id().0, MENU_CHECK_UPDATES);
-        assert_eq!(updates.text(), "Check for Updates");
+        let menu = build_menu().unwrap();
+        assert_eq!(menu.open_status.id().0, MENU_OPEN_STATUS);
+        assert_eq!(menu.open_status.text(), "Open Status Page");
+        assert_eq!(menu.check_updates.id().0, MENU_CHECK_UPDATES);
+        assert_eq!(menu.check_updates.text(), "Check for Updates");
     }
 
     #[test]
