@@ -52,6 +52,8 @@ type GssInitSecContext = unsafe extern "C" fn(
     *mut u32,
 ) -> GssStatus;
 #[cfg(all(feature = "negotiate", unix))]
+const GSS_SOCKS_REQUEST_FLAGS: u32 = 0x3e; // mutual, replay, sequence, confidentiality, integrity
+#[cfg(all(feature = "negotiate", unix))]
 type GssReleaseBuffer = unsafe extern "C" fn(*mut u32, *mut GssBuf) -> GssStatus;
 #[cfg(all(feature = "negotiate", unix))]
 type GssWrap = unsafe extern "C" fn(
@@ -222,6 +224,7 @@ impl NegotiateContext {
                 self.host.as_str(),
                 &self.lib,
             );
+
             let (token, complete) = gss_step(
                 GssStepRequest {
                     ctx,
@@ -329,7 +332,7 @@ unsafe fn gss_step(
             } else {
                 &mut mech
             },
-            if socks { 15 } else { 2 },
+            if socks { GSS_SOCKS_REQUEST_FLAGS } else { 2 },
             0,
             std::ptr::null_mut(),
             &mut input,
@@ -607,6 +610,30 @@ type InitializeSecurityContextW = unsafe extern "system" fn(
     *mut i64,
 ) -> i32;
 #[cfg(all(feature = "negotiate", windows))]
+const ISC_REQ_MUTUAL_AUTH: u32 = 0x0000_0002;
+#[cfg(all(feature = "negotiate", windows))]
+const ISC_REQ_REPLAY_DETECT: u32 = 0x0000_0004;
+#[cfg(all(feature = "negotiate", windows))]
+const ISC_REQ_SEQUENCE_DETECT: u32 = 0x0000_0008;
+#[cfg(all(feature = "negotiate", windows))]
+const ISC_REQ_CONFIDENTIALITY: u32 = 0x0000_0010;
+#[cfg(all(feature = "negotiate", windows))]
+const ISC_REQ_INTEGRITY: u32 = 0x0001_0000;
+#[cfg(all(feature = "negotiate", windows))]
+const SSPI_SOCKS_REQUEST_FLAGS: u32 = ISC_REQ_MUTUAL_AUTH
+    | ISC_REQ_REPLAY_DETECT
+    | ISC_REQ_SEQUENCE_DETECT
+    | ISC_REQ_CONFIDENTIALITY
+    | ISC_REQ_INTEGRITY;
+#[cfg(all(feature = "negotiate", windows))]
+fn sspi_request_flags(socks: bool) -> u32 {
+    if socks {
+        SSPI_SOCKS_REQUEST_FLAGS
+    } else {
+        ISC_REQ_MUTUAL_AUTH
+    }
+}
+#[cfg(all(feature = "negotiate", windows))]
 type SspiHandleAction = unsafe extern "system" fn(*mut SecHandle) -> i32;
 #[cfg(all(feature = "negotiate", windows))]
 #[repr(C)]
@@ -679,6 +706,7 @@ impl NegotiateContext {
                 &mut cred,
                 std::ptr::null_mut(),
             );
+
             if status < 0 {
                 return Err(anyhow!(
                     "AcquireCredentialsHandleW failed: 0x{:08x}",
@@ -746,7 +774,7 @@ impl NegotiateContext {
                 &mut self.cred,
                 prior_ptr,
                 self.target.as_ptr(),
-                if self.socks { 0x0001_001f } else { 2 },
+                sspi_request_flags(self.socks),
                 0,
                 0,
                 in_desc,
@@ -1055,7 +1083,7 @@ mod tests {
         if credential.is_null()
             && target == std::ptr::NonNull::<u8>::dangling().as_ptr().cast()
             && mech.is_null()
-            && requested_flags == 15
+            && requested_flags == GSS_SOCKS_REQUEST_FLAGS
         {
             INIT_SOCKS_FLAGS.fetch_add(1, Ordering::SeqCst);
         }
@@ -1450,11 +1478,32 @@ mod tests {
             Err(e) => assert!(e.to_string().contains("localhost"), "{e:#}"),
         }
     }
+
+    #[test]
+    fn socks_gss_context_requests_stream_protection_without_delegation() {
+        assert_eq!(GSS_SOCKS_REQUEST_FLAGS, 0x3e);
+        assert_eq!(GSS_SOCKS_REQUEST_FLAGS & 1, 0);
+        assert_eq!(GSS_SOCKS_REQUEST_FLAGS & 0x3e, 0x3e);
+    }
 }
 
 #[cfg(all(test, feature = "negotiate", windows))]
 mod windows_tests {
     use super::*;
+
+    #[test]
+    fn socks_sspi_context_requests_stream_protection_without_delegation() {
+        let required = ISC_REQ_MUTUAL_AUTH
+            | ISC_REQ_REPLAY_DETECT
+            | ISC_REQ_SEQUENCE_DETECT
+            | ISC_REQ_CONFIDENTIALITY
+            | ISC_REQ_INTEGRITY;
+        let socks_flags = sspi_request_flags(true);
+        assert_eq!(socks_flags, required);
+        assert_eq!(socks_flags & 1, 0);
+        assert_eq!(socks_flags & required, required);
+        assert_eq!(sspi_request_flags(false), ISC_REQ_MUTUAL_AUTH);
+    }
 
     #[test]
     fn native_sspi_context_acquires_credentials_and_attempts_an_initial_token() {
