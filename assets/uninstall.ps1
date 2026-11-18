@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $administrator = ([Security.Principal.WindowsPrincipal]::new(
     [Security.Principal.WindowsIdentity]::GetCurrent()
 )).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-$serviceData = Join-Path $env:ProgramData 'Unproxy'
+$legacyServiceData = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Unproxy'
 if ($AsService) {
     $programFiles = [Environment]::GetFolderPath('ProgramFiles')
     $stagePattern = '^' + [regex]::Escape($programFiles) + '\\Unproxy-setup-[0-9a-f]{32}\\payload\z'
@@ -12,6 +12,7 @@ if ($AsService) {
         throw 'Use the verified Windows service setup procedure at https://m42e.github.io/unproxy/docs/installation.html#windows-service'
     }
     $serviceRoot = Join-Path $programFiles 'Unproxy'
+    $serviceData = Join-Path $serviceRoot 'data'
     if (Test-Path -LiteralPath $serviceRoot) {
         $service = Get-Service -Name 'Unproxy' -ErrorAction SilentlyContinue
         if ($service) {
@@ -20,13 +21,17 @@ if ($AsService) {
             & $serviceRegister uninstall
             if ($LASTEXITCODE -ne 0) { throw 'Could not remove the Unproxy service registration.' }
         }
-        Remove-Item -LiteralPath $serviceRoot -Recurse -Force
-        if (-not $RemoveUserData) {
+        if ($RemoveUserData) {
+            Remove-Item -LiteralPath $serviceRoot -Recurse -Force
+        } else {
+            Get-ChildItem -LiteralPath $serviceRoot -Force |
+                Where-Object { $_.FullName -ne $serviceData } |
+                Remove-Item -Recurse -Force
             Write-Host "Service configuration and logs were preserved in $serviceData."
         }
     }
     if ($RemoveUserData) {
-        Remove-Item $serviceData -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $legacyServiceData -Recurse -Force -ErrorAction SilentlyContinue
     }
     return
 }
@@ -74,7 +79,7 @@ if ($RemoveUserData) { Remove-Item $root -Recurse -Force -ErrorAction SilentlyCo
 Write-Host 'Unproxy binaries and login registration removed.'
 if (-not $RemoveUserData) {
     Write-Host "Preferences and logs were preserved in $root."
-    if (Test-Path -LiteralPath $serviceData) {
-        Write-Host "Service configuration and logs were preserved in $serviceData."
+    if (Test-Path -LiteralPath (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Unproxy\data')) {
+        Write-Host 'Windows service configuration and logs are stored under Program Files\Unproxy\data.'
     }
 }

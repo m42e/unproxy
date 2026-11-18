@@ -59,17 +59,22 @@ Press Ctrl+C to end the diagnostic run, then start the proxy again from the tray
 These commands apply to a [Windows service installation](windows-service-setup.md), which runs without the tray app:
 
 ```powershell
+# Service status is available to a normal user.
 & "$env:ProgramFiles\Unproxy\unproxyctl.exe" status
-Get-Content "$env:ProgramData\Unproxy\unproxy.log" -Tail 100
+# Open PowerShell as Administrator before reading protected service files;
+# Administrators, SYSTEM, and the service account can read them.
+Get-Content "$env:ProgramFiles\Unproxy\data\logs\unproxy.log" -Tail 100
 ```
 
-To check a service using the default listener and ProgramData PAC file:
+Run the following diagnostic from that elevated PowerShell session; the service
+config and PAC file are restricted to Administrators, SYSTEM, and the service
+account. To check a service using the default listener and active PAC file:
 
 ```powershell
-& "$env:ProgramFiles\Unproxy\unproxy.exe" --listen 127.0.0.1:3128 --pac-file "$env:ProgramData\Unproxy\proxy.pac" doctor --url https://intranet.example.org/
+& "$env:ProgramFiles\Unproxy\unproxy.exe" --listen 127.0.0.1:3128 --pac-file "$env:ProgramFiles\Unproxy\data\proxy.pac" doctor --url https://intranet.example.org/
 ```
 
-Pass any additional routing and authentication options from the service's ProgramData `unproxyrc` explicitly. Doctor runs with your current user's credentials, so its credential readiness check can differ from the service's NetworkService identity; the report also shows the running instance's last recorded authentication result.
+Pass any additional routing and authentication options from `C:\Program Files\Unproxy\data\unproxyrc` explicitly. Doctor runs with your current user's credentials, so its credential readiness check can differ from the service's NetworkService identity; the report also shows the running instance's last recorded authentication result.
 
 To restart or stop that service, open PowerShell as administrator and run the appropriate command:
 

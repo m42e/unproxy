@@ -50,9 +50,11 @@ extracting it, and removes staging when the operation ends.
 ```
 
 Choose `install` for a new installation or an upgrade. The service starts at
-boot and runs without the tray app. It installs its executable under
-`C:\Program Files\Unproxy` and keeps its settings, PAC file, and log under
-`C:\ProgramData\Unproxy`. See the [installation overview](installation.md#windows-service)
+boot and runs without the tray app. Its executable is under
+`C:\Program Files\Unproxy`; active settings, PAC file, and logs are under
+`C:\Program Files\Unproxy\data`. Existing files under
+`C:\ProgramData\Unproxy` remain untouched and inactive; review and migrate
+trusted settings manually. See the [installation overview](installation.md#windows-service)
 for service configuration, status, and removal behavior. Service removal does
 not remove a separate per-user tray installation. If that account still has one,
 run the per-user uninstaller in a non-elevated PowerShell session to remove its

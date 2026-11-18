@@ -28,7 +28,7 @@ The first readable settings file is used. User configuration is checked before s
 | Linux | `$XDG_CONFIG_HOME/unproxy/unproxyrc` (normally `~/.config/unproxy/unproxyrc`), `/etc/unproxy/unproxyrc`, `/usr/local/etc/unproxy/unproxyrc` |
 | macOS CLI | `~/Library/Application Support/unproxy/unproxyrc`, `/etc/unproxy/unproxyrc`, `/usr/local/etc/unproxy/unproxyrc`, `/opt/unproxy/etc/unproxyrc` |
 | Windows CLI | `%APPDATA%\unproxy\unproxyrc`, then `unproxyrc` or `unproxyrc.txt` beside the executable |
-| Windows service installation | The installer creates `C:\ProgramData\Unproxy\unproxyrc` for the service. |
+| Windows service installation | `C:\Program Files\Unproxy\data\unproxyrc` |
 
 Options in the settings file load before command-line arguments. Later scalar values override earlier ones; repeatable source options such as `--pac-file` append. Set `UNPROXY_NORC=1` to ignore the settings file.
 

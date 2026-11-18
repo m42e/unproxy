@@ -2,7 +2,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use std::{
     ffi::c_void,
-    path::PathBuf,
+    path::{Path, PathBuf},
     ptr,
     sync::{
         OnceLock,
@@ -325,7 +325,7 @@ fn wait_for_state_with_timeout(
         }
         if expected == SERVICE_RUNNING && status.dwCurrentState == SERVICE_STOPPED {
             bail!(
-                "Unproxy stopped before reaching Running; inspect ProgramData\\Unproxy\\service-error.log"
+                "Unproxy stopped before reaching Running; inspect Program Files\\Unproxy\\data\\logs\\service-error.log"
             );
         }
         thread::sleep(Duration::from_millis(250));
@@ -663,20 +663,24 @@ fn service_main_impl() -> Result<()> {
 }
 
 fn service_config_path() -> PathBuf {
-    service_config_path_from(std::env::var_os("ProgramData").map(PathBuf::from))
+    service_config_path_from(std::env::current_exe().ok())
 }
 
-fn service_config_path_from(program_data: Option<PathBuf>) -> PathBuf {
-    program_data
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-        .join("Unproxy")
+fn service_config_path_from(executable: Option<PathBuf>) -> PathBuf {
+    executable
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files\Unproxy"))
+        .join("data")
         .join("unproxyrc")
 }
 
 fn write_service_error(message: &str) {
     let path = service_config_path()
         .parent()
-        .unwrap_or_else(|| std::path::Path::new(r"C:\ProgramData"))
+        .unwrap_or_else(|| std::path::Path::new(r"C:\Program Files\Unproxy\data"))
+        .join("logs")
         .join("service-error.log");
     write_service_error_to(&path, message);
 }
@@ -1141,12 +1145,12 @@ mod tests {
             "first failure\nsecond failure\n"
         );
         assert_eq!(
-            service_config_path_from(Some(PathBuf::from(r"D:\ProgramData"))),
-            PathBuf::from(r"D:\ProgramData\Unproxy\unproxyrc")
+            service_config_path_from(Some(PathBuf::from(r"D:\Program Files\Unproxy\unproxy.exe"))),
+            PathBuf::from(r"D:\Program Files\Unproxy\data\unproxyrc")
         );
         assert_eq!(
             service_config_path_from(None),
-            PathBuf::from(r"C:\ProgramData\Unproxy\unproxyrc")
+            PathBuf::from(r"C:\Program Files\Unproxy\data\unproxyrc")
         );
     }
 

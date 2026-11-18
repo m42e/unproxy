@@ -81,6 +81,110 @@ fn windows_installer_checks_effective_listeners_and_manages_user_proxy_environme
 }
 
 #[test]
+fn windows_service_installer_protects_policy_files_and_limits_service_write_access() {
+    let installer = include_str!("../assets/install.ps1").replace("\r\n", "\n");
+    let service_setup = installer
+        .split("if ($AsService)")
+        .nth(1)
+        .expect("service installer branch");
+    let protect = service_setup
+        .find("Protect-ServiceData $serviceData")
+        .expect("data ACL is secured");
+    let protect_root = service_setup
+        .find("Protect-ServiceRoot $serviceRoot")
+        .expect("service root ACL is secured");
+    let copy_binaries = service_setup
+        .find("Copy-Item (Join-Path $PSScriptRoot 'unproxy.exe')")
+        .expect("service binary installation");
+    let policy_migration = service_setup
+        .find("$migrationReview = Join-Path $serviceData 'migration-review'")
+        .expect("old settings are retained for explicit review");
+    let config_write = service_setup
+        .find("Set-Content -Encoding UTF8 $serviceConfig")
+        .expect("fresh service settings are written");
+    assert!(protect < copy_binaries);
+    assert!(protect_root < protect);
+    assert!(protect < policy_migration && policy_migration < config_write);
+    assert!(service_setup.contains("$serviceListeners = @('127.0.0.1:3128', '[::1]:3128')"));
+    assert!(!service_setup.contains("Get-ConfiguredServiceListeners $serviceConfig"));
+    assert!(!service_setup.contains("$serviceData /grant '*S-1-5-20:(OI)(CI)M' /T"));
+    assert!(
+        installer
+            .contains("Reparse points are not supported in the Unproxy service data directory")
+    );
+    assert!(installer.contains("'S-1-5-20'"));
+    assert!(installer.contains("'S-1-5-32-544'"));
+    assert!(installer.contains("'S-1-5-18'"));
+    assert!(installer.contains("'S-1-5-32-545'"));
+    assert!(installer.contains("function Assert-NoServicePathReparsePoints"));
+    assert!(installer.contains("function Assert-ServiceFileHasSingleLink"));
+    assert!(installer.contains("function Protect-ServiceRoot"));
+    let root_acl = installer
+        .split("function Protect-ServiceRoot")
+        .nth(1)
+        .unwrap()
+        .split("function Protect-ServiceData")
+        .next()
+        .unwrap();
+    assert!(
+        root_acl.find("Assert-ServiceFileHasSingleLink").unwrap()
+            < root_acl.find("/setowner '*S-1-5-32-544'").unwrap()
+    );
+    assert!(root_acl.find("/setowner '*S-1-5-32-544'").unwrap() < root_acl.find("/reset").unwrap());
+    let data_acl = installer
+        .split("function Protect-ServiceData")
+        .nth(1)
+        .unwrap()
+        .split("function Grant-ServiceLogAccess")
+        .next()
+        .unwrap();
+    assert!(
+        data_acl.find("Assert-ServiceFileHasSingleLink").unwrap()
+            < data_acl.find("/setowner '*S-1-5-32-544'").unwrap()
+    );
+    assert!(data_acl.find("/setowner '*S-1-5-32-544'").unwrap() < data_acl.find("/reset").unwrap());
+    let service_read = installer
+        .find("$networkServiceSid, 'ReadAndExecute'")
+        .unwrap();
+    let log_access = installer.find("function Grant-ServiceLogAccess").unwrap();
+    let log_access_function = &installer[log_access..];
+    assert!(log_access > service_read);
+    assert!(log_access_function.contains("$networkServiceSid, 'Modify'"));
+    assert!(log_access_function.contains("Logs cannot contain a reparse point"));
+    assert!(log_access_function.contains("Assert-ServiceFileHasSingleLink $path"));
+    assert!(
+        log_access_function
+            .find("foreach ($path in $files)")
+            .unwrap()
+            < log_access_function.find("$rootAcl = Get-Acl").unwrap()
+    );
+    assert!(
+        log_access_function.contains("[System.IO.Directory]::EnumerateFileSystemEntries($path)")
+    );
+    assert!(installer.contains("Grant-ServiceLogAccess $logs $networkServiceSid"));
+    assert!(service_setup.contains("Join-Path (Join-Path $serviceData 'logs') 'unproxy.log'"));
+    assert!(service_setup.contains("$serviceData = Join-Path $serviceRoot 'data'"));
+    assert!(!service_setup.contains("$env:ProgramData"));
+    assert!(!service_setup.contains("$legacyServiceData"));
+    let service_source = include_str!("../src/platform/windows_service.rs");
+    assert!(service_source.contains("std::env::current_exe().ok()"));
+    assert!(service_source.contains("service_config_path_from(executable"));
+    let uninstaller = include_str!("../assets/uninstall.ps1");
+    assert!(uninstaller.contains("$serviceData = Join-Path $serviceRoot 'data'"));
+    assert!(uninstaller.contains("Where-Object { $_.FullName -ne $serviceData }"));
+    assert!(uninstaller.contains("Remove-Item $legacyServiceData"));
+    let troubleshooting = include_str!("../docs/troubleshooting.md");
+    assert!(troubleshooting.contains("Service status is available to a normal user."));
+    assert!(
+        troubleshooting
+            .contains("Run the following diagnostic from that elevated PowerShell session")
+    );
+    assert!(
+        troubleshooting.contains("Administrators, SYSTEM, and the service account can read them.")
+    );
+}
+
+#[test]
 fn windows_package_scripts_never_relaunch_for_elevation() {
     for script in [
         include_str!("../assets/install.ps1"),

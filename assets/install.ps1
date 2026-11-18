@@ -133,6 +133,180 @@ function Get-ConfiguredServiceListeners([string]$configPath) {
     return $listeners.ToArray()
 }
 
+function Assert-NoServicePathReparsePoints([string]$path) {
+    $current = [System.IO.DirectoryInfo]::new([System.IO.Path]::GetFullPath($path))
+    while ($null -ne $current) {
+        if (Test-Path -LiteralPath $current.FullName) {
+            $item = Get-Item -LiteralPath $current.FullName -Force
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "The Unproxy service install path cannot contain a reparse point: $($current.FullName)"
+            }
+        }
+        $parent = $current.Parent
+        if ($null -eq $parent -or $parent.FullName -eq $current.FullName) { break }
+        $current = $parent
+    }
+}
+
+function Assert-ServiceFileHasSingleLink([string]$path) {
+    $fsutil = Join-Path ([Environment]::GetFolderPath('System')) 'fsutil.exe'
+    $links = @(& $fsutil hardlink list $path 2>&1)
+    if ($LASTEXITCODE -ne 0 -or $links.Count -ne 1) {
+        throw "Could not verify that the Unproxy service file has exactly one hard link: $path"
+    }
+}
+
+function Protect-ServiceRoot([string]$root) {
+    Assert-NoServicePathReparsePoints $root
+    $acl = Get-Acl -LiteralPath $root
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) { $acl.RemoveAccessRuleAll($rule) }
+    $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $administratorsSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $networkServiceSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-20')
+    $usersSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-545')
+    $acl.SetOwner($administratorsSid)
+    $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $none = [System.Security.AccessControl.PropagationFlags]::None
+    foreach ($identity in @($systemSid, $administratorsSid)) {
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $identity, 'FullControl', $inherit, $none, $allow))
+    }
+    foreach ($identity in @($networkServiceSid, $usersSid)) {
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $identity, 'ReadAndExecute', $inherit, $none, $allow))
+    }
+    Set-Acl -LiteralPath $root -AclObject $acl
+
+    $icacls = Join-Path ([Environment]::GetFolderPath('System')) 'icacls.exe'
+    foreach ($path in [System.IO.Directory]::EnumerateFileSystemEntries($root)) {
+        $item = Get-Item -LiteralPath $path -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The Unproxy service install directory cannot contain a reparse point: $path"
+        }
+        if (($item.Attributes -band [System.IO.FileAttributes]::Directory) -eq 0) {
+            Assert-ServiceFileHasSingleLink $item.FullName
+        }
+        & $icacls $item.FullName /setowner '*S-1-5-32-544' | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Could not set the owner of Unproxy service entry: $($item.FullName)" }
+        & $icacls $item.FullName /reset | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Could not secure Unproxy service entry: $($item.FullName)" }
+    }
+}
+
+function Protect-ServiceData([string]$root) {
+    $rootItem = Get-Item -LiteralPath $root -Force
+    if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "The Unproxy service data directory cannot be a reparse point: $root"
+    }
+    $acl = Get-Acl -LiteralPath $root
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) { $acl.RemoveAccessRuleAll($rule) }
+    $systemSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $administratorsSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $networkServiceSid = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-20')
+    $acl.SetOwner($administratorsSid)
+    $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $none = [System.Security.AccessControl.PropagationFlags]::None
+    $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+        $systemSid, 'FullControl', $inherit, $none, $allow))
+    $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+        $administratorsSid, 'FullControl', $inherit, $none, $allow))
+    $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+        $networkServiceSid, 'ReadAndExecute', $inherit, $none, $allow))
+    Set-Acl -LiteralPath $root -AclObject $acl
+
+    # Secure each parent before inspecting its children. Never run a recursive
+    # ACL operation against a tree inventoried while it was still writable.
+    $pending = [System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($root)
+    $icacls = Join-Path ([Environment]::GetFolderPath('System')) 'icacls.exe'
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        $directoryItem = Get-Item -LiteralPath $directory -Force
+        if (($directoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The Unproxy service data directory cannot contain a reparse point: $directory"
+        }
+        foreach ($path in [System.IO.Directory]::EnumerateFileSystemEntries($directory)) {
+            $entry = Get-Item -LiteralPath $path -Force
+            if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Reparse points are not supported in the Unproxy service data directory: $path"
+            }
+            if (($entry.Attributes -band [System.IO.FileAttributes]::Directory) -eq 0) {
+                Assert-ServiceFileHasSingleLink $entry.FullName
+            }
+            & $icacls $entry.FullName /setowner '*S-1-5-32-544' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Could not set the owner of Unproxy service entry: $($entry.FullName)" }
+            & $icacls $entry.FullName /reset | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Could not secure Unproxy service data entry: $($entry.FullName)" }
+            $entry = Get-Item -LiteralPath $path -Force
+            if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Reparse points are not supported in the Unproxy service data directory: $path"
+            }
+            if (($entry.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+                $pending.Push($entry.FullName)
+            }
+        }
+    }
+
+    $logs = Join-Path $root 'logs'
+    New-Item -ItemType Directory -Path $logs -Force | Out-Null
+    Grant-ServiceLogAccess $logs $networkServiceSid
+}
+
+function Grant-ServiceLogAccess([string]$root, [System.Security.Principal.SecurityIdentifier]$networkServiceSid) {
+    $pending = [System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($root)
+    $directories = [System.Collections.Generic.List[string]]::new()
+    $files = [System.Collections.Generic.List[string]]::new()
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $none = [System.Security.AccessControl.PropagationFlags]::None
+    while ($pending.Count -gt 0) {
+        $path = $pending.Pop()
+        $item = Get-Item -LiteralPath $path -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Logs cannot contain a reparse point: $path"
+        }
+        $isDirectory = ($item.Attributes -band [System.IO.FileAttributes]::Directory) -ne 0
+        if ($isDirectory) {
+            [void]$directories.Add($path)
+            foreach ($child in [System.IO.Directory]::EnumerateFileSystemEntries($path)) {
+                $pending.Push($child)
+            }
+        } else {
+            Assert-ServiceFileHasSingleLink $path
+            [void]$files.Add($path)
+        }
+    }
+
+    # Grant existing log files before allowing writes to the log directories.
+    # This keeps the checked tree stable against new links during ACL changes.
+    foreach ($path in $files) {
+        $acl = Get-Acl -LiteralPath $path
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $networkServiceSid, 'Modify', [System.Security.AccessControl.InheritanceFlags]::None, $none, $allow))
+        Set-Acl -LiteralPath $path -AclObject $acl
+    }
+
+    $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $rootAcl = Get-Acl -LiteralPath $root
+    $rootAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+        $networkServiceSid, 'Modify', $inherit, $none, $allow))
+    Set-Acl -LiteralPath $root -AclObject $rootAcl
+
+    foreach ($directory in $directories) {
+        $directoryItem = Get-Item -LiteralPath $directory -Force
+        if (($directoryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Logs cannot contain a reparse point: $directory"
+        }
+    }
+}
+
 $administrator = ([Security.Principal.WindowsPrincipal]::new(
     [Security.Principal.WindowsIdentity]::GetCurrent()
 )).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -144,16 +318,14 @@ if ($AsService) {
     }
 
     $serviceRoot = Join-Path $programFiles 'Unproxy'
-    $serviceData = Join-Path $env:ProgramData 'Unproxy'
+    $serviceData = Join-Path $serviceRoot 'data'
     $serviceExecutable = Join-Path $serviceRoot 'unproxy.exe'
     $serviceRegister = Join-Path $serviceRoot 'unproxy-register.exe'
     $servicePac = Join-Path $serviceData 'proxy.pac'
-    $serviceLog = Join-Path $serviceData 'unproxy.log'
+    $serviceLog = Join-Path (Join-Path $serviceData 'logs') 'unproxy.log'
     $serviceConfig = Join-Path $serviceData 'unproxyrc'
-    $serviceListeners = @(Get-ConfiguredServiceListeners $serviceConfig)
-    if ($serviceListeners.Count -eq 0) { $serviceListeners = @('127.0.0.1:3128', '[::1]:3128') }
+    $serviceListeners = @('127.0.0.1:3128', '[::1]:3128')
     Assert-ProxyListenersAvailable $serviceListeners
-    New-Item -ItemType Directory -Path $serviceRoot, $serviceData -Force | Out-Null
 
     $trayExecutable = Join-Path $env:LOCALAPPDATA 'Unproxy\bin\UnproxyTray.exe'
     $tray = Get-CimInstance Win32_Process -Filter "Name='UnproxyTray.exe'" |
@@ -182,29 +354,43 @@ if ($AsService) {
         $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(45))
     }
     if ($existing) { $existing.Dispose() }
+    Assert-NoServicePathReparsePoints $serviceRoot
+    New-Item -ItemType Directory -Path $serviceRoot -Force | Out-Null
+    Protect-ServiceRoot $serviceRoot
+    New-Item -ItemType Directory -Path $serviceData -Force | Out-Null
+    Protect-ServiceData $serviceData
 
     Copy-Item (Join-Path $PSScriptRoot 'unproxy.exe') $serviceExecutable -Force
     Copy-Item (Join-Path $PSScriptRoot 'unproxy-register.exe') $serviceRegister -Force
     Copy-Item (Join-Path $PSScriptRoot 'unproxyctl.exe') (Join-Path $serviceRoot 'unproxyctl.exe') -Force
-    $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
-    & $icacls $serviceData /grant '*S-1-5-20:(OI)(CI)M' /T /C | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'Could not grant the Unproxy service access to its data folder.' }
-    if (-not (Test-Path -LiteralPath $servicePac)) {
-        Copy-Item (Join-Path $PSScriptRoot 'proxy.pac.sample') $servicePac
-    }
-    if (-not (Test-Path -LiteralPath $serviceConfig)) {
-        $metadata = Get-Content (Join-Path $PSScriptRoot 'metadata.json') -Raw | ConvertFrom-Json
-        $authHint = if ($metadata.negotiate) {
-            '# Add --negotiate on its own line to use Windows Negotiate authentication.'
-        } else {
-            '# This build was packaged without Windows Negotiate authentication.'
+    # Keep policy from a prior protected install as review material. Legacy
+    # ProgramData files remain untouched and are never read by the installer.
+    $migrationReview = Join-Path $serviceData 'migration-review'
+    New-Item -ItemType Directory -Path $migrationReview -Force | Out-Null
+    foreach ($oldFile in @($serviceConfig, $servicePac)) {
+        if (Test-Path -LiteralPath $oldFile -PathType Leaf) {
+            $oldItem = Get-Item -LiteralPath $oldFile -Force
+            if (($oldItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Cannot migrate a reparse point from the prior service data directory: $oldFile"
+            }
+            $candidate = Join-Path $migrationReview (Split-Path -Leaf $oldFile)
+            if (-not (Test-Path -LiteralPath $candidate)) {
+                Copy-Item -LiteralPath $oldFile -Destination $candidate -Force
+            }
         }
-        @(
-            ('--pac-file "' + $servicePac + '"')
-            ('--logfile "' + $serviceLog + '"')
-            $authHint
-        ) | Set-Content -Encoding UTF8 $serviceConfig
     }
+    Copy-Item (Join-Path $PSScriptRoot 'proxy.pac.sample') $servicePac
+    $metadata = Get-Content (Join-Path $PSScriptRoot 'metadata.json') -Raw | ConvertFrom-Json
+    $authHint = if ($metadata.negotiate) {
+        '# Add --negotiate on its own line to use Windows Negotiate authentication.'
+    } else {
+        '# This build was packaged without Windows Negotiate authentication.'
+    }
+    @(
+        ('--pac-file "' + $servicePac + '"')
+        ('--logfile "' + $serviceLog + '"')
+        $authHint
+    ) | Set-Content -Encoding UTF8 $serviceConfig
 
     & $serviceRegister install
     if ($LASTEXITCODE -ne 0) { throw 'Could not install and start the Unproxy service.' }

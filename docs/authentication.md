@@ -56,7 +56,7 @@ An explicit `--netrc-file` cannot be combined with `--negotiate`. SOCKS5 GSSAPI 
 
 The standard Windows tray app runs as the signed-in user. The optional Windows service runs as **NetworkService**, so domain Negotiate uses the computer account. A successful desktop sign-in does not prove that the service’s account can authenticate.
 
-If a different service identity is required, configure it in Windows Services and grant that account Modify access to `C:\ProgramData\Unproxy`. See [Windows service installation](installation.md#windows-service).
+If a different service identity is required, configure it in Windows Services and grant that account Read & execute access to `C:\Program Files\Unproxy\data` and Modify access to its `logs` subdirectory. See [Windows service installation](installation.md#windows-service).
 
 ## Confirm authentication
 

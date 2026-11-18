@@ -66,18 +66,24 @@ The privileged setup commands are published online and omitted from the
 installation guide bundled with release packages.
 
 Choose `install` for a new installation or an upgrade. The service starts at
-boot and runs without the tray app. It installs its executable under
-`C:\Program Files\Unproxy` and keeps its settings, PAC file, and log under
-`C:\ProgramData\Unproxy`.
-The installer creates `C:\ProgramData\Unproxy\unproxyrc` and `proxy.pac` on
-the first service install. Edit those files there to configure the service. If
-the package includes Negotiate support, add `--negotiate` to `unproxyrc` to use
-Windows authentication.
+boot and runs without the tray app. It installs its executable, configuration,
+PAC file, and logs under `C:\Program Files\Unproxy`. Edit
+`C:\Program Files\Unproxy\data\unproxyrc` and `proxy.pac` to configure the
+service from an administrator session; ordinary users cannot read or change
+the service policy files. Administrators, SYSTEM, and the service account can
+read them. If the package includes Negotiate support, add `--negotiate` to
+`unproxyrc` to use Windows authentication. On upgrade, settings from a previous
+protected install are copied to `C:\Program Files\Unproxy\data\migration-review`;
+the service starts with fresh default settings and a sample PAC. Legacy files
+under `C:\ProgramData\Unproxy` remain untouched and inactive. Review those
+files and manually migrate trusted settings and referenced PAC files into the
+active config. The service never loads the review copies. Logs are stored in
+`C:\Program Files\Unproxy\data\logs`.
 
 The service runs as NetworkService, so Negotiate uses the computer account on
 a domain. You can change the service logon account in Windows Services if your
-organization requires a different identity; grant that account Modify access
-to `C:\ProgramData\Unproxy` so it can read its configuration and write logs.
+organization requires a different identity; grant that account Read & execute access to
+`C:\Program Files\Unproxy\data` and Modify access to its `logs` subdirectory.
 
 Use PowerShell to manage the service:
 
