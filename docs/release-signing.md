@@ -39,10 +39,14 @@ and recreates the ZIP with the stapled app. If signing secrets are missing, the
 app ZIP is unsigned. If only notarization secrets are missing, it is signed but
 not notarized.
 
-The sandbox entitlements grant the app, embedded proxy, and login helper access
-to `~/Library/Application Support/Unproxy/`, where Unproxy stores PAC files,
-preferences, and logs. The embedded proxy must be signed with the child
-entitlements so it inherits this access.
+The app entitlements grant access to
+`~/Library/Application Support/Unproxy/`, where Unproxy stores PAC files,
+preferences, and logs. The embedded proxy and login helper inherit the app's
+static sandbox rights. Their child entitlement set must contain exactly
+`com.apple.security.app-sandbox` and `com.apple.security.inherit`; macOS aborts
+a sandboxed child that specifies additional sandbox entitlements. The embedded
+proxy must be signed with the child entitlements so it inherits the app's
+access.
 
 ## macOS installer packages
 

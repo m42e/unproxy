@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.7
+
+- Fix the macOS proxy child aborting when its inherited sandbox entitlements
+  include an unsupported extra permission.
+
 ## 0.4.6
 
 - Fix the macOS sandbox permissions for the shared PAC, preferences, and log

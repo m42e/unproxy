@@ -3,7 +3,4 @@
 <plist version="1.0"><dict>
 <key>com.apple.security.app-sandbox</key><true/>
 <key>com.apple.security.inherit</key><true/>
-<!-- The proxy and login helper use the app's shared support directory. -->
-<key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
-<array><string>/Library/Application Support/Unproxy/</string></array>
 </dict></plist>

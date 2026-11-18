@@ -172,16 +172,16 @@ fn macos_app_entitlements_cover_the_shared_support_directory() {
     let support_entitlement =
         "com.apple.security.temporary-exception.files.home-relative-path.read-write";
     let support_path = "/Library/Application Support/Unproxy/";
-    for entitlements in [
-        include_str!("../assets/app-entitlements.plist"),
-        include_str!("../assets/child-entitlements.plist"),
-    ] {
-        assert!(entitlements.contains(support_entitlement));
-        assert!(entitlements.contains(support_path));
-    }
-    assert!(
-        include_str!("../assets/child-entitlements.plist").contains("com.apple.security.inherit")
-    );
+    let app_entitlements = include_str!("../assets/app-entitlements.plist");
+    assert!(app_entitlements.contains(support_entitlement));
+    assert!(app_entitlements.contains(support_path));
+
+    let child_entitlements = include_str!("../assets/child-entitlements.plist");
+    assert!(child_entitlements.contains("com.apple.security.app-sandbox"));
+    assert!(child_entitlements.contains("com.apple.security.inherit"));
+    assert_eq!(child_entitlements.matches("<key>").count(), 2);
+    assert!(!child_entitlements.contains(support_entitlement));
+    assert!(!child_entitlements.contains(support_path));
 }
 
 #[test]
