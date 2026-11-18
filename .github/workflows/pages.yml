@@ -28,6 +28,7 @@ jobs:
         with:
           path: dist/site
   deploy:
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-24.04
     permissions:
