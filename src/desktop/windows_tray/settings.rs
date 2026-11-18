@@ -47,7 +47,7 @@ use windows_sys::Win32::{
 
 const WINDOW_CLASS: &str = "UnproxySettingsWindow";
 const CLIENT_WIDTH: i32 = 760;
-const CLIENT_HEIGHT: i32 = 740;
+const CLIENT_HEIGHT: i32 = 540;
 
 const ID_LISTENERS: u16 = 1001;
 const ID_PAC_FILES: u16 = 1002;
@@ -60,7 +60,6 @@ const ID_DIRECT_FALLBACK: u16 = 1008;
 const ID_AUTOSTART: u16 = 1009;
 const ID_SAVE: u16 = 1010;
 const ID_CANCEL: u16 = 1011;
-const ID_RELEASE_INFO_URL: u16 = 1012;
 
 struct Controls {
     listeners: HWND,
@@ -70,7 +69,6 @@ struct Controls {
     tunnel: HWND,
     direct_fallback: HWND,
     autostart: HWND,
-    release_info_url: HWND,
 }
 
 #[derive(Clone, Copy)]
@@ -96,7 +94,6 @@ struct SettingsFields {
     tunnel: bool,
     direct_fallback: bool,
     autostart: bool,
-    release_info_url: String,
 }
 
 impl SettingsDialog {
@@ -111,7 +108,6 @@ impl SettingsDialog {
                 tunnel: null_mut(),
                 direct_fallback: null_mut(),
                 autostart: null_mut(),
-                release_info_url: null_mut(),
             },
             result: None,
             initialization_error: None,
@@ -129,7 +125,6 @@ impl SettingsDialog {
                 tunnel: control_checked(self.controls.tunnel),
                 direct_fallback: control_checked(self.controls.direct_fallback),
                 autostart: control_checked(self.controls.autostart),
-                release_info_url: control_text(self.controls.release_info_url),
             },
         )
     }
@@ -312,13 +307,6 @@ fn build_preferences(current: &Preferences, fields: SettingsFields) -> Result<Pr
     updated.proxytunnel = fields.tunnel;
     updated.direct_fallback = fields.direct_fallback;
     updated.autostart = fields.autostart;
-    updated.release_info_url = if fields.release_info_url.trim().is_empty() {
-        None
-    } else {
-        Some(crate::upgrade::validate_release_info_url(
-            &fields.release_info_url,
-        )?)
-    };
     Ok(updated)
 }
 
@@ -451,7 +439,7 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         window,
         instance,
         "STATIC",
-        "Listeners (numeric IP address and port; IPv6 in brackets, one per line)",
+        "Listeners (IP:port, one per line)",
         WS_CHILD | WS_VISIBLE,
         ControlBounds {
             x: 18,
@@ -483,11 +471,11 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         window,
         instance,
         "STATIC",
-        "PAC files or HTTP(S) URLs (one per line; order matters)",
+        "PAC files or URLs (one per line; order matters)",
         WS_CHILD | WS_VISIBLE,
         ControlBounds {
             x: 18,
-            y: 120,
+            y: 118,
             width: 720,
             height: 20,
         },
@@ -507,9 +495,9 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         &pac_files,
         ControlBounds {
             x: 18,
-            y: 142,
+            y: 140,
             width: 724,
-            height: 124,
+            height: 72,
         },
     )?;
     create_control(
@@ -520,7 +508,7 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         ControlBounds {
             x: 18,
-            y: 274,
+            y: 218,
             width: 150,
             height: 28,
         },
@@ -531,11 +519,11 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         window,
         instance,
         "STATIC",
-        "Optional filter-list files or HTTP(S) URLs (hosts format; one per line)",
+        "Optional hosts-format filter lists (one per line)",
         WS_CHILD | WS_VISIBLE,
         ControlBounds {
             x: 18,
-            y: 314,
+            y: 258,
             width: 720,
             height: 20,
         },
@@ -555,9 +543,9 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         &filter_lists,
         ControlBounds {
             x: 18,
-            y: 336,
+            y: 280,
             width: 724,
-            height: 96,
+            height: 72,
         },
     )?;
     create_control(
@@ -568,7 +556,7 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         ControlBounds {
             x: 18,
-            y: 430,
+            y: 358,
             width: 170,
             height: 28,
         },
@@ -582,7 +570,7 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         state.current.proxytunnel,
         ControlBounds {
             x: 18,
-            y: 478,
+            y: 406,
             width: 360,
             height: 24,
         },
@@ -594,9 +582,9 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         "DIRECT fallback",
         state.current.direct_fallback,
         ControlBounds {
-            x: 18,
-            y: 506,
-            width: 360,
+            x: 390,
+            y: 406,
+            width: 352,
             height: 24,
         },
         ID_DIRECT_FALLBACK,
@@ -608,7 +596,7 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         state.current.negotiate,
         ControlBounds {
             x: 18,
-            y: 534,
+            y: 436,
             width: 360,
             height: 24,
         },
@@ -623,45 +611,12 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         "Start Unproxy when I sign in",
         state.current.autostart,
         ControlBounds {
-            x: 18,
-            y: 562,
-            width: 360,
+            x: 390,
+            y: 436,
+            width: 352,
             height: 24,
         },
         ID_AUTOSTART,
-    )?;
-
-    create_control(
-        window,
-        instance,
-        "STATIC",
-        "Release info JSON URL (blank uses GitHub Releases)",
-        WS_CHILD | WS_VISIBLE,
-        ControlBounds {
-            x: 18,
-            y: 598,
-            width: 724,
-            height: 20,
-        },
-        0,
-    )?;
-    state.controls.release_info_url = create_control(
-        window,
-        instance,
-        "EDIT",
-        state
-            .current
-            .release_info_url
-            .as_deref()
-            .unwrap_or_default(),
-        WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-        ControlBounds {
-            x: 18,
-            y: 620,
-            width: 724,
-            height: 26,
-        },
-        ID_RELEASE_INFO_URL,
     )?;
 
     create_control(
@@ -672,7 +627,7 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
         ControlBounds {
             x: 572,
-            y: 692,
+            y: 486,
             width: 80,
             height: 30,
         },
@@ -686,7 +641,7 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         ControlBounds {
             x: 662,
-            y: 692,
+            y: 486,
             width: 80,
             height: 30,
         },
@@ -927,7 +882,10 @@ mod tests {
         std::fs::write(&pac, "DIRECT").unwrap();
         let filter_file = directory.path().join("hosts.txt");
         std::fs::write(&filter_file, "0.0.0.0 example.test").unwrap();
-        let current = Preferences::default();
+        let current = Preferences {
+            release_info_url: Some("https://releases.example.test/unproxy.json".into()),
+            ..Preferences::default()
+        };
         let updated = build_preferences(
             &current,
             SettingsFields {
@@ -941,7 +899,6 @@ mod tests {
                 tunnel: true,
                 direct_fallback: true,
                 autostart: false,
-                release_info_url: "https://releases.example.test/unproxy.json".into(),
             },
         )
         .unwrap();
@@ -977,10 +934,7 @@ mod tests {
         assert!(updated.proxytunnel);
         assert!(updated.direct_fallback);
         assert!(!updated.autostart);
-        assert_eq!(
-            updated.release_info_url.as_deref(),
-            Some("https://releases.example.test/unproxy.json")
-        );
+        assert_eq!(updated.release_info_url, current.release_info_url);
     }
 
     #[test]

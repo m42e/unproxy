@@ -38,11 +38,11 @@ Default PAC discovery checks `proxy.pac` under the same user and Unix system dir
 
 | Item | Windows | macOS |
 | --- | --- | --- |
-| Preferences | `%LOCALAPPDATA%\Unproxy\preferences.json` | Native application preferences for `de.m42e.unproxy.app` |
+| Preferences | `%LOCALAPPDATA%\Unproxy\preferences.json` | `~/Library/Application Support/Unproxy/preferences.json` (other settings are also mirrored to native application preferences) |
 | Data and default PAC | `%LOCALAPPDATA%\Unproxy` | `~/Library/Application Support/Unproxy` |
 | Diagnostic log | `unproxy.log` in the data folder | `unproxy.log` in the data folder |
 
-Desktop apps use their own preferences and launch their proxy with explicit settings. Make desktop changes through **Settings…**. CLI `shell-setup` reads `unproxyrc`, so use explicit environment variables if your desktop listener differs.
+Desktop apps use their own preferences and launch their proxy with explicit settings. Make ordinary desktop changes through **Settings…**. The expert-only `releaseInfoUrl` update endpoint is configured in `preferences.json`; see [Check for upgrades](#check-for-upgrades). CLI `shell-setup` reads `unproxyrc`, so use explicit environment variables if your desktop listener differs.
 
 ## Routing and credentials
 
@@ -113,9 +113,19 @@ settings file or pass it before the command:
 unproxy --release-info-url https://updates.example.org/unproxy.json check-upgrade
 ```
 
-Desktop users can set **Release info JSON URL** in **Settings…**. Leave the
-field blank to use GitHub Releases. The endpoint must return JSON in this
-shape:
+Desktop apps read the expert-only `releaseInfoUrl` setting from
+`preferences.json` (Windows: `%LOCALAPPDATA%\Unproxy\preferences.json`; macOS:
+`~/Library/Application Support/Unproxy/preferences.json`). Set it to a URL to
+use custom metadata, or remove it or set it to `null` to use GitHub Releases.
+Restart Unproxy after editing the file. For example:
+
+```json
+{
+  "releaseInfoUrl": "https://updates.example.org/unproxy.json"
+}
+```
+
+The endpoint must return JSON in this shape:
 
 ```json
 {

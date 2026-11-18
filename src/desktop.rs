@@ -816,7 +816,6 @@ mod native {
     static LISTENER_TABLE: Mutex<usize> = Mutex::new(0);
     static PAC_FILE_TABLE: Mutex<usize> = Mutex::new(0);
     static FILTER_LIST_TABLE: Mutex<usize> = Mutex::new(0);
-    static RELEASE_INFO_URL_FIELD: Mutex<usize> = Mutex::new(0);
     static PAC_FETCH_STATUS: Mutex<usize> = Mutex::new(0);
     static PAC_FETCH: Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>> = Mutex::new(None);
     static PAC_FETCH_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -1773,7 +1772,7 @@ mod native {
     ) -> *mut AnyObject {
         let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSButton), alloc] };
         let button: *mut AnyObject =
-            unsafe { msg_send![allocated, initWithFrame:rect(x, 82.0, width, 24.0)] };
+            unsafe { msg_send![allocated, initWithFrame:rect(x, 94.0, width, 24.0)] };
         let _: () = unsafe { msg_send![button, setButtonType:3isize] };
         let _: () = unsafe { msg_send![button, setTitle:cocoa_string(title)] };
         let _: () = unsafe { msg_send![button, setState:if enabled {1isize}else{0isize}] };
@@ -1783,24 +1782,6 @@ mod native {
         let _: () = unsafe { msg_send![parent, addSubview:button] };
         let _: () = unsafe { msg_send![button, setToolTip:cocoa_string(tooltip)] };
         button
-    }
-    fn settings_text_field(
-        parent: *mut AnyObject,
-        target: *mut AnyObject,
-        tag: isize,
-        value: &str,
-        frame: Rect,
-    ) -> *mut AnyObject {
-        let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSTextField), alloc] };
-        let field: *mut AnyObject = unsafe { msg_send![allocated, initWithFrame:frame] };
-        let _: () = unsafe { msg_send![field, setStringValue:cocoa_string(value)] };
-        let _: () = unsafe { msg_send![field, setEditable:objc2::runtime::Bool::YES] };
-        let _: () = unsafe { msg_send![field, setSelectable:objc2::runtime::Bool::YES] };
-        let _: () = unsafe { msg_send![field, setTag:tag] };
-        let _: () = unsafe { msg_send![field, setTarget:target] };
-        let _: () = unsafe { msg_send![field, setAction:sel!(listEditorAction:)] };
-        let _: () = unsafe { msg_send![parent, addSubview:field] };
-        field
     }
     fn settings_list_table(
         content: *mut AnyObject,
@@ -1863,7 +1844,7 @@ mod native {
                 label,
                 tooltip,
                 tag_base + action,
-                rect(x + offset, 168.0, 28.0, 26.0),
+                rect(x + offset, 268.0, 28.0, 26.0),
                 None,
             );
         }
@@ -2340,15 +2321,6 @@ mod native {
             }
             return;
         }
-        if action == 3004 {
-            if let Err(error) = commit_editor_preferences() {
-                show_message(
-                    "Could not apply the release info URL",
-                    &format!("{error:#}"),
-                );
-            }
-            return;
-        }
         if (3001..=3003).contains(&action) {
             change_editor_checkbox(sender, action);
             return;
@@ -2575,16 +2547,6 @@ mod native {
             filter_lists.push(path);
         }
         updated.filter_lists = Some(filter_lists);
-        let release_info_url = *RELEASE_INFO_URL_FIELD.lock().unwrap() as *mut AnyObject;
-        if !release_info_url.is_null() {
-            let value: *mut AnyObject = unsafe { msg_send![release_info_url, stringValue] };
-            let value = cocoa_text(value).unwrap_or_default();
-            updated.release_info_url = if value.trim().is_empty() {
-                None
-            } else {
-                Some(crate::upgrade::validate_release_info_url(&value)?)
-            };
-        }
         Ok(updated)
     }
     fn commit_editor_preferences() -> Result<()> {
@@ -2650,7 +2612,6 @@ mod native {
         *LISTENER_TABLE.lock().unwrap() = 0;
         *PAC_FILE_TABLE.lock().unwrap() = 0;
         *FILTER_LIST_TABLE.lock().unwrap() = 0;
-        *RELEASE_INFO_URL_FIELD.lock().unwrap() = 0;
         presented?;
         committed?;
         Ok(())
@@ -2672,7 +2633,7 @@ mod native {
 
         let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSWindow), alloc] };
         let window: *mut AnyObject = unsafe {
-            msg_send![allocated, initWithContentRect:rect(0.0, 0.0, 1000.0, 660.0), styleMask:3isize, backing:2isize, defer:objc2::runtime::Bool::NO]
+            msg_send![allocated, initWithContentRect:rect(0.0, 0.0, 950.0, 560.0), styleMask:3isize, backing:2isize, defer:objc2::runtime::Bool::NO]
         };
         anyhow::ensure!(!window.is_null(), "could not create the settings window");
         let _: () = unsafe { msg_send![window, setReleasedWhenClosed:objc2::runtime::Bool::NO] };
@@ -2688,65 +2649,65 @@ mod native {
             content,
             "Changes are applied immediately as you edit.",
             24.0,
-            612.0,
-            952.0,
+            512.0,
+            902.0,
             24.0,
             false,
         );
-        settings_label(content, "Listeners", 24.0, 570.0, 300.0, 24.0, true);
+        settings_label(content, "Listeners", 20.0, 470.0, 285.0, 24.0, true);
         settings_label(
             content,
             "Numeric address and port; IPv6 in brackets.",
-            24.0,
-            542.0,
-            300.0,
+            20.0,
+            442.0,
+            285.0,
             22.0,
             false,
         );
-        settings_label(content, "PAC files", 350.0, 570.0, 300.0, 24.0, true);
+        settings_label(content, "PAC files", 330.0, 470.0, 285.0, 24.0, true);
         settings_label(
             content,
-            "PAC files or URLs, checked top to bottom.",
-            350.0,
-            542.0,
-            300.0,
+            "PAC files or URLs, in priority order.",
+            330.0,
+            442.0,
+            285.0,
             22.0,
             false,
         );
         settings_label(
             content,
             "Ad blocking lists",
-            676.0,
-            570.0,
-            300.0,
+            640.0,
+            470.0,
+            285.0,
             24.0,
             true,
         );
         settings_label(
             content,
-            "Optional Pi-hole or hosts-format lists.",
-            676.0,
-            542.0,
-            300.0,
+            "Optional Pi-hole or hosts format lists.",
+            640.0,
+            442.0,
+            285.0,
             22.0,
             false,
         );
-        let listener_table = settings_list_table(content, target, 1, 24.0, 204.0, 300.0, 320.0);
-        let pac_table = settings_list_table(content, target, 2, 350.0, 204.0, 300.0, 320.0);
-        let filter_table = settings_list_table(content, target, 3, 676.0, 204.0, 300.0, 320.0);
+        let listener_table = settings_list_table(content, target, 1, 20.0, 300.0, 285.0, 120.0);
+        let pac_table = settings_list_table(content, target, 2, 330.0, 300.0, 285.0, 120.0);
+        let filter_table = settings_list_table(content, target, 3, 640.0, 300.0, 285.0, 120.0);
         *LISTENER_TABLE.lock().unwrap() = listener_table as usize;
         *PAC_FILE_TABLE.lock().unwrap() = pac_table as usize;
         *FILTER_LIST_TABLE.lock().unwrap() = filter_table as usize;
-        settings_toolbar(content, target, 1100, 24.0);
-        settings_toolbar(content, target, 1200, 350.0);
-        settings_toolbar(content, target, 1300, 676.0);
+        settings_toolbar(content, target, 1100, 20.0);
+        settings_toolbar(content, target, 1200, 330.0);
+        settings_toolbar(content, target, 1300, 640.0);
         settings_button(
             content,
             target,
             "Add URL…",
             "Add a remote HTTP or HTTPS PAC URL",
             1207,
-            rect(350.0, 134.0, 82.0, 26.0),
+            rect(330.0, 234.0, 82.0, 26.0),
             None,
         );
         settings_button(
@@ -2755,7 +2716,7 @@ mod native {
             "Open / View",
             "Open the selected local PAC file or view a remote PAC URL",
             1206,
-            rect(438.0, 134.0, 92.0, 26.0),
+            rect(418.0, 234.0, 92.0, 26.0),
             None,
         );
         settings_button(
@@ -2764,7 +2725,7 @@ mod native {
             "Copy Path",
             "Copy the selected PAC file path or URL to the clipboard",
             1208,
-            rect(536.0, 134.0, 82.0, 26.0),
+            rect(516.0, 234.0, 82.0, 26.0),
             None,
         );
         settings_button(
@@ -2773,13 +2734,13 @@ mod native {
             "Cancel",
             "Cancel the remote PAC download",
             1209,
-            rect(350.0, 104.0, 68.0, 24.0),
+            rect(330.0, 204.0, 68.0, 24.0),
             None,
         );
         let status_allocated: *mut AnyObject =
             unsafe { msg_send![objc2::class!(NSTextField), alloc] };
         let status: *mut AnyObject =
-            unsafe { msg_send![status_allocated, initWithFrame:rect(422.0, 105.0, 228.0, 22.0)] };
+            unsafe { msg_send![status_allocated, initWithFrame:rect(402.0, 205.0, 208.0, 22.0)] };
         let _: () = unsafe { msg_send![status, setStringValue:cocoa_string("")] };
         let _: () = unsafe { msg_send![status, setTag:1210isize] };
         let _: () = unsafe { msg_send![status, setEditable:objc2::runtime::Bool::NO] };
@@ -2793,32 +2754,14 @@ mod native {
             "Add URL…",
             "Add a remote HTTP or HTTPS filter list",
             1307,
-            rect(676.0, 134.0, 106.0, 26.0),
+            rect(640.0, 234.0, 106.0, 26.0),
             None,
         );
         settings_label(
             content,
-            "Release info JSON URL (blank uses GitHub Releases)",
-            676.0,
-            106.0,
-            300.0,
-            22.0,
-            false,
-        );
-        let release_info_url_field = settings_text_field(
-            content,
-            target,
-            3004,
-            prefs.release_info_url.as_deref().unwrap_or_default(),
-            rect(676.0, 78.0, 300.0, 24.0),
-        );
-        *RELEASE_INFO_URL_FIELD.lock().unwrap() = release_info_url_field as usize;
-
-        settings_label(
-            content,
             "Connection behavior",
             24.0,
-            108.0,
+            142.0,
             440.0,
             24.0,
             true,
@@ -2837,11 +2780,11 @@ mod native {
         );
         settings_label(
             content,
-            "Tunnel every proxied HTTP request through CONNECT.",
+            "Tunnel HTTP requests with CONNECT.",
             24.0,
-            42.0,
+            72.0,
             250.0,
-            36.0,
+            22.0,
             false,
         );
         settings_checkbox(
@@ -2858,11 +2801,11 @@ mod native {
         );
         settings_label(
             content,
-            "Try a direct connection if all PAC routes fail.",
+            "Go direct if every PAC route fails.",
             300.0,
-            42.0,
+            72.0,
             220.0,
-            36.0,
+            22.0,
             false,
         );
         #[cfg(feature = "negotiate")]
@@ -2881,11 +2824,11 @@ mod native {
         #[cfg(feature = "negotiate")]
         settings_label(
             content,
-            "Authenticate to the proxy with your system credentials.",
+            "Use system credentials to authenticate.",
             540.0,
-            42.0,
+            72.0,
             280.0,
-            36.0,
+            22.0,
             false,
         );
         settings_button(
@@ -2894,7 +2837,7 @@ mod native {
             "Close",
             "Close settings",
             1000,
-            rect(842.0, 22.0, 94.0, 30.0),
+            rect(832.0, 22.0, 94.0, 30.0),
             Some("\r"),
         );
         Ok((window, target))
@@ -3009,7 +2952,11 @@ mod native {
         let get = |name: &str| -> *mut AnyObject {
             unsafe { msg_send![defaults,objectForKey:key(name)] }
         };
-        let mut p = Preferences::default();
+        let release_info_url = Preferences::load(defaults_path)?.release_info_url;
+        let mut p = Preferences {
+            release_info_url,
+            ..Preferences::default()
+        };
         let port = get("port");
         if port.is_null() {
             let _: () =
@@ -3116,24 +3063,9 @@ mod native {
                 }
             }
         }
-        let release_info_url = get("releaseInfoUrl");
-        if release_info_url.is_null() {
-            if let Some(url) = &p.release_info_url {
-                let _: () = unsafe {
-                    msg_send![defaults,setObject:cocoa_string(url),forKey:key("releaseInfoUrl")]
-                };
-            }
-        } else {
-            let bytes: *const std::ffi::c_char = unsafe { msg_send![release_info_url, UTF8String] };
-            p.release_info_url = (!bytes.is_null()).then(|| {
-                unsafe { std::ffi::CStr::from_ptr(bytes) }
-                    .to_string_lossy()
-                    .into_owned()
-            });
-            if p.release_info_url.as_deref().is_some_and(str::is_empty) {
-                p.release_info_url = None;
-            }
-        }
+        // The release metadata endpoint is an expert-only setting stored in
+        // preferences.json, not in the visible native settings controls.
+        let _: () = unsafe { msg_send![defaults,removeObjectForKey:key("releaseInfoUrl")] };
         p.save(defaults_path)?;
         Ok(p)
     }
@@ -3186,15 +3118,7 @@ mod native {
         let _: () = unsafe {
             msg_send![d,setBool:objc2::runtime::Bool::new(p.autostart),forKey:cocoa_string("autostart")]
         };
-        if let Some(url) = &p.release_info_url {
-            let _: () = unsafe {
-                msg_send![d,setObject:cocoa_string(url),forKey:cocoa_string("releaseInfoUrl")]
-            };
-        } else {
-            let _: () = unsafe {
-                msg_send![d,setObject:cocoa_string(""),forKey:cocoa_string("releaseInfoUrl")]
-            };
-        }
+        let _: () = unsafe { msg_send![d,removeObjectForKey:cocoa_string("releaseInfoUrl")] };
         let _: objc2::runtime::Bool = unsafe { msg_send![d, synchronize] };
         Ok(())
     }
@@ -3497,7 +3421,7 @@ mod native {
                 pac_file: pac_file.to_owned(),
                 pac_files: None,
                 filter_lists: None,
-                release_info_url: None,
+                release_info_url: Some("https://releases.example.test/unproxy.json".into()),
                 negotiate: true,
                 proxytunnel: false,
                 direct_fallback: false,
@@ -3506,6 +3430,15 @@ mod native {
             save_native_preferences(&prefs, &preferences_path, defaults)?;
             let roundtrip = native_preferences_with(defaults, &preferences_path)?;
             anyhow::ensure!(roundtrip == prefs, "native preferences did not roundtrip");
+            let legacy_release_url = cocoa_string("https://legacy.example.test/unproxy.json");
+            let _: () = unsafe {
+                msg_send![defaults,setObject:legacy_release_url,forKey:cocoa_string("releaseInfoUrl")]
+            };
+            let roundtrip = native_preferences_with(defaults, &preferences_path)?;
+            anyhow::ensure!(
+                roundtrip.release_info_url == prefs.release_info_url,
+                "preferences.json did not take precedence for the expert release URL"
+            );
 
             use std::os::unix::process::ExitStatusExt;
             let mut captured_script = None;
@@ -3841,7 +3774,7 @@ mod native {
             let mut has_cancel_fetch = false;
             let mut has_fetch_status = false;
             let mut has_filter_url = false;
-            let mut has_release_info_url = false;
+            let mut has_release_info_field = false;
             for index in 0..subview_count {
                 let subview: *mut AnyObject = unsafe { msg_send![subviews, objectAtIndex:index] };
                 let tag: isize = unsafe { msg_send![subview, tag] };
@@ -3851,7 +3784,7 @@ mod native {
                 has_cancel_fetch |= tag == 1209;
                 has_fetch_status |= tag == 1210;
                 has_filter_url |= tag == 1307;
-                has_release_info_url |= tag == 3004;
+                has_release_info_field |= tag == 3004;
             }
             anyhow::ensure!(
                 has_open_view,
@@ -3872,8 +3805,8 @@ mod native {
                 "settings window has no Add filter-list URL button"
             );
             anyhow::ensure!(
-                has_release_info_url,
-                "settings window has no release info URL field"
+                !has_release_info_field,
+                "release info URL should only be configured in preferences.json"
             );
             let original_listeners = prefs.effective_listeners();
 
@@ -4269,21 +4202,10 @@ mod native {
             anyhow::ensure!(
                 state.lock().unwrap().prefs.effective_filter_lists() == vec![filter_file]
             );
-            let release_info_field = *RELEASE_INFO_URL_FIELD.lock().unwrap() as *mut AnyObject;
-            let test_release_info_url = "https://releases.example.test/unproxy.json";
-            unsafe {
-                let _: () = msg_send![release_info_field, setStringValue:cocoa_string(test_release_info_url)];
-            }
-            commit_editor_preferences()?;
             anyhow::ensure!(
-                state.lock().unwrap().prefs.release_info_url.as_deref()
-                    == Some(test_release_info_url),
-                "release info URL was not applied"
+                state.lock().unwrap().prefs.release_info_url == prefs.release_info_url,
+                "settings edits changed the file-only release info URL"
             );
-            unsafe {
-                let _: () = msg_send![release_info_field, setStringValue:cocoa_string(prefs.release_info_url.as_deref().unwrap_or_default())];
-            }
-            commit_editor_preferences()?;
             *EDITOR_PREFS.lock().unwrap() = None;
             anyhow::ensure!(
                 validated_editor_preferences()
