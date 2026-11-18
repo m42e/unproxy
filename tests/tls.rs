@@ -181,9 +181,10 @@ async fn dns_fallback_posts_original_wire_bytes_inside_verified_nested_tls() {
         bytes[2] |= 0x80;
         primary.send_to(&bytes[..len], peer).await.unwrap();
     });
+    let tls_acceptor = acceptor();
     let proxy_task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        let mut outer_tls = acceptor().accept(stream).await.unwrap();
+        let mut outer_tls = tls_acceptor.accept(stream).await.unwrap();
         let connect_head = read_head(&mut outer_tls).await;
         assert!(connect_head.starts_with("CONNECT localhost:8443 HTTP/1.1"));
         assert!(
@@ -196,7 +197,7 @@ async fn dns_fallback_posts_original_wire_bytes_inside_verified_nested_tls() {
             .await
             .unwrap();
         // The second TLS handshake represents the destination inside the proxy tunnel.
-        let mut endpoint_tls = acceptor().accept(outer_tls).await.unwrap();
+        let mut endpoint_tls = tls_acceptor.accept(outer_tls).await.unwrap();
         let head = read_head(&mut endpoint_tls).await.to_ascii_lowercase();
         assert!(head.starts_with("post /dns-query?fixture=1 http/1.1"));
         assert!(head.contains("host: localhost:8443"));

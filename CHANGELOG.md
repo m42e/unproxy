@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.6
+
+- Fix the macOS sandbox permissions for the shared PAC, preferences, and log
+  directory so the menu bar app can start the proxy and open PAC files.
+
 ## 0.4.5
 
 - Add `unproxy check-upgrade` and desktop update checks, with GitHub Releases

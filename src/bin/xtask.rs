@@ -726,7 +726,10 @@ fn package(
                         &serde_json::json!({"version":unproxy::VERSION,"bundle_id":"de.m42e.unproxy.app","helper_bundle_id":"de.m42e.unproxy.login-helper","minimum_macos":"11.1"}),
                     )?,
                 )?;
-                sign_macos_code(&app.join("MacOS/unproxy"), None)?;
+                sign_macos_code(
+                    &app.join("MacOS/unproxy"),
+                    Some(Path::new("assets/child-entitlements.plist")),
+                )?;
                 sign_macos_code(
                     helper.parent().context("helper bundle has no parent")?,
                     Some(Path::new("assets/child-entitlements.plist")),

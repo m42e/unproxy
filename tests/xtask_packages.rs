@@ -35,12 +35,25 @@ impl Fixture {
     }
 
     fn command(&self, args: &[&str]) -> Output {
-        self.command_with_staging_collision(args, None)
+        self.command_with_env_and_staging_collision(args, &[], None)
+    }
+
+    fn command_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
+        self.command_with_env_and_staging_collision(args, envs, None)
     }
 
     fn command_with_staging_collision(
         &self,
         args: &[&str],
+        collision_output: Option<&str>,
+    ) -> Output {
+        self.command_with_env_and_staging_collision(args, &[], collision_output)
+    }
+
+    fn command_with_env_and_staging_collision(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
         collision_output: Option<&str>,
     ) -> Output {
         let current_path = std::env::var_os("PATH").unwrap_or_default();
@@ -55,6 +68,9 @@ impl Fixture {
             .env_remove("APPLE_SIGNING_IDENTITY")
             .env_remove("APPLE_INSTALLER_SIGNING_IDENTITY")
             .args(args);
+        for &(key, value) in envs {
+            command.env(key, value);
+        }
         if let Some(output) = collision_output {
             command.env("STAGING_COLLISION_DIR", output);
         }
@@ -148,6 +164,23 @@ cp -R ./. "$CAPTURE_DIR/zip-$n/"
     }
     f.asset("de.m42e.unproxy.plist", "launch agent");
     f.asset("unproxy.service", "service");
+}
+
+#[test]
+fn macos_app_entitlements_cover_the_shared_support_directory() {
+    let support_entitlement =
+        "com.apple.security.temporary-exception.files.home-relative-path.read-write";
+    let support_path = "/Library/Application Support/Unproxy/";
+    for entitlements in [
+        include_str!("../assets/app-entitlements.plist"),
+        include_str!("../assets/child-entitlements.plist"),
+    ] {
+        assert!(entitlements.contains(support_entitlement));
+        assert!(entitlements.contains(support_path));
+    }
+    assert!(
+        include_str!("../assets/child-entitlements.plist").contains("com.apple.security.inherit")
+    );
 }
 
 #[test]
@@ -649,6 +682,47 @@ printf 'fixture pkg' > "$out"
                 .is_file()
         );
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn app_signs_embedded_proxy_with_inherited_support_entitlements() {
+    let f = Fixture::new();
+    seed_common(&f);
+    let target = "aarch64-apple-darwin";
+    for name in ["unproxy-app", "unproxy", "unproxy-login-helper"] {
+        f.binary(Some(target), name);
+    }
+    f.tool(
+        "codesign",
+        r#"printf '%s\n' "$*" >> "$CAPTURE_DIR/codesign.calls""#,
+    );
+    f.tool(
+        "pkgbuild",
+        r#"
+out=""
+for arg do out=$arg; done
+printf 'fixture pkg' > "$out"
+"#,
+    );
+
+    let output = f.command_with_env(
+        &[
+            "package", "--format", "app", "--target", target, "--output", "dist/app",
+        ],
+        &[("APPLE_SIGNING_IDENTITY", "test-identity")],
+    );
+    assert_ok(output);
+
+    let calls = std::fs::read_to_string(f.capture.join("codesign.calls")).unwrap();
+    let calls = calls.lines().collect::<Vec<_>>();
+    assert_eq!(calls.len(), 6);
+    assert!(calls[0].contains("--entitlements assets/child-entitlements.plist"));
+    assert!(calls[0].ends_with("/Unproxy.app/Contents/MacOS/unproxy"));
+    assert!(calls[2].contains("--entitlements assets/child-entitlements.plist"));
+    assert!(calls[2].ends_with("/UnproxyLoginHelper.app"));
+    assert!(calls[4].contains("--entitlements assets/app-entitlements.plist"));
+    assert!(calls[4].ends_with("/Unproxy.app"));
 }
 
 #[cfg(target_os = "macos")]

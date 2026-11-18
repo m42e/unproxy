@@ -5,4 +5,7 @@
 <key>com.apple.security.network.client</key><true/>
 <key>com.apple.security.network.server</key><true/>
 <key>com.apple.security.files.user-selected.read-only</key><true/>
+<!-- Share PAC files, preferences, and logs with the inherited proxy process. -->
+<key>com.apple.security.temporary-exception.files.home-relative-path.read-write</key>
+<array><string>/Library/Application Support/Unproxy/</string></array>
 </dict></plist>
