@@ -38,6 +38,7 @@ impl Fixture {
         self.command_with_env_and_staging_collision(args, &[], None)
     }
 
+    #[cfg(target_os = "macos")]
     fn command_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
         self.command_with_env_and_staging_collision(args, envs, None)
     }
