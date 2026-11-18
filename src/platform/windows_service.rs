@@ -395,7 +395,7 @@ fn binary_path_for(helper: &std::path::Path, program_files: &std::path::Path) ->
             .to_string_lossy()
             .to_lowercase()
             .starts_with(&protected_prefix),
-        "Windows services must run from a protected Program Files directory; run install.ps1 -AsService"
+        "Windows services must run from a protected Program Files directory; follow the verified Windows service installation procedure"
     );
     let mut quoted = vec![b'"' as u16];
     quoted.extend(protected_executable.as_os_str().encode_wide());

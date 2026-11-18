@@ -80,6 +80,73 @@ fn windows_installer_checks_effective_listeners_and_manages_user_proxy_environme
     assert!(uninstaller.contains("SetEnvironmentVariable($name, $previousValue, 'User')"));
 }
 
+#[test]
+fn windows_package_scripts_never_relaunch_for_elevation() {
+    for script in [
+        include_str!("../assets/install.ps1"),
+        include_str!("../assets/uninstall.ps1"),
+    ] {
+        let script = script.to_ascii_lowercase();
+        assert!(!script.contains("-verb runas"));
+        assert!(!script.contains("-executionpolicy bypass"));
+        assert!(script.contains("-not $administrator -or $psscriptroot -notmatch $stagepattern"));
+    }
+}
+
+#[test]
+fn windows_service_setup_uses_an_independent_release_digest() {
+    let docs = include_str!("../docs/windows-service-setup.md").replace("\r\n", "\n");
+    let prose = docs.replace('\n', " ");
+    let setup = docs
+        .split("```powershell")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    assert!(prose.contains("over HTTPS on a trusted machine or session"));
+    assert!(prose.contains("Do not use a checksum file from the same writable download directory"));
+    let trusted_digest = setup.find("$expected = Read-Host").unwrap();
+    let verify_archive = setup.find("Get-FileHash -LiteralPath $archive").unwrap();
+    let extract_archive = setup
+        .find("ExtractToDirectory($archive, $payload)")
+        .unwrap();
+    assert!(trusted_digest < verify_archive);
+    assert!(verify_archive < extract_archive);
+}
+
+#[test]
+fn installation_overview_links_to_online_only_service_commands() {
+    let overview = include_str!("../docs/installation.md");
+    assert!(overview.contains("https://m42e.github.io/unproxy/docs/windows-service-setup.html"));
+    assert!(!overview.contains("Get-FileHash"));
+    assert!(!overview.contains("-AsService"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_service_setup_verifies_the_package_before_running_either_script() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg("tests/windows_service_package.ps1")
+        .arg("-WorkDir")
+        .arg(temp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "PowerShell service package check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_installer_port_probe_uses_custom_ports_and_ignores_unrelated_addresses() {

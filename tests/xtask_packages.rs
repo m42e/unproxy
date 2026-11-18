@@ -143,7 +143,12 @@ cp -R ./. "$CAPTURE_DIR/zip-$n/"
     std::fs::create_dir_all(f.root.path().join("docs")).unwrap();
     std::fs::write(
         f.root.path().join("docs/installation.md"),
-        "fixture installation guide",
+        "fixture installation guide\nhttps://m42e.github.io/unproxy/docs/windows-service-setup.html",
+    )
+    .unwrap();
+    std::fs::write(
+        f.root.path().join("docs/windows-service-setup.md"),
+        "privileged service setup fixture with Get-FileHash",
     )
     .unwrap();
     f.asset("proxy.pac", "function FindProxyForURL(){return 'DIRECT';}");
@@ -211,6 +216,10 @@ fn portable_and_windows_packages_stage_expected_files() {
     ] {
         assert!(portable.join(name).is_file(), "missing {name}");
     }
+    let portable_guide = std::fs::read_to_string(portable.join("docs/installation.md")).unwrap();
+    assert!(portable_guide.contains("windows-service-setup.html"));
+    assert!(!portable_guide.contains("Get-FileHash"));
+    assert!(!portable.join("docs/windows-service-setup.md").exists());
     assert!(
         std::fs::read_to_string(portable.join("metadata.json"))
             .unwrap()
@@ -241,6 +250,10 @@ fn portable_and_windows_packages_stage_expected_files() {
     assert!(staged.join("install.ps1").is_file());
     assert!(staged.join("uninstall.ps1").is_file());
     assert!(staged.join("docs/installation.md").is_file());
+    let packaged_guide = std::fs::read_to_string(staged.join("docs/installation.md")).unwrap();
+    assert!(packaged_guide.contains("windows-service-setup.html"));
+    assert!(!packaged_guide.contains("Get-FileHash"));
+    assert!(!staged.join("docs/windows-service-setup.md").exists());
     assert!(
         std::fs::read_to_string(staged.join("metadata.json"))
             .unwrap()

@@ -167,7 +167,16 @@ fn main() {
     fn installation_guide(&self) {
         let docs = self.root.path().join("docs");
         std::fs::create_dir_all(&docs).unwrap();
-        std::fs::write(docs.join("installation.md"), "fixture installation guide").unwrap();
+        std::fs::write(
+            docs.join("installation.md"),
+            "fixture installation guide\nhttps://m42e.github.io/unproxy/docs/windows-service-setup.html",
+        )
+        .unwrap();
+        std::fs::write(
+            docs.join("windows-service-setup.md"),
+            "privileged service setup fixture with Get-FileHash",
+        )
+        .unwrap();
     }
 
     fn command(&self, args: &[&str]) -> Output {
@@ -352,10 +361,10 @@ fn windows_package_is_a_real_zip_with_the_staged_payload() {
     );
     let packaged_readme = std::fs::read_to_string(extracted.join("README.md")).unwrap();
     assert_eq!(packaged_readme, readme);
-    assert_eq!(
-        std::fs::read_to_string(extracted.join("docs/installation.md")).unwrap(),
-        "fixture installation guide"
-    );
+    let packaged_guide = std::fs::read_to_string(extracted.join("docs/installation.md")).unwrap();
+    assert!(packaged_guide.contains("windows-service-setup.html"));
+    assert!(!packaged_guide.contains("Get-FileHash"));
+    assert!(!extracted.join("docs/windows-service-setup.md").exists());
     for guidance in [
         "Get-ChildItem -File -Recurse | Unblock-File",
         ".\\install.ps1",

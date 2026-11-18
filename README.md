@@ -35,8 +35,9 @@ override them. If either enforces `AllSigned` or `Restricted`, contact your IT
 administrator for an approved installation method; unblocking does not
 satisfy those policies.
 
-For a Windows service instead of the tray app, run `.\install.ps1 -AsService`
-after unblocking the package. This installation requires administrator approval.
+For a Windows service, follow the [verified service installation and removal
+procedure](https://m42e.github.io/unproxy/docs/windows-service-setup.html) in
+an administrator PowerShell session.
 
 ## Use it
 

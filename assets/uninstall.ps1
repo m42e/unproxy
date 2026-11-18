@@ -1,36 +1,40 @@
-param([switch]$RemoveUserData)
+param([switch]$RemoveUserData, [switch]$AsService)
 $ErrorActionPreference = 'Stop'
 
-$serviceRoot = Join-Path $env:ProgramFiles 'Unproxy'
+$administrator = ([Security.Principal.WindowsPrincipal]::new(
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $serviceData = Join-Path $env:ProgramData 'Unproxy'
-if (((Test-Path -LiteralPath $serviceRoot) -or
-    ($RemoveUserData -and (Test-Path -LiteralPath $serviceData))) -and
-    -not ([Security.Principal.WindowsPrincipal]::new(
-        [Security.Principal.WindowsIdentity]::GetCurrent()
-    )).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
-    if ($RemoveUserData) { $arguments += ' -RemoveUserData' }
-    $elevated = Start-Process powershell.exe -Verb RunAs -ArgumentList $arguments -Wait -PassThru
-    exit $elevated.ExitCode
+if ($AsService) {
+    $programFiles = [Environment]::GetFolderPath('ProgramFiles')
+    $stagePattern = '^' + [regex]::Escape($programFiles) + '\\Unproxy-setup-[0-9a-f]{32}\\payload\z'
+    if (-not $administrator -or $PSScriptRoot -notmatch $stagePattern) {
+        throw 'Use the verified Windows service setup procedure at https://m42e.github.io/unproxy/docs/installation.html#windows-service'
+    }
+    $serviceRoot = Join-Path $programFiles 'Unproxy'
+    if (Test-Path -LiteralPath $serviceRoot) {
+        $service = Get-Service -Name 'Unproxy' -ErrorAction SilentlyContinue
+        if ($service) {
+            $service.Dispose()
+            $serviceRegister = Join-Path $PSScriptRoot 'unproxy-register.exe'
+            & $serviceRegister uninstall
+            if ($LASTEXITCODE -ne 0) { throw 'Could not remove the Unproxy service registration.' }
+        }
+        Remove-Item -LiteralPath $serviceRoot -Recurse -Force
+        if (-not $RemoveUserData) {
+            Write-Host "Service configuration and logs were preserved in $serviceData."
+        }
+    }
+    if ($RemoveUserData) {
+        Remove-Item $serviceData -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return
 }
 
-if (Test-Path -LiteralPath $serviceRoot) {
-    $service = Get-Service -Name 'Unproxy' -ErrorAction SilentlyContinue
-    if ($service) {
-        $service.Dispose()
-        $serviceRegister = Join-Path $serviceRoot 'unproxy-register.exe'
-        & $serviceRegister uninstall
-        if ($LASTEXITCODE -ne 0) { throw 'Could not remove the Unproxy service registration.' }
-    }
-    Remove-Item $serviceRoot -Recurse -Force
-    if (-not $RemoveUserData) {
-        Write-Host "Service configuration and logs were preserved in $serviceData."
-    }
+if ($administrator) { throw 'Run the per-user tray uninstaller in a non-elevated PowerShell session.' }
+if (Test-Path -LiteralPath (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Unproxy')) {
+    Write-Host 'To remove the Windows service, follow https://m42e.github.io/unproxy/docs/installation.html#windows-service'
 }
-if ($RemoveUserData) {
-    Remove-Item $serviceData -Recurse -Force -ErrorAction SilentlyContinue
-}
-
 $root = Join-Path $env:LOCALAPPDATA 'Unproxy'
 $destination = Join-Path $root 'bin'
 $environmentBackupPath = Join-Path $root 'environment-before-install.json'

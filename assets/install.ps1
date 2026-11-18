@@ -133,16 +133,17 @@ function Get-ConfiguredServiceListeners([string]$configPath) {
     return $listeners.ToArray()
 }
 
+$administrator = ([Security.Principal.WindowsPrincipal]::new(
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if ($AsService) {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '" -AsService'
-        $elevated = Start-Process powershell.exe -Verb RunAs -ArgumentList $arguments -Wait -PassThru
-        exit $elevated.ExitCode
+    $programFiles = [Environment]::GetFolderPath('ProgramFiles')
+    $stagePattern = '^' + [regex]::Escape($programFiles) + '\\Unproxy-setup-[0-9a-f]{32}\\payload\z'
+    if (-not $administrator -or $PSScriptRoot -notmatch $stagePattern) {
+        throw 'Use the verified Windows service setup procedure at https://m42e.github.io/unproxy/docs/installation.html#windows-service'
     }
 
-    $serviceRoot = Join-Path $env:ProgramFiles 'Unproxy'
+    $serviceRoot = Join-Path $programFiles 'Unproxy'
     $serviceData = Join-Path $env:ProgramData 'Unproxy'
     $serviceExecutable = Join-Path $serviceRoot 'unproxy.exe'
     $serviceRegister = Join-Path $serviceRoot 'unproxy-register.exe'
@@ -218,6 +219,7 @@ if ($AsService) {
     return
 }
 
+if ($administrator) { throw 'Run the per-user tray installer in a non-elevated PowerShell session.' }
 $root = Join-Path $env:LOCALAPPDATA 'Unproxy'
 $destination = Join-Path $root 'bin'
 $prefsFile = Join-Path $root 'preferences.json'

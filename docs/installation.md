@@ -60,14 +60,15 @@ applications need to be reopened to read the updated environment.
 
 ### Windows service
 
-To install Unproxy as a Windows service instead, run this from the extracted
-folder:
+For service installation, upgrade, or removal, follow the [verified Windows
+service procedure](https://m42e.github.io/unproxy/docs/windows-service-setup.html).
+The privileged setup commands are published online and omitted from the
+installation guide bundled with release packages.
 
-    .\install.ps1 -AsService
-
-Windows asks for administrator approval. The service starts at boot and runs
-without the tray app. It installs its executable under `C:\Program Files\Unproxy`
-and keeps its settings, PAC file, and log under `C:\ProgramData\Unproxy`.
+Choose `install` for a new installation or an upgrade. The service starts at
+boot and runs without the tray app. It installs its executable under
+`C:\Program Files\Unproxy` and keeps its settings, PAC file, and log under
+`C:\ProgramData\Unproxy`.
 The installer creates `C:\ProgramData\Unproxy\unproxyrc` and `proxy.pac` on
 the first service install. Edit those files there to configure the service. If
 the package includes Negotiate support, add `--negotiate` to `unproxyrc` to use
@@ -195,11 +196,15 @@ desktop **Check for Updates** action; omit it to use GitHub Releases.
 
 ### Windows removal
 
-On Windows, the `-RemoveUserData` option also removes service configuration,
-PAC files, and logs.
+For a service installation, follow the [Windows service procedure](#windows-service).
+Choose `uninstall` to preserve the service configuration, PAC files, and logs,
+or `purge` to remove them. If the account also has a per-user tray installation,
+remove that separately with the non-elevated per-user uninstaller to restore its
+proxy environment settings.
 
-Run `uninstall.ps1` from the extracted Windows ZIP. Add `-RemoveUserData` if
-you also want to delete preferences and logs.
+To remove a per-user tray installation, run `uninstall.ps1` from the extracted
+Windows ZIP in a non-elevated PowerShell session. Add `-RemoveUserData` to
+delete that user's preferences and logs.
 
 ```powershell
 .\uninstall.ps1

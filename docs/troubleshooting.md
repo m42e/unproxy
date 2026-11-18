@@ -56,7 +56,7 @@ Press Ctrl+C to end the diagnostic run, then start the proxy again from the tray
 
 ### Check an optional Windows service
 
-These commands apply to a service installed with `install.ps1 -AsService`, which runs without the tray app:
+These commands apply to a [Windows service installation](windows-service-setup.md), which runs without the tray app:
 
 ```powershell
 & "$env:ProgramFiles\Unproxy\unproxyctl.exe" status

@@ -7,6 +7,7 @@ use unproxy::tools::html_escape;
 const USER_PAGES: &[(&str, &str)] = &[
     ("user-guide", "Quick start"),
     ("installation", "Installation"),
+    ("windows-service-setup", "Windows service setup"),
     ("desktop", "Desktop app"),
     ("applications", "Connect applications"),
     ("routing", "PAC & routing"),
@@ -336,6 +337,7 @@ mod tests {
         for page in [
             "user-guide",
             "installation",
+            "windows-service-setup",
             "desktop",
             "applications",
             "routing",
@@ -356,6 +358,10 @@ mod tests {
 
         let user_guide = std::fs::read_to_string(output.path().join("user-guide.html")).unwrap();
         assert!(!user_guide.contains("<p class=nav-label>Contributors</p>"));
+        let service_setup =
+            std::fs::read_to_string(output.path().join("windows-service-setup.html")).unwrap();
+        assert!(service_setup.contains("Get-FileHash"));
+        assert!(service_setup.contains("trusted machine or session"));
         let routing = std::fs::read_to_string(output.path().join("routing.html")).unwrap();
         assert!(routing.contains("<th>Use case</th>"));
         assert!(routing.contains("<th>Load / cases tested</th>"));
