@@ -485,6 +485,15 @@ impl ChildLifecycle {
         }
         self.child.is_some()
     }
+
+    /// Drop the process handle without stopping the child. Windows tray
+    /// shutdown uses this only when managed proxy settings could not be
+    /// withdrawn, so the advertised endpoint remains owned.
+    #[cfg(windows)]
+    pub fn leave_running(&mut self) {
+        self.child.take();
+    }
+
     pub fn start(&mut self, exe: &Path, prefs: &Preferences) -> Result<()> {
         self.spawn(exe, prefs, None, false)
     }

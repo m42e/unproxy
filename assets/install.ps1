@@ -85,6 +85,101 @@ function Assert-ProxyListenersAvailable([string[]]$listeners) {
     }
 }
 
+function Withdraw-ManagedProxyEnvironment([string]$supportRoot) {
+    $trackingPath = Join-Path $supportRoot 'environment-before-install.json'
+    if (-not (Test-Path -LiteralPath $trackingPath)) { return }
+    $tracking = Get-Content -LiteralPath $trackingPath -Raw | ConvertFrom-Json
+    foreach ($name in @('http_proxy', 'https_proxy')) {
+        $installedProperty = $tracking.installed.PSObject.Properties[$name]
+        $pendingProperty = $tracking.installed.PSObject.Properties["${name}_pending"]
+        $currentValue = [Environment]::GetEnvironmentVariable($name, 'User')
+        $managedMatch = $false
+        foreach ($property in @($installedProperty, $pendingProperty)) {
+            if ($property -and $null -ne $property.Value -and
+                $currentValue -ceq [string]$property.Value) {
+                $managedMatch = $true
+            }
+        }
+        if (-not $managedMatch) { continue }
+        $previousValue = $tracking.original.$name
+        if ($null -ne $previousValue -and $currentValue -ceq [string]$previousValue) {
+            if ($installedProperty -and $null -ne $installedProperty.Value -and
+                $currentValue -ceq [string]$installedProperty.Value) {
+                throw "Cannot safely withdraw the original $name value while it names Unproxy's managed endpoint."
+            }
+            continue
+        }
+        [Environment]::SetEnvironmentVariable($name, $previousValue, 'User')
+        if ($null -eq $previousValue) {
+            Remove-Item -Path ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+        } else {
+            Set-Item -Path ("Env:{0}" -f $name) -Value ([string]$previousValue)
+        }
+    }
+}
+
+function Clear-ManagedProxyTracking([string]$supportRoot) {
+    $trackingPath = Join-Path $supportRoot 'environment-before-install.json'
+    if (-not (Test-Path -LiteralPath $trackingPath)) { return }
+    $tracking = Get-Content -LiteralPath $trackingPath -Raw | ConvertFrom-Json
+    foreach ($name in @('http_proxy', 'https_proxy')) {
+        [void]$tracking.installed.PSObject.Properties.Remove($name)
+        [void]$tracking.installed.PSObject.Properties.Remove("${name}_pending")
+    }
+    $temporaryPath = "$trackingPath.$PID.tmp"
+    $tracking | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
+    Move-Item -LiteralPath $temporaryPath -Destination $trackingPath -Force
+}
+
+function Stop-InstalledTray([string]$trayExecutable) {
+    $tray = Get-CimInstance Win32_Process -Filter "Name='UnproxyTray.exe'" |
+        Where-Object { $_.ExecutablePath -eq $trayExecutable }
+    if (-not $tray) { return }
+    try {
+        $event = [Threading.EventWaitHandle]::OpenExisting('Local\UnproxyTrayExit')
+        $event.Set() | Out-Null
+        $event.Dispose()
+    } catch { }
+    $deadline = (Get-Date).AddSeconds(10)
+    do {
+        $tray = Get-CimInstance Win32_Process -Filter "Name='UnproxyTray.exe'" |
+            Where-Object { $_.ExecutablePath -eq $trayExecutable }
+        if (-not $tray) { return }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $deadline)
+    if ($tray) {
+        $tray | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        $killDeadline = (Get-Date).AddSeconds(5)
+        do {
+            $tray = Get-CimInstance Win32_Process -Filter "Name='UnproxyTray.exe'" |
+                Where-Object { $_.ExecutablePath -eq $trayExecutable }
+            if (-not $tray) { return }
+            Start-Sleep -Milliseconds 200
+        } while ((Get-Date) -lt $killDeadline)
+        Write-Warning 'The tray is still exiting after the force-stop request; waiting before environment reconciliation.'
+        do {
+            $tray = Get-CimInstance Win32_Process -Filter "Name='UnproxyTray.exe'" |
+                Where-Object { $_.ExecutablePath -eq $trayExecutable }
+            if (-not $tray) { return }
+            Start-Sleep -Milliseconds 200
+        } while ($true)
+    }
+}
+
+function Stop-InstalledProxy([string]$proxyExecutable) {
+    Get-CimInstance Win32_Process -Filter "Name='unproxy.exe'" |
+        Where-Object { $_.ExecutablePath -eq $proxyExecutable } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $deadline = (Get-Date).AddSeconds(5)
+    do {
+        $proxy = Get-CimInstance Win32_Process -Filter "Name='unproxy.exe'" |
+            Where-Object { $_.ExecutablePath -eq $proxyExecutable }
+        if (-not $proxy) { return }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $deadline)
+    throw 'The existing Unproxy proxy could not be stopped; installation is aborted.'
+}
+
 function ConvertFrom-UnproxyConfigLine([string]$line) {
     $tokens = [System.Collections.Generic.List[string]]::new()
     $token = [System.Text.StringBuilder]::new()
@@ -332,28 +427,15 @@ if ($AsService) {
     $serviceLog = Join-Path (Join-Path $serviceData 'logs') 'unproxy.log'
     $serviceConfig = Join-Path $serviceData 'unproxyrc'
     $serviceListeners = @('127.0.0.1:3128', '[::1]:3128')
-    Assert-ProxyListenersAvailable $serviceListeners
-
     $trayExecutable = Join-Path $env:LOCALAPPDATA 'Unproxy\bin\UnproxyTray.exe'
-    $tray = Get-CimInstance Win32_Process -Filter "Name='UnproxyTray.exe'" |
-        Where-Object { $_.ExecutablePath -eq $trayExecutable }
-    if ($tray) {
-        try {
-            $event = [Threading.EventWaitHandle]::OpenExisting('Local\UnproxyTrayExit')
-            $event.Set() | Out-Null
-            $event.Dispose()
-        } catch { }
-        $deadline = (Get-Date).AddSeconds(10)
-        do {
-            $tray = Get-CimInstance Win32_Process -Filter "Name='UnproxyTray.exe'" |
-                Where-Object { $_.ExecutablePath -eq $trayExecutable }
-            if (-not $tray) { break }
-            Start-Sleep -Milliseconds 200
-        } while ((Get-Date) -lt $deadline)
-        if ($tray) {
-            throw 'Close the Unproxy tray app before installing the Windows service.'
-        }
-    }
+    $traySupport = Join-Path $env:LOCALAPPDATA 'Unproxy'
+    Withdraw-ManagedProxyEnvironment $traySupport
+    Clear-ManagedProxyTracking $traySupport
+    Stop-InstalledTray $trayExecutable
+    Withdraw-ManagedProxyEnvironment $traySupport
+    Clear-ManagedProxyTracking $traySupport
+    Stop-InstalledProxy (Join-Path (Join-Path $env:LOCALAPPDATA 'Unproxy\bin') 'unproxy.exe')
+    Assert-ProxyListenersAvailable $serviceListeners
 
     $existing = Get-Service -Name 'Unproxy' -ErrorAction SilentlyContinue
     if ($existing -and $existing.Status -ne 'Stopped') {
@@ -478,6 +560,14 @@ if ($AsService) {
 if ($administrator) { throw 'Run the per-user tray installer in a non-elevated PowerShell session.' }
 $root = Join-Path $env:LOCALAPPDATA 'Unproxy'
 $destination = Join-Path $root 'bin'
+Withdraw-ManagedProxyEnvironment $root
+Clear-ManagedProxyTracking $root
+Stop-InstalledTray (Join-Path $destination 'UnproxyTray.exe')
+# An older tray might have been inside Settings when the exit signal arrived
+# and written its values again before it stopped. Reconcile once more after exit.
+Withdraw-ManagedProxyEnvironment $root
+Clear-ManagedProxyTracking $root
+Stop-InstalledProxy (Join-Path $destination 'unproxy.exe')
 $prefsFile = Join-Path $root 'preferences.json'
 $metadataFile = Join-Path $PSScriptRoot 'metadata.json'
 $metadata = if (Test-Path $metadataFile) {
@@ -585,20 +675,30 @@ $environmentBackupPath = Join-Path $root 'environment-before-install.json'
 if (Test-Path -LiteralPath $environmentBackupPath) {
     $environmentState = Get-Content $environmentBackupPath -Raw | ConvertFrom-Json
     $previousEnvironment = $environmentState.original
+    $previousInstalledEnvironment = $environmentState.installed
 } else {
     $previousEnvironment = [ordered]@{}
     foreach ($name in $proxyEnvironment.Keys) {
         $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'User')
     }
+    $previousInstalledEnvironment = $null
 }
+$installedEnvironment = [ordered]@{}
+foreach ($name in @('http_proxy', 'https_proxy')) {
+    if ($previousInstalledEnvironment -and
+        $previousInstalledEnvironment.PSObject.Properties.Name -contains $name) {
+        $installedEnvironment[$name] = [string]$previousInstalledEnvironment.$name
+    }
+}
+$installedEnvironment.no_proxy = $proxyEnvironment.no_proxy
 [ordered]@{
     original = $previousEnvironment
-    installed = $proxyEnvironment
+    # The tray owns the HTTP proxy values and advertises them only after the
+    # listener is ready. Keep no_proxy independent from the listener lifecycle.
+    installed = $installedEnvironment
 } | ConvertTo-Json -Depth 3 | Set-Content -Encoding UTF8 $environmentBackupPath
-foreach ($name in $proxyEnvironment.Keys) {
-    [Environment]::SetEnvironmentVariable($name, $proxyEnvironment[$name], 'User')
-    Set-Item -Path ("Env:{0}" -f $name) -Value $proxyEnvironment[$name]
-}
+[Environment]::SetEnvironmentVariable('no_proxy', $proxyEnvironment.no_proxy, 'User')
+Set-Item -Path 'Env:no_proxy' -Value $proxyEnvironment.no_proxy
 
 Write-Host "Installed Unproxy to $destination. User data is stored in $root."
 Start-Process (Join-Path $destination 'UnproxyTray.exe')

@@ -49,14 +49,19 @@ The tray installation does not create or use an `unproxyrc` file. Its settings
 are saved in `%LOCALAPPDATA%\Unproxy\preferences.json`; use **Settings…** in
 the tray menu to change them.
 
-The per-user installer sets `http_proxy` and `https_proxy` to the configured
-listener and sets `no_proxy` to bypass localhost. It saves any previous
-per-user values and restores them on uninstall if they have not been changed
-since installation. Reopen existing terminals and applications to pick up the new values.
-When you change the listener in tray Settings, Unproxy updates these per-user
-values only if they still match the values Unproxy installed; manually changed
-values are left alone. Windows notifies running applications, but most
-applications need to be reopened to read the updated environment.
+The per-user installer sets `no_proxy` to bypass localhost and saves previous
+per-user values. The tray advertises `http_proxy` and `https_proxy` only after
+the configured listener is ready, and withdraws its managed values when the
+proxy stops or the tray exits. It leaves values changed by the user or another
+application alone. Windows notifies running applications when these values
+change, but most applications need to be reopened to read the updated
+environment. Uninstall restores original values only when the current values
+still match those Unproxy installed. If a saved original `http_proxy` or
+`https_proxy` is identical to Unproxy's managed endpoint, stopping or
+uninstalling may be refused because the saved value cannot be distinguished
+from the active endpoint. Change or clear the current per-user variable so it
+no longer equals Unproxy's managed endpoint, then retry. This lets Unproxy stop
+without releasing an endpoint that applications still advertise.
 
 ### Windows service
 

@@ -43,8 +43,80 @@ fn preferences_have_expected_defaults_and_supported_flags() {
 }
 
 #[test]
-fn windows_installer_checks_effective_listeners_and_manages_user_proxy_environment() {
+fn windows_installer_gates_proxy_environment_on_tray_startup() {
     let installer = include_str!("../assets/install.ps1").replace("\r\n", "\n");
+    let per_user = installer
+        .split("if ($administrator) { throw 'Run the per-user tray installer")
+        .nth(1)
+        .expect("per-user installer branch");
+    let withdraw_old_environment = per_user
+        .find("Withdraw-ManagedProxyEnvironment $root")
+        .expect("old proxy settings are withdrawn");
+    let clear_old_tracking = per_user
+        .find("Clear-ManagedProxyTracking $root")
+        .expect("old tray cannot re-advertise through stale tracking");
+    let stop_old_tray = per_user
+        .find("Stop-InstalledTray (Join-Path $destination 'UnproxyTray.exe')")
+        .expect("old tray is stopped before replacement");
+    let withdraw_after_exit = per_user[stop_old_tray..]
+        .find("Withdraw-ManagedProxyEnvironment $root")
+        .map(|offset| stop_old_tray + offset)
+        .expect("old tray cannot leave managed values behind");
+    let clear_tracking_after_exit = per_user[withdraw_after_exit..]
+        .find("Clear-ManagedProxyTracking $root")
+        .map(|offset| withdraw_after_exit + offset)
+        .expect("post-exit tracking is cleared");
+    let check_listener = per_user
+        .find("Assert-ProxyListenersAvailable $configuredListeners")
+        .expect("replacement listeners are checked");
+    let copy_proxy = per_user
+        .find("Copy-Item (Join-Path $PSScriptRoot 'unproxy.exe')")
+        .expect("replacement proxy is installed");
+    let stop_proxy = per_user
+        .find("Stop-InstalledProxy (Join-Path $destination 'unproxy.exe')")
+        .expect("orphaned child is stopped after environment withdrawal");
+    assert!(withdraw_old_environment < stop_old_tray);
+    assert!(withdraw_old_environment < clear_old_tracking && clear_old_tracking < stop_old_tray);
+    assert!(stop_old_tray < withdraw_after_exit);
+    assert!(withdraw_after_exit < clear_tracking_after_exit);
+    assert!(clear_tracking_after_exit < stop_proxy && stop_proxy < check_listener);
+    assert!(check_listener < copy_proxy);
+    assert!(installer.contains("waiting before environment reconciliation"));
+    let tray_stop = installer
+        .split("function Stop-InstalledTray")
+        .nth(1)
+        .unwrap()
+        .split("function Stop-InstalledProxy")
+        .next()
+        .unwrap();
+    assert!(tray_stop.contains("} while ($true)"));
+    assert!(installer.contains("$currentValue -ceq [string]$property.Value"));
+    assert!(installer.contains("Cannot safely withdraw the original $name value"));
+    let installer_withdraw = installer
+        .split("function Withdraw-ManagedProxyEnvironment")
+        .nth(1)
+        .unwrap()
+        .split("function Clear-ManagedProxyTracking")
+        .next()
+        .unwrap();
+    let already_restored = installer_withdraw
+        .find("$currentValue -ceq [string]$previousValue")
+        .unwrap();
+    let attempted_value_guard = installer_withdraw[already_restored..]
+        .find("$currentValue -ceq [string]$installedProperty.Value")
+        .map(|offset| already_restored + offset)
+        .unwrap();
+    let ambiguous_original = installer_withdraw
+        .find("Cannot safely withdraw the original $name value")
+        .unwrap();
+    assert!(already_restored < attempted_value_guard && attempted_value_guard < ambiguous_original);
+    assert_eq!(
+        installer_withdraw
+            .matches("foreach ($property in @($installedProperty, $pendingProperty))")
+            .count(),
+        1
+    );
+
     let port_check = installer
         .find("Assert-ProxyListenersAvailable $configuredListeners")
         .expect("installer port check");
@@ -70,14 +142,96 @@ fn windows_installer_checks_effective_listeners_and_manages_user_proxy_environme
     assert!(installer.contains("http_proxy = $proxyUrl"));
     assert!(installer.contains("https_proxy = $proxyUrl"));
     assert!(installer.contains("no_proxy = 'localhost,127.0.0.1,::1'"));
-    assert!(installer.contains("SetEnvironmentVariable($name, $proxyEnvironment[$name], 'User')"));
+    assert!(
+        installer
+            .contains("SetEnvironmentVariable('no_proxy', $proxyEnvironment.no_proxy, 'User')")
+    );
+    assert!(!installer.contains("SetEnvironmentVariable($name, $proxyEnvironment[$name], 'User')"));
+    assert!(installer.contains("$previousInstalledEnvironment = $environmentState.installed"));
+    assert!(
+        installer
+            .contains("$installedEnvironment[$name] = [string]$previousInstalledEnvironment.$name")
+    );
     assert!(installer.contains("Remove-Item -LiteralPath $legacySettingsHelper -Force"));
     assert!(!installer.contains("Copy-Item (Join-Path $PSScriptRoot 'unproxy-tray.ps1')"));
 
     let uninstaller = include_str!("../assets/uninstall.ps1").replace("\r\n", "\n");
+    let per_user_uninstall = uninstaller
+        .split("if ($administrator) { throw 'Run the per-user tray uninstaller")
+        .nth(1)
+        .expect("per-user uninstaller branch");
+    let withdraw_before_exit = per_user_uninstall
+        .find("Withdraw-ManagedProxyEnvironment $environmentBackupPath")
+        .expect("proxy values are withdrawn before tray shutdown");
+    let clear_tracking_before_exit = per_user_uninstall
+        .find("Clear-ManagedProxyTracking $environmentBackupPath")
+        .expect("old tray cannot re-advertise through stale tracking");
+    let signal_exit = per_user_uninstall
+        .find("OpenExisting('Local\\UnproxyTrayExit')")
+        .expect("tray receives an exit request");
+    let timeout = per_user_uninstall
+        .find("AddSeconds(10)")
+        .expect("tray shutdown is bounded");
+    let force_stop = per_user_uninstall
+        .find("Stop-Process -Id $_.ProcessId -Force")
+        .expect("uninstaller force-stops a blocked tray");
+    let wait_for_exit = per_user_uninstall
+        .find("waiting before environment reconciliation")
+        .expect("uninstaller waits for actual tray exit after force stop");
+    let withdraw_after_exit = per_user_uninstall[wait_for_exit..]
+        .find("Withdraw-ManagedProxyEnvironment $environmentBackupPath")
+        .map(|offset| wait_for_exit + offset)
+        .expect("proxy values are reconciled after tray exit");
+    let clear_tracking_after_exit = per_user_uninstall[withdraw_after_exit..]
+        .find("Clear-ManagedProxyTracking $environmentBackupPath")
+        .map(|offset| withdraw_after_exit + offset)
+        .expect("post-exit tracking is cleared");
+    let stop_proxy = per_user_uninstall
+        .find("Stop-InstalledProxy $proxy")
+        .expect("proxy process cleanup");
+    let remove_binaries = per_user_uninstall
+        .find("Remove-Item $destination -Recurse -Force")
+        .expect("binary removal");
+    assert!(withdraw_before_exit < signal_exit);
+    assert!(
+        withdraw_before_exit < clear_tracking_before_exit
+            && clear_tracking_before_exit < signal_exit
+    );
+    assert!(signal_exit < timeout && timeout < force_stop);
+    assert!(force_stop < wait_for_exit && wait_for_exit < withdraw_after_exit);
+    assert!(withdraw_after_exit < clear_tracking_after_exit);
+    assert!(clear_tracking_after_exit < stop_proxy && stop_proxy < remove_binaries);
+    assert!(per_user_uninstall.contains("Stop-Process -Id $_.ProcessId -Force"));
+
     assert!(uninstaller.contains("environment-before-install.json"));
-    assert!(uninstaller.contains("$currentValue -ceq $installedValue"));
+    assert!(uninstaller.contains("$currentValue -ceq [string]$property.Value"));
+    assert!(uninstaller.contains("$currentValue -ceq [string]$previousValue"));
+    assert!(uninstaller.contains("$property -and $null -ne $property.Value"));
     assert!(uninstaller.contains("SetEnvironmentVariable($name, $previousValue, 'User')"));
+    let uninstaller_withdraw = uninstaller
+        .split("function Withdraw-ManagedProxyEnvironment")
+        .nth(1)
+        .unwrap()
+        .split("function Clear-ManagedProxyTracking")
+        .next()
+        .unwrap();
+    let already_restored = uninstaller_withdraw
+        .find("$currentValue -ceq [string]$previousValue")
+        .unwrap();
+    let attempted_value_guard = uninstaller_withdraw[already_restored..]
+        .find("$currentValue -ceq [string]$installedProperty.Value")
+        .map(|offset| already_restored + offset)
+        .unwrap();
+    let ambiguous_original = uninstaller_withdraw
+        .find("Cannot safely withdraw the original $name value")
+        .unwrap();
+    assert!(already_restored < attempted_value_guard && attempted_value_guard < ambiguous_original);
+    assert_eq!(
+        uninstaller_withdraw
+            .matches("foreach ($property in @($installedProperty, $pendingProperty))")
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -96,6 +250,27 @@ fn windows_service_installer_protects_policy_files_and_limits_service_write_acce
     let copy_binaries = service_setup
         .find("Copy-Item (Join-Path $PSScriptRoot 'unproxy.exe')")
         .expect("service binary installation");
+    let withdraw_tray_environment = service_setup
+        .find("Withdraw-ManagedProxyEnvironment $traySupport")
+        .expect("service setup withdraws the tray proxy address");
+    let clear_tray_tracking = service_setup
+        .find("Clear-ManagedProxyTracking $traySupport")
+        .expect("service setup disables old tray environment writes");
+    let stop_tray = service_setup
+        .find("Stop-InstalledTray $trayExecutable")
+        .expect("service setup waits for the tray to exit");
+    assert!(installer.contains("waiting before environment reconciliation"));
+    let check_service_listener = service_setup
+        .find("Assert-ProxyListenersAvailable $serviceListeners")
+        .expect("service listener probe");
+    let withdraw_after_tray_exit = service_setup[stop_tray..]
+        .find("Withdraw-ManagedProxyEnvironment $traySupport")
+        .map(|offset| stop_tray + offset)
+        .expect("service setup reconciles the environment after exit");
+    let stop_orphaned_proxy = service_setup[withdraw_after_tray_exit..]
+        .find("Stop-InstalledProxy (Join-Path")
+        .map(|offset| withdraw_after_tray_exit + offset)
+        .expect("service setup stops the child only after withdrawal");
     let policy_migration = service_setup
         .find("$migrationReview = Join-Path $serviceData 'migration-review'")
         .expect("old settings are retained for explicit review");
@@ -103,6 +278,11 @@ fn windows_service_installer_protects_policy_files_and_limits_service_write_acce
         .find("Set-Content -Encoding UTF8 $serviceConfig")
         .expect("fresh service settings are written");
     assert!(protect < copy_binaries);
+    assert!(withdraw_tray_environment < clear_tray_tracking);
+    assert!(clear_tray_tracking < stop_tray && stop_tray < withdraw_after_tray_exit);
+    assert!(withdraw_after_tray_exit < stop_orphaned_proxy);
+    assert!(stop_orphaned_proxy < check_service_listener);
+    assert!(check_service_listener < copy_binaries);
     assert!(protect_root < protect);
     assert!(protect < policy_migration && policy_migration < config_write);
     assert!(service_setup.contains("$serviceListeners = @('127.0.0.1:3128', '[::1]:3128')"));
