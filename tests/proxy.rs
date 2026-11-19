@@ -826,6 +826,146 @@ async fn session_limit_counts_connect_relays_and_shutdown_cancels_them() {
 }
 
 #[tokio::test]
+async fn idle_connect_relay_expires_and_releases_session_permit() {
+    let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let origin_task = tokio::spawn(async move {
+        let (mut socket, _) = origin.accept().await.unwrap();
+        let mut byte = [0];
+        let _ = socket.read(&mut byte).await;
+    });
+    let proxy = ContextBuilder::new(
+        Arc::new(Policy::new(None).unwrap()),
+        ConnectionOptions::default(),
+    )
+    .listen("127.0.0.1:0".parse().unwrap())
+    .max_sessions(1)
+    .idle_timeout(std::time::Duration::from_millis(200))
+    .bind()
+    .await
+    .unwrap();
+    let addr = proxy.local_addrs()[0];
+    let mut tunnel = TcpStream::connect(addr).await.unwrap();
+    tunnel
+        .write_all(
+            format!("CONNECT {origin_addr} HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut head = Vec::new();
+    loop {
+        let mut byte = [0];
+        tunnel.read_exact(&mut byte).await.unwrap();
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 200"));
+
+    let mut byte = [0];
+    let eof = tokio::time::timeout(std::time::Duration::from_secs(1), tunnel.read(&mut byte))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(eof, 0, "silent CONNECT tunnel should expire");
+    origin_task.await.unwrap();
+
+    let mut next = TcpStream::connect(addr).await.unwrap();
+    let result =
+        tokio::time::timeout(std::time::Duration::from_millis(100), next.read(&mut byte)).await;
+    assert!(
+        result.is_err(),
+        "expired tunnel should release its session slot"
+    );
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
+async fn connect_relay_keeps_active_traffic_and_half_close_alive() {
+    let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let origin_task = tokio::spawn(async move {
+        let (mut socket, _) = origin.accept().await.unwrap();
+        for byte in *b"server" {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            socket.write_all(&[byte]).await.unwrap();
+        }
+        for _ in 0..6 {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).await.unwrap();
+            socket.write_all(&byte).await.unwrap();
+        }
+        let mut byte = [0];
+        assert_eq!(socket.read(&mut byte).await.unwrap(), 0);
+        socket.write_all(b"done").await.unwrap();
+        socket.shutdown().await.unwrap();
+    });
+    let proxy = ContextBuilder::new(
+        Arc::new(Policy::new(None).unwrap()),
+        ConnectionOptions::default(),
+    )
+    .listen("127.0.0.1:0".parse().unwrap())
+    .idle_timeout(std::time::Duration::from_millis(300))
+    .bind()
+    .await
+    .unwrap();
+    let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
+    client
+        .write_all(
+            format!("CONNECT {origin_addr} HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut head = Vec::new();
+    loop {
+        let mut byte = [0];
+        client.read_exact(&mut byte).await.unwrap();
+        head.push(byte[0]);
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 200"));
+    let mut server_data = [0; 6];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.read_exact(&mut server_data),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(&server_data, b"server");
+    for byte in *b"abcdef" {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        client.write_all(&[byte]).await.unwrap();
+        let mut echoed = [0];
+        tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            client.read_exact(&mut echoed),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(echoed[0], byte);
+    }
+    client.shutdown().await.unwrap();
+    let mut response = [0; 4];
+    tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        client.read_exact(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(&response, b"done");
+    origin_task.await.unwrap();
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
 async fn unspecified_listener_is_rejected() {
     let result = ContextBuilder::new(
         Arc::new(Policy::new(None).unwrap()),

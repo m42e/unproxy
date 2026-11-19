@@ -172,7 +172,7 @@ pub struct MainArgs {
     /// Maximum time in seconds to receive request headers.
     #[arg(long = "header-timeout", value_parser=parse_duration, default_value="15")]
     pub header_timeout: Duration,
-    /// Maximum idle time in seconds for frontend and upstream HTTP connections.
+    /// Maximum idle time in seconds for frontend and upstream HTTP connections and CONNECT tunnels.
     #[arg(long = "idle-timeout", value_parser=parse_duration, default_value="60")]
     pub idle_timeout: Duration,
     /// Maximum time in seconds for an upstream HTTP exchange.

@@ -71,7 +71,7 @@ Durations are in seconds. The connection, header, idle, exchange, and keepalive 
 | --- | --- | --- |
 | `--connect-timeout` / `-c` | Each upstream connection attempt. | 10 |
 | `--header-timeout` | Receiving request headers. | 15 |
-| `--idle-timeout` | Idle frontend and upstream HTTP connections. | 60 |
+| `--idle-timeout` | Idle frontend and upstream HTTP connections, including CONNECT tunnels. Tunnel traffic resets the deadline. | 60 |
 | `--exchange-timeout` | An upstream HTTP exchange. | 30 |
 | `--graceful-shutdown-timeout` | Wait for active sessions during CLI shutdown. | 30 |
 | `--max-sessions` | Maximum simultaneous client sessions, including CONNECT tunnels. | 256 |

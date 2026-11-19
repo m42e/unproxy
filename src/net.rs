@@ -19,8 +19,8 @@ use tokio::{
     time::{self, Instant, Sleep},
 };
 
-/// A stream wrapper that closes inactive HTTP exchanges. An owner may disable
-/// the deadline after protocol upgrade, for example when CONNECT takes over.
+/// A stream wrapper that closes inactive exchanges. An owner may disable the
+/// deadline after a protocol upgrade when inactivity should not expire a stream.
 pub struct IdleIo<S> {
     inner: S,
     timeout: Duration,

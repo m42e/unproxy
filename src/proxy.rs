@@ -1512,14 +1512,21 @@ async fn handle(
             )
             .unwrap();
         let on = hyper::upgrade::on(&mut req);
+        let idle_timeout = cfg.idle_timeout;
         let relay = _tracker.spawn(async move {
             let _session_hold = session.permit;
             if let Ok(upgraded) = on.await {
-                let mut client = TokioIo::new(upgraded);
+                let client = net::IdleIo::new(
+                    TokioIo::new(upgraded),
+                    idle_timeout,
+                    Arc::new(AtomicBool::new(false)),
+                );
                 let mut upstream = stream;
-                if let Err(error) = net::relay(&mut client, &mut upstream).await {
+                if let Err(error) = net::relay(client, &mut upstream).await {
                     match error.source.kind() {
-                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe => {
+                        std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::TimedOut => {
                             tracing::debug!("CONNECT relay ended")
                         }
                         std::io::ErrorKind::NotConnected
