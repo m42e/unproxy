@@ -706,7 +706,12 @@ impl Context {
             }
         });
     }
-    pub(crate) fn retry_filter_lists_after(&self, sources: Vec<String>, initial_delay: Duration) {
+    pub(crate) fn retry_filter_lists_after(
+        &self,
+        sources: Vec<String>,
+        mut snapshots: crate::filter_list::FilterListSnapshots,
+        initial_delay: Duration,
+    ) {
         let Some(proxy) = self.local_addrs.first().copied() else {
             return;
         };
@@ -734,8 +739,12 @@ impl Context {
                     %proxy,
                     "retrying filter list download through PAC"
                 );
-                let (loaded, complete) = tokio::select! {
-                    result = crate::filter_list::FilterList::load_best_effort_via_proxy(&sources, proxy) => result,
+                let (loaded, complete, next_snapshots) = tokio::select! {
+                    result = crate::filter_list::FilterList::load_best_effort_with_snapshots(
+                        &sources,
+                        Some(proxy),
+                        snapshots.clone(),
+                    ) => result,
                     changed = shutdown.changed() => {
                         if changed.is_err() || *shutdown.borrow() {
                             return;
@@ -746,11 +755,8 @@ impl Context {
                 let Ok(mut current) = filter_list.write() else {
                     return;
                 };
-                if complete {
-                    *current = loaded;
-                } else {
-                    *current = current.union(&loaded);
-                }
+                *current = loaded;
+                snapshots = next_snapshots;
                 drop(current);
                 if complete {
                     tracing::info!(
@@ -2593,6 +2599,7 @@ mod management_coverage_tests {
             .unwrap();
         context.retry_filter_lists_after(
             vec!["http://127.0.0.1:1/hosts.txt".into()],
+            crate::filter_list::FilterListSnapshots::default(),
             Duration::from_secs(60),
         );
         context.shutdown();

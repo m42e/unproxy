@@ -315,8 +315,13 @@ async fn run_until(
     }
     let sources = config::pac_sources(&a)?;
     let effective_ip = select_pac_ip(a.my_ip_address, crate::platform::default_interface_ipv4);
-    let (filter_list, filter_lists_complete) =
-        crate::filter_list::FilterList::load_best_effort_with_status(&a.filter_list).await;
+    let (filter_list, filter_lists_complete, filter_snapshots) =
+        crate::filter_list::FilterList::load_best_effort_with_snapshots(
+            &a.filter_list,
+            None,
+            crate::filter_list::FilterListSnapshots::default(),
+        )
+        .await;
     let policy = Arc::new(Policy::new_scripts_with_ip(vec![], effective_ip)?);
     let auth = load_auth(&a)?;
     let options = ConnectionOptions {
@@ -369,7 +374,11 @@ async fn run_until(
     }
     let context = builder.bind().await?;
     if !filter_lists_complete {
-        context.retry_filter_lists_after(a.filter_list.clone(), Duration::from_secs(5));
+        context.retry_filter_lists_after(
+            a.filter_list.clone(),
+            filter_snapshots,
+            Duration::from_secs(5),
+        );
     }
     if let Some(path) = std::env::var_os("UNPROXY_READY_FILE") {
         if std::env::var_os("UNPROXY_READY_REQUIRE_PAC").is_some() && !policy.is_loaded() {
