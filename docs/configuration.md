@@ -126,7 +126,9 @@ Restart Unproxy after editing the file. For example:
 }
 ```
 
-The endpoint must return JSON in this shape:
+The metadata endpoint and returned release `url` must both use HTTPS, so TLS
+authenticates each server and prevents a network intermediary from changing
+the feed or the destination. Custom hosted release pages remain supported.
 
 ```json
 {
@@ -136,9 +138,10 @@ The endpoint must return JSON in this shape:
 }
 ```
 
-`version` is a semantic version and may start with `v`. `url` is the page the
-desktop app opens when a newer version is found. `notes` is optional. The CLI
-prints the available version and URL without opening a browser.
+`version` is a semantic version and may start with `v`. `url` is the trusted
+HTTPS release page the desktop app opens when a newer version is found.
+`notes` is optional. The CLI prints the available version and URL without
+opening a browser.
 
 ## Listener access and privacy
 

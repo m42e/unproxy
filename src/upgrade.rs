@@ -1,6 +1,6 @@
 //! Release metadata lookup and semantic version comparison.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fmt;
 
@@ -52,7 +52,7 @@ struct CustomReleaseInfo {
     notes: Option<String>,
 }
 
-/// Validate and normalize a configured HTTP(S) release metadata URL.
+/// Validate and normalize a configured HTTPS release metadata URL.
 pub fn validate_release_info_url(value: &str) -> Result<String> {
     let value = value.trim();
     let uri = value
@@ -60,14 +60,11 @@ pub fn validate_release_info_url(value: &str) -> Result<String> {
         .with_context(|| format!("invalid release info URL {value:?}"))?;
     let scheme = uri
         .scheme_str()
-        .context("release info URL must use HTTP or HTTPS")?;
-    let normalized_scheme = if scheme.eq_ignore_ascii_case("https") {
-        "https"
-    } else if scheme.eq_ignore_ascii_case("http") {
-        "http"
-    } else {
-        bail!("release info URL must use HTTP or HTTPS")
-    };
+        .context("release info URL must use HTTPS")?;
+    anyhow::ensure!(
+        scheme.eq_ignore_ascii_case("https"),
+        "release info URL must use HTTPS"
+    );
     anyhow::ensure!(uri.host().is_some(), "release info URL must include a host");
     anyhow::ensure!(
         !uri.authority()
@@ -78,7 +75,7 @@ pub fn validate_release_info_url(value: &str) -> Result<String> {
         .authority()
         .context("release info URL must include a host")?;
     let path_and_query = uri.path_and_query().map_or("", |value| value.as_str());
-    let normalized = format!("{normalized_scheme}://{authority}{path_and_query}");
+    let normalized = format!("https://{authority}{path_and_query}");
     Ok(normalized)
 }
 
@@ -86,8 +83,7 @@ pub fn parse_custom_release_info(json: &str) -> Result<ReleaseInfo> {
     let value: CustomReleaseInfo =
         serde_json::from_str(json).context("invalid custom release info JSON")?;
     let version = normalize_version(&value.version)?;
-    let url = validate_release_info_url(&value.url)
-        .context("custom release URL must be an HTTP(S) URL")?;
+    let url = validate_release_info_url(&value.url).context("custom release URL must use HTTPS")?;
     Ok(ReleaseInfo {
         version,
         url,
@@ -98,8 +94,8 @@ pub fn parse_custom_release_info(json: &str) -> Result<ReleaseInfo> {
 pub fn parse_github_release(json: &str) -> Result<ReleaseInfo> {
     let value: GithubRelease = serde_json::from_str(json).context("invalid GitHub release JSON")?;
     let version = normalize_version(&value.tag_name)?;
-    let url = validate_release_info_url(&value.html_url)
-        .context("GitHub release URL must be an HTTP(S) URL")?;
+    let url =
+        validate_release_info_url(&value.html_url).context("GitHub release URL must use HTTPS")?;
     Ok(ReleaseInfo {
         version,
         url,
@@ -177,15 +173,25 @@ mod tests {
         );
         assert!(
             parse_custom_release_info(
-                r#"{"version":"1.2.0","url":"https://u:p@example.test/release"}"#
+                r#"{"version":"1.2.0","url":"https://u:p@downloads.example.test/unproxy"}"#
             )
             .is_err()
         );
         assert!(
             parse_custom_release_info(
-                r#"{"version":"1.2.0","url":"https://example.test/release","download":"elsewhere"}"#
+                r#"{"version":"1.2.0","url":"https://downloads.example.test/unproxy","download":"elsewhere"}"#
             )
             .is_err()
+        );
+        let insecure_json = r#"{"version":"1.2.0","url":"http://downloads.example.test/release"}"#;
+        assert!(parse_custom_release_info(insecure_json).is_err());
+        let custom_host = parse_custom_release_info(
+            r#"{"version":"1.2.0","url":"https://downloads.example.test/unproxy/1.2.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            custom_host.url,
+            "https://downloads.example.test/unproxy/1.2.0"
         );
     }
 
@@ -230,10 +236,15 @@ mod tests {
     #[test]
     fn release_info_urls_normalize_scheme_and_reject_invalid_inputs() {
         assert_eq!(
-            validate_release_info_url(" HTTPS://example.test/releases.json ").unwrap(),
-            "https://example.test/releases.json"
+            validate_release_info_url(" HTTPS://updates.example.test/releases.json ").unwrap(),
+            "https://updates.example.test/releases.json"
         );
-        for value in ["", "ftp://example.test/releases.json", "https:///release"] {
+        for value in [
+            "",
+            "http://updates.example.test/releases.json",
+            "ftp://example.test/releases.json",
+            "https:///release",
+        ] {
             assert!(
                 validate_release_info_url(value).is_err(),
                 "accepted {value:?}"

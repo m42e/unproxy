@@ -68,56 +68,49 @@ fn an_upgrade_is_reported_only_when_the_remote_version_is_newer() {
 }
 
 #[test]
-fn release_metadata_links_must_be_http_or_https() {
+fn release_metadata_links_require_https() {
     assert_eq!(
         validate_release_info_url(" HTTPS://updates.example.test/releases.json ").unwrap(),
         "https://updates.example.test/releases.json"
     );
-    for value in ["ftp://updates.example.test/release", "file:///release.json"] {
+    for value in [
+        "http://updates.example.test/release",
+        "ftp://updates.example.test/release",
+        "file:///release.json",
+    ] {
         assert!(validate_release_info_url(value).is_err());
     }
 }
 
 #[tokio::test]
-async fn check_upgrade_fetches_and_compares_custom_release_json() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
+async fn check_upgrade_rejects_http_metadata_before_contacting_the_server() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let mut next_version = semver::Version::parse(unproxy::VERSION).unwrap();
     next_version.patch += 1;
     let body = serde_json::json!({
         "version": next_version.to_string(),
-        "url": "https://downloads.example.test/unproxy/latest",
+        "url": format!("https://downloads.example.test/unproxy/{next_version}"),
         "notes": "Local integration fixture"
     })
     .to_string();
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut request = [0; 2048];
-        let count = stream.read(&mut request).await.unwrap();
-        let request = String::from_utf8_lossy(&request[..count]);
-        assert!(request.starts_with("GET /unproxy.json HTTP/1.1\r\n"));
-        assert!(
-            request
-                .to_ascii_lowercase()
-                .contains("user-agent: unproxy/")
-        );
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        stream.write_all(response.as_bytes()).await.unwrap();
-    });
 
     let endpoint = format!("http://{address}/unproxy.json");
-    let status = unproxy::upgrade::check_for_upgrade(Some(&endpoint))
+    let error = unproxy::upgrade::check_for_upgrade(Some(&endpoint))
         .await
-        .unwrap();
-    server.await.unwrap();
-    let UpgradeStatus::UpgradeAvailable(release) = status else {
-        panic!("expected an available upgrade, got {status:?}");
-    };
+        .unwrap_err();
+    assert!(error.to_string().contains("must use HTTPS"));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err(),
+        "HTTP metadata endpoint was contacted"
+    );
+
+    let release = parse_custom_release_info(&body).unwrap();
     assert_eq!(release.version, next_version.to_string());
-    assert_eq!(release.url, "https://downloads.example.test/unproxy/latest");
+    assert_eq!(
+        release.url,
+        format!("https://downloads.example.test/unproxy/{next_version}")
+    );
 }
