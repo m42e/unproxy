@@ -1,11 +1,15 @@
 use crate::route::{Route, Routes};
 use anyhow::{Context as _, Result, anyhow, bail};
 use boa_engine::{Context, JsString, JsValue, NativeFunction, Script, Source};
+#[cfg(not(unix))]
+use std::net::ToSocketAddrs;
+#[cfg(unix)]
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     future::Future as _,
-    net::{IpAddr, ToSocketAddrs},
+    net::IpAddr,
     rc::Rc,
     sync::{
         Arc, Mutex, OnceLock,
@@ -29,6 +33,10 @@ const MAX_PAC_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
 const DNS_RESOLVE_BUDGET: usize = 4;
 const PAC_LOAD_DNS_SNAPSHOT_CAPACITY: usize = 64;
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_millis(100);
+const DNS_CACHE_MAX_ENTRIES: usize = 256;
+const DNS_CACHE_MAX_BYTES: usize = 32 * 1024;
+const DNS_EVALUATED_MAX_ENTRIES: usize = DNS_RESOLVE_BUDGET;
+const DNS_MAX_HOST_BYTES: usize = 253;
 const DNS_RESOLVER_WORKERS: usize = 4;
 const DNS_RESOLVER_QUEUE_PER_WORKER: usize = 4;
 
@@ -77,6 +85,39 @@ struct CacheEntry {
     value: Option<IpAddr>,
     at: Instant,
 }
+fn dns_entry_bytes(host: &String) -> usize {
+    host.capacity() + std::mem::size_of::<String>() + std::mem::size_of::<CacheEntry>()
+}
+
+fn insert_bounded_dns_cache(
+    cache: &mut HashMap<String, CacheEntry>,
+    host: String,
+    value: Option<IpAddr>,
+    at: Instant,
+) {
+    if host.len() > DNS_MAX_HOST_BYTES || dns_entry_bytes(&host) > DNS_CACHE_MAX_BYTES {
+        return;
+    }
+    if cache.contains_key(&host) {
+        cache.remove(&host);
+    }
+    while cache.len() >= DNS_CACHE_MAX_ENTRIES
+        || cache.keys().map(dns_entry_bytes).sum::<usize>() + dns_entry_bytes(&host)
+            > DNS_CACHE_MAX_BYTES
+    {
+        let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest);
+    }
+    cache.insert(host, CacheEntry { value, at });
+}
+
+#[cfg(any(not(unix), test))]
 fn preferred_ip(ips: impl IntoIterator<Item = IpAddr>) -> Option<IpAddr> {
     let mut first = None;
     for ip in ips {
@@ -100,6 +141,7 @@ pub struct Pac {
     route_cache_order: VecDeque<JsString>,
     cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
     evaluated_dns: Arc<Mutex<HashMap<String, Option<IpAddr>>>>,
+    evaluated_dns_overflow: Arc<AtomicBool>,
     load_dns_snapshot: HashMap<String, Option<IpAddr>>,
     load_dns_overflow: bool,
     dns_override_detected: Arc<AtomicBool>,
@@ -137,6 +179,7 @@ impl Pac {
             dns_resolver,
             cache: Arc::new(Mutex::new(HashMap::new())),
             evaluated_dns: Arc::new(Mutex::new(HashMap::new())),
+            evaluated_dns_overflow: Arc::new(AtomicBool::new(false)),
             load_dns_snapshot: HashMap::new(),
             load_dns_overflow: false,
             dns_override_detected: Arc::new(AtomicBool::new(false)),
@@ -168,6 +211,7 @@ impl Pac {
             dns_resolver: self.dns_resolver.clone(),
             cache: Arc::new(Mutex::new(HashMap::new())),
             evaluated_dns: Arc::new(Mutex::new(HashMap::new())),
+            evaluated_dns_overflow: Arc::new(AtomicBool::new(false)),
             load_dns_snapshot: HashMap::new(),
             load_dns_overflow: false,
             dns_override_detected: Arc::new(AtomicBool::new(false)),
@@ -191,10 +235,13 @@ impl Pac {
             .runtime_limits_mut()
             .set_loop_iteration_limit(PAC_LOOP_LIMIT);
         self.cache.lock().unwrap().clear();
+        self.evaluated_dns.lock().unwrap().clear();
+        self.evaluated_dns_overflow.store(false, Ordering::Relaxed);
         self.last_prune = Instant::now();
         self.source = source.map(str::to_owned);
         let dns_cache = self.cache.clone();
         let evaluated_dns = self.evaluated_dns.clone();
+        let evaluated_dns_overflow = self.evaluated_dns_overflow.clone();
         let dns_override_detected = self.dns_override_detected.clone();
         let dns_budget = self.dns_budget.clone();
         let dns_resolver = self.dns_resolver.clone();
@@ -206,6 +253,9 @@ impl Pac {
                         .into());
                 };
                 let host = arg.to_string(ctx)?.to_std_string_escaped();
+                if host.len() > DNS_MAX_HOST_BYTES {
+                    return Ok(JsValue::null());
+                }
                 let now = Instant::now();
                 let value = {
                     let mut c = dns_cache.lock().unwrap();
@@ -216,17 +266,34 @@ impl Pac {
                         c.remove(&host);
                     }
                     if let Some(v) = c.get(&host) {
-                        v.value
+                        Some(v.value)
                     } else if dns_budget.fetch_add(1, Ordering::Relaxed) >= DNS_RESOLVE_BUDGET {
                         None
                     } else {
-                        let ip = dns_resolver.resolve(&host, DNS_RESOLVE_TIMEOUT);
-                        c.insert(host.clone(), CacheEntry { value: ip, at: now });
-                        ip
+                        match dns_resolver.resolve(&host, DNS_RESOLVE_TIMEOUT) {
+                            Ok(answer) => {
+                                insert_bounded_dns_cache(&mut c, host.clone(), answer, now);
+                                Some(answer)
+                            }
+                            Err(()) => None,
+                        }
                     }
                 };
-                evaluated_dns.lock().unwrap().insert(host, value);
+                let mut evaluated = evaluated_dns.lock().unwrap();
+                if !evaluated.contains_key(&host)
+                    && evaluated.len() < DNS_EVALUATED_MAX_ENTRIES
+                    && evaluated.keys().map(dns_entry_bytes).sum::<usize>() + dns_entry_bytes(&host)
+                        <= DNS_CACHE_MAX_BYTES
+                {
+                    // This per-evaluation answer set records what PAC observed, including
+                    // nulls from transient failures. Only definitive resolver answers enter
+                    // the reusable DNS cache above.
+                    evaluated.insert(host, value.flatten());
+                } else if !evaluated.contains_key(&host) {
+                    evaluated_dns_overflow.store(true, Ordering::Relaxed);
+                }
                 Ok(value
+                    .flatten()
                     .map(|v| JsValue::from(JsString::from(v.to_string())))
                     .unwrap_or(JsValue::null()))
             })
@@ -442,7 +509,8 @@ impl Pac {
             }
         }
         let loaded_dns = self.evaluated_dns.lock().unwrap().clone();
-        self.load_dns_overflow = loaded_dns.len() > PAC_LOAD_DNS_SNAPSHOT_CAPACITY;
+        self.load_dns_overflow = self.evaluated_dns_overflow.load(Ordering::Relaxed)
+            || loaded_dns.len() > PAC_LOAD_DNS_SNAPSHOT_CAPACITY;
         self.load_dns_snapshot = loaded_dns
             .into_iter()
             .take(PAC_LOAD_DNS_SNAPSHOT_CAPACITY)
@@ -517,6 +585,7 @@ impl Pac {
         self.prune_dns_cache();
         self.dns_budget.store(0, Ordering::Relaxed);
         self.evaluated_dns.lock().unwrap().clear();
+        self.evaluated_dns_overflow.store(false, Ordering::Relaxed);
         self.dns_override_detected
             .store(self.dns_override_at_load, Ordering::Relaxed);
         self.set_evaluation_arguments(url, host)?;
@@ -534,7 +603,8 @@ impl Pac {
                 .as_boolean()
                 .unwrap_or(false)
                 && !self.dns_override_detected.load(Ordering::Relaxed)
-                && !self.load_dns_overflow;
+                && !self.load_dns_overflow
+                && !self.evaluated_dns_overflow.load(Ordering::Relaxed);
         let mut evaluated_dns = self
             .evaluated_dns
             .lock()
@@ -1051,12 +1121,14 @@ fn compile_shell_pattern(source: &str) -> std::result::Result<glob::Pattern, She
         .map_err(|error| ShellPatternError::InvalidPattern(error.to_string()))
 }
 
-type HostLookup = dyn Fn(&str) -> Option<IpAddr> + Send + Sync;
+type HostLookup = dyn Fn(&str) -> std::result::Result<Option<IpAddr>, ()> + Send + Sync;
+#[cfg(test)]
+type OptionHostLookup = dyn Fn(&str) -> Option<IpAddr> + Send + Sync;
 type DnsAnswers = Vec<(String, Option<IpAddr>)>;
 
 struct DnsRequest {
     host: String,
-    reply: SyncSender<Option<IpAddr>>,
+    reply: SyncSender<std::result::Result<Option<IpAddr>, ()>>,
 }
 
 struct DnsWorker {
@@ -1068,7 +1140,21 @@ struct DnsResolver {
     next_worker: AtomicUsize,
 }
 impl DnsResolver {
-    fn new(worker_count: usize, queue_per_worker: usize, lookup: Arc<HostLookup>) -> Arc<Self> {
+    #[cfg(test)]
+    fn new(
+        worker_count: usize,
+        queue_per_worker: usize,
+        lookup: Arc<OptionHostLookup>,
+    ) -> Arc<Self> {
+        let lookup: Arc<HostLookup> = Arc::new(move |host| Ok(lookup(host)));
+        Self::new_result(worker_count, queue_per_worker, lookup)
+    }
+
+    fn new_result(
+        worker_count: usize,
+        queue_per_worker: usize,
+        lookup: Arc<HostLookup>,
+    ) -> Arc<Self> {
         assert!(worker_count > 0);
         let mut workers = Vec::with_capacity(worker_count);
         for index in 0..worker_count {
@@ -1086,7 +1172,7 @@ impl DnsResolver {
         })
     }
 
-    fn enqueue(&self, host: &str) -> Option<Receiver<Option<IpAddr>>> {
+    fn enqueue(&self, host: &str) -> Option<Receiver<std::result::Result<Option<IpAddr>, ()>>> {
         let (reply_tx, reply_rx) = sync_channel(1);
         let mut request = Some(DnsRequest {
             host: host.to_owned(),
@@ -1108,8 +1194,11 @@ impl DnsResolver {
         None
     }
 
-    fn resolve(&self, host: &str, timeout: Duration) -> Option<IpAddr> {
-        self.enqueue(host)?.recv_timeout(timeout).ok().flatten()
+    fn resolve(&self, host: &str, timeout: Duration) -> std::result::Result<Option<IpAddr>, ()> {
+        self.enqueue(host)
+            .ok_or(())?
+            .recv_timeout(timeout)
+            .map_err(|_| ())?
     }
 }
 
@@ -1120,19 +1209,94 @@ fn resolver_worker(rx: Receiver<DnsRequest>, lookup: Arc<HostLookup>) {
     }
 }
 
+#[cfg(unix)]
+fn definitive_getaddrinfo_status(status: libc::c_int) -> bool {
+    matches!(status, libc::EAI_NONAME | libc::EAI_NODATA)
+}
+
+#[cfg(any(windows, test))]
+fn definitive_windows_dns_error(code: Option<i32>) -> bool {
+    matches!(code, Some(11001 | 11004))
+}
+
+#[cfg(unix)]
+fn system_dns_lookup(host: &str) -> std::result::Result<Option<IpAddr>, ()> {
+    let Ok(host) = std::ffi::CString::new(host) else {
+        return Ok(None);
+    };
+    let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
+    hints.ai_family = libc::AF_UNSPEC;
+    hints.ai_socktype = libc::SOCK_STREAM;
+    let mut results = std::ptr::null_mut();
+    let status =
+        unsafe { libc::getaddrinfo(host.as_ptr(), std::ptr::null(), &hints, &mut results) };
+    if status != 0 {
+        return if definitive_getaddrinfo_status(status) {
+            Ok(None)
+        } else {
+            Err(())
+        };
+    }
+
+    let mut first_ipv6 = None;
+    let mut first_ipv4 = None;
+    let mut current = results;
+    while !current.is_null() {
+        let info = unsafe { &*current };
+        if !info.ai_addr.is_null() {
+            match info.ai_family {
+                libc::AF_INET => {
+                    let address = unsafe { &*(info.ai_addr.cast::<libc::sockaddr_in>()) };
+                    first_ipv4 = Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(
+                        address.sin_addr.s_addr,
+                    ))));
+                    break;
+                }
+                libc::AF_INET6 => {
+                    let address = unsafe { &*(info.ai_addr.cast::<libc::sockaddr_in6>()) };
+                    first_ipv6.get_or_insert_with(|| {
+                        IpAddr::V6(Ipv6Addr::from(address.sin6_addr.s6_addr))
+                    });
+                }
+                _ => {}
+            }
+        }
+        current = info.ai_next;
+    }
+    unsafe { libc::freeaddrinfo(results) };
+    Ok(first_ipv4.or(first_ipv6))
+}
+
+#[cfg(windows)]
+fn system_dns_lookup(host: &str) -> std::result::Result<Option<IpAddr>, ()> {
+    match (host, 0).to_socket_addrs() {
+        Ok(addresses) => Ok(preferred_ip(addresses.map(|address| address.ip()))),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || definitive_windows_dns_error(error.raw_os_error()) =>
+        {
+            Ok(None)
+        }
+        Err(_) => Err(()),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn system_dns_lookup(host: &str) -> std::result::Result<Option<IpAddr>, ()> {
+    (host, 0)
+        .to_socket_addrs()
+        .map(|addresses| preferred_ip(addresses.map(|address| address.ip())))
+        .map_err(|_| ())
+}
+
 fn system_dns_resolver() -> Arc<DnsResolver> {
     static RESOLVER: OnceLock<Arc<DnsResolver>> = OnceLock::new();
     RESOLVER
         .get_or_init(|| {
-            DnsResolver::new(
+            DnsResolver::new_result(
                 DNS_RESOLVER_WORKERS,
                 DNS_RESOLVER_QUEUE_PER_WORKER,
-                Arc::new(|host| {
-                    (host, 0)
-                        .to_socket_addrs()
-                        .ok()
-                        .and_then(|ips| preferred_ip(ips.map(|addr| addr.ip())))
-                }),
+                Arc::new(system_dns_lookup),
             )
         })
         .clone()
@@ -1140,7 +1304,10 @@ fn system_dns_resolver() -> Arc<DnsResolver> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheEntry, DnsResolver, Job, Pac, Policy, preferred_ip};
+    use super::{
+        CacheEntry, DNS_CACHE_MAX_BYTES, DNS_CACHE_MAX_ENTRIES, DNS_MAX_HOST_BYTES, DnsResolver,
+        Job, Pac, Policy, dns_entry_bytes, insert_bounded_dns_cache, preferred_ip,
+    };
     use std::{
         collections::HashMap,
         net::IpAddr,
@@ -1176,13 +1343,13 @@ mod tests {
         let fast = resolver.enqueue("fast.test").unwrap();
         assert_eq!(
             fast.recv_timeout(Duration::from_secs(2)).unwrap(),
-            Some("192.0.2.1".parse().unwrap())
+            Ok(Some("192.0.2.1".parse().unwrap()))
         );
 
         release_tx.send(()).unwrap();
         assert_eq!(
             blocked.recv_timeout(Duration::from_secs(2)).unwrap(),
-            Some("192.0.2.1".parse().unwrap())
+            Ok(Some("192.0.2.1".parse().unwrap()))
         );
     }
 
@@ -1230,7 +1397,7 @@ mod tests {
         for reply in [first, second, queued_first, queued_second] {
             assert_eq!(
                 reply.recv_timeout(Duration::from_secs(2)).unwrap(),
-                Some("192.0.2.2".parse().unwrap())
+                Ok(Some("192.0.2.2".parse().unwrap()))
             );
         }
     }
@@ -1258,7 +1425,7 @@ mod tests {
         started_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("lookup starts before the caller times out");
-        assert_eq!(lookup.join().unwrap(), None);
+        assert_eq!(lookup.join().unwrap(), Err(()));
         assert!(matches!(
             finished_rx.try_recv(),
             Err(mpsc::TryRecvError::Empty)
@@ -1271,19 +1438,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pac_dns_timeout_caches_negative_while_lookup_continues() {
+    async fn pac_dns_timeout_is_not_cached_and_a_later_evaluation_retries() {
         let (started_tx, started_rx) = mpsc::channel();
         let (finished_tx, finished_rx) = mpsc::channel();
         let (release_tx, release_rx) = sync_channel(0);
         let release_rx = Mutex::new(release_rx);
+        let calls = Arc::new(AtomicUsize::new(0));
         let resolver = DnsResolver::new(
             1,
             1,
-            Arc::new(move |_| {
-                started_tx.send(()).unwrap();
-                release_rx.lock().unwrap().recv().unwrap();
-                finished_tx.send(()).unwrap();
-                Some("192.0.2.5".parse().unwrap())
+            Arc::new({
+                let calls = calls.clone();
+                move |_| {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        started_tx.send(()).unwrap();
+                        release_rx.lock().unwrap().recv().unwrap();
+                        finished_tx.send(()).unwrap();
+                    }
+                    Some("192.0.2.5".parse().unwrap())
+                }
             }),
         );
         let policy = Policy::new_scripts_with_resolver(
@@ -1293,42 +1466,40 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            policy
-                .evaluate("x".into(), "x".into())
-                .await
-                .unwrap()
-                .to_string(),
-            "DIRECT"
-        );
+        let (routes, observed_dns) = policy
+            .evaluate_with_dns("x".into(), "slow.test".into(), false)
+            .await
+            .unwrap();
+        assert_eq!(routes.to_string(), "DIRECT");
+        assert_eq!(observed_dns, Some(None));
         started_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("DNS lookup started before the PAC timeout");
-        assert_eq!(
-            policy.cache_snapshot().await.unwrap().get("slow.test"),
-            Some(&None)
-        );
-        assert_eq!(
-            policy
-                .evaluate("x".into(), "x".into())
+        assert!(
+            !policy
+                .cache_snapshot()
                 .await
                 .unwrap()
-                .to_string(),
-            "DIRECT"
+                .contains_key("slow.test")
         );
-        assert!(matches!(
-            started_rx.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
-        assert!(matches!(
-            finished_rx.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
 
         release_tx.send(()).unwrap();
         finished_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("the underlying blocking lookup is still running after PAC timeout");
+        assert_eq!(
+            policy
+                .evaluate("x".into(), "slow.test".into())
+                .await
+                .unwrap()
+                .to_string(),
+            "HTTP wrong.test:80"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            policy.cache_snapshot().await.unwrap().get("slow.test"),
+            Some(&Some("192.0.2.5".parse().unwrap()))
+        );
     }
 
     #[test]
@@ -1510,6 +1681,37 @@ mod tests {
             .unwrap();
         assert_eq!(routes.to_string(), "DIRECT");
         assert_eq!(malformed_alias, None);
+    }
+
+    #[tokio::test]
+    async fn evaluated_dns_overflow_disables_native_direct_dns() {
+        let script = "function FindProxyForURL(){ dnsResolve('one.test'); dnsResolve('two.test'); dnsResolve('three.test'); dnsResolve('four.test'); dnsResolve('five.test'); return 'DIRECT'; }";
+        let resolver = DnsResolver::new(1, 4, Arc::new(|_| None));
+        let mut pac =
+            Pac::new_with_ip_and_resolver(Some(script), "127.0.0.1".parse().unwrap(), resolver)
+                .unwrap();
+        let (_, answers, native_dns) = pac
+            .evaluate_bounded_with_dns("x", "one.test")
+            .await
+            .unwrap();
+        assert_eq!(answers.len(), super::DNS_EVALUATED_MAX_ENTRIES);
+        assert!(!native_dns);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_status_classifies_name_absence_but_not_temporary_errors() {
+        assert!(super::definitive_getaddrinfo_status(libc::EAI_NONAME));
+        assert!(super::definitive_getaddrinfo_status(libc::EAI_NODATA));
+        assert!(!super::definitive_getaddrinfo_status(libc::EAI_AGAIN));
+    }
+
+    #[test]
+    fn windows_resolver_status_classifies_name_absence_but_not_temporary_errors() {
+        assert!(super::definitive_windows_dns_error(Some(11001)));
+        assert!(super::definitive_windows_dns_error(Some(11004)));
+        assert!(!super::definitive_windows_dns_error(Some(11002)));
+        assert!(!super::definitive_windows_dns_error(None));
     }
 
     #[tokio::test]
@@ -2009,6 +2211,155 @@ mod tests {
     }
 
     #[test]
+    fn dns_cache_enforces_entry_and_retained_byte_budgets() {
+        let mut entries = HashMap::new();
+        for index in 0..=DNS_CACHE_MAX_ENTRIES {
+            insert_bounded_dns_cache(
+                &mut entries,
+                format!("h{index}.test"),
+                None,
+                Instant::now() + Duration::from_nanos(index as u64),
+            );
+        }
+        assert_eq!(entries.len(), DNS_CACHE_MAX_ENTRIES);
+        assert!(entries.values().map(|_| 1).sum::<usize>() <= DNS_CACHE_MAX_ENTRIES);
+
+        entries.clear();
+        let at = Instant::now();
+        for index in 0..DNS_CACHE_MAX_ENTRIES {
+            let host = format!("{index:04}{}", "x".repeat(DNS_MAX_HOST_BYTES - 4));
+            insert_bounded_dns_cache(
+                &mut entries,
+                host,
+                None,
+                at + Duration::from_nanos(index as u64),
+            );
+        }
+        let retained_bytes = entries.keys().map(dns_entry_bytes).sum::<usize>();
+        assert!(retained_bytes <= DNS_CACHE_MAX_BYTES);
+        assert!(entries.len() < DNS_CACHE_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn overlong_pac_hostname_is_rejected_before_resolution_or_caching() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver = DnsResolver::new(
+            1,
+            1,
+            Arc::new({
+                let calls = calls.clone();
+                move |_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Some("192.0.2.8".parse().unwrap())
+                }
+            }),
+        );
+        let host = "x".repeat(DNS_MAX_HOST_BYTES + 1);
+        let source = format!(
+            "function FindProxyForURL(){{return dnsResolve('{host}')===null?'DIRECT':'PROXY wrong.test:80';}} "
+        );
+        let mut pac =
+            Pac::new_with_ip_and_resolver(Some(&source), "127.0.0.1".parse().unwrap(), resolver)
+                .unwrap();
+        assert_eq!(pac.evaluate("x", "x").unwrap().to_string(), "DIRECT");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(pac.cache_snapshot().is_empty());
+    }
+
+    #[test]
+    fn transient_resolver_error_is_not_cached_and_retries() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver = DnsResolver::new_result(
+            1,
+            1,
+            Arc::new({
+                let calls = calls.clone();
+                move |_| {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(())
+                    } else {
+                        Ok(Some("192.0.2.9".parse().unwrap()))
+                    }
+                }
+            }),
+        );
+        let mut pac = Pac::new_with_ip_and_resolver(
+            Some("function FindProxyForURL(){return dnsResolve('retry.test')===null?'DIRECT':'PROXY retry.test:80';}"),
+            "127.0.0.1".parse().unwrap(),
+            resolver,
+        ).unwrap();
+        assert_eq!(pac.evaluate("x", "x").unwrap().to_string(), "DIRECT");
+        assert_eq!(
+            pac.evaluated_dns.lock().unwrap().get("retry.test"),
+            Some(&None)
+        );
+        assert!(!pac.cache_snapshot().contains_key("retry.test"));
+        assert_eq!(
+            pac.evaluate("x", "x").unwrap().to_string(),
+            "HTTP retry.test:80"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            pac.cache_snapshot().get("retry.test"),
+            Some(&Some("192.0.2.9".parse().unwrap()))
+        );
+    }
+
+    #[test]
+    fn resolver_queue_saturation_is_not_cached_and_later_retry_succeeds() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = sync_channel(0);
+        let release_rx = Mutex::new(release_rx);
+        let resolver = DnsResolver::new(
+            1,
+            1,
+            Arc::new(move |host| {
+                if host == "blocked.test" {
+                    started_tx.send(()).unwrap();
+                    release_rx.lock().unwrap().recv().unwrap();
+                }
+                Some("192.0.2.10".parse().unwrap())
+            }),
+        );
+        let in_flight = resolver.enqueue("blocked.test").unwrap();
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("blocking lookup starts");
+        let queued = resolver.enqueue("queued.test").unwrap();
+        let mut pac = Pac::new_with_ip_and_resolver(
+            Some("function FindProxyForURL(){return dnsResolve('retry.test')===null?'DIRECT':'PROXY retry.test:80';}"),
+            "127.0.0.1".parse().unwrap(),
+            resolver,
+        )
+        .unwrap();
+
+        assert_eq!(pac.evaluate("x", "x").unwrap().to_string(), "DIRECT");
+        assert!(!pac.cache_snapshot().contains_key("retry.test"));
+        assert_eq!(
+            pac.evaluated_dns.lock().unwrap().get("retry.test"),
+            Some(&None)
+        );
+
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            in_flight.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Ok(Some("192.0.2.10".parse().unwrap()))
+        );
+        assert_eq!(
+            queued.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Ok(Some("192.0.2.10".parse().unwrap()))
+        );
+        assert_eq!(
+            pac.evaluate("x", "x").unwrap().to_string(),
+            "HTTP retry.test:80"
+        );
+        assert_eq!(
+            pac.cache_snapshot().get("retry.test"),
+            Some(&Some("192.0.2.10".parse().unwrap()))
+        );
+    }
+
+    #[test]
     fn pac_alert_ip_override_and_oversized_scripts_are_handled() {
         let mut pac = Pac::new(Some(
             "function FindProxyForURL(){ alert(); alert(42); alert('ready'); return myIpAddress() === '192.0.2.8' ? 'DIRECT' : 'PROXY wrong.test:80'; }",
@@ -2123,11 +2474,11 @@ mod tests {
                     .expect("fast lookup starts");
                 assert_eq!(
                     fast.recv_timeout(Duration::from_secs(2)).unwrap(),
-                    Some("192.0.2.9".parse().unwrap())
+                    Ok(Some("192.0.2.9".parse().unwrap()))
                 );
                 assert_eq!(
                     slow.recv_timeout(Duration::from_secs(2)).unwrap(),
-                    Some("192.0.2.9".parse().unwrap())
+                    Ok(Some("192.0.2.9".parse().unwrap()))
                 );
                 queue_latency.push(started.duration_since(submitted));
                 execution_time.push(finished.duration_since(started));
@@ -2250,9 +2601,10 @@ mod tests {
 
     #[test]
     fn dns_lookup_expires_requested_entry_without_scanning_cache() {
-        let mut pac = Pac::new(Some(
+        let resolver = DnsResolver::new(1, 4, Arc::new(|_| None));
+        let mut pac = Pac::new_with_ip_and_resolver(Some(
             "function FindProxyForURL(){ return dnsResolve('stale.invalid')===null && dnsResolve('positive.test')==='192.0.2.9' && dnsResolve('negative.test')===null ? 'DIRECT' : 'PROXY wrong:80'; }",
-        )).unwrap();
+        ), "127.0.0.1".parse().unwrap(), resolver).unwrap();
         let now = Instant::now();
         for (host, value, expired) in [
             ("stale.invalid", Some("192.0.2.1".parse().unwrap()), true),
