@@ -211,7 +211,8 @@ async fn dns_fallback_posts_original_wire_bytes_inside_verified_nested_tls() {
     let expected = query.clone();
     let mut primary_response = expected.clone();
     primary_response[2] |= 0x80;
-    let dns_response = vec![0x12, 0x34, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let mut dns_response = expected.clone();
+    dns_response[2] |= 0x80;
     let response_copy = dns_response.clone();
     let tls_acceptor = acceptor();
     let proxy_task = tokio::spawn(async move {

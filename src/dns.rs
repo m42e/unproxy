@@ -139,12 +139,106 @@ fn skip_name(b: &[u8], start: usize) -> Result<usize> {
         }
     }
 }
+
+fn read_name(b: &[u8], start: usize) -> Result<(Vec<Vec<u8>>, usize)> {
+    let mut labels = Vec::new();
+    let mut position = start;
+    let mut end = None;
+    let mut seen = std::collections::HashSet::new();
+    let mut expanded_len = 1usize;
+    loop {
+        need(b, position, 1)?;
+        let length = b[position];
+        if length & 0xc0 == 0xc0 {
+            need(b, position, 2)?;
+            let offset = ((length as usize & 0x3f) << 8) | b[position + 1] as usize;
+            if offset >= position || !seen.insert(offset) {
+                return Err(anyhow!("invalid DNS compression pointer"));
+            }
+            end.get_or_insert(position + 2);
+            position = offset;
+            continue;
+        }
+        if length & 0xc0 != 0 {
+            return Err(anyhow!("invalid DNS label tag"));
+        }
+        position += 1;
+        if length == 0 {
+            return Ok((labels, end.unwrap_or(position)));
+        }
+        let length = length as usize;
+        expanded_len += length + 1;
+        if expanded_len > 255 {
+            return Err(anyhow!("DNS name exceeds 255 bytes"));
+        }
+        need(b, position, length)?;
+        labels.push(
+            b[position..position + length]
+                .iter()
+                .map(u8::to_ascii_lowercase)
+                .collect(),
+        );
+        position += length;
+    }
+}
+
+type DnsQuestion = (Vec<Vec<u8>>, u16, u16);
+
+fn questions(packet: &[u8]) -> Result<Vec<DnsQuestion>> {
+    let counts = counts(packet)?;
+    let mut position = 12;
+    let mut result = Vec::with_capacity(counts.questions as usize);
+    for _ in 0..counts.questions {
+        let (name, next) = read_name(packet, position)?;
+        position = next;
+        need(packet, position, 4)?;
+        result.push((
+            name,
+            u16::from_be_bytes([packet[position], packet[position + 1]]),
+            u16::from_be_bytes([packet[position + 2], packet[position + 3]]),
+        ));
+        position += 4;
+    }
+    Ok(result)
+}
+
+fn response_matches(query: &[u8], response: &[u8]) -> Result<bool> {
+    parse_counts(response)?;
+    if query.len() < 12
+        || response.len() < 12
+        || query[2] & 0x80 != 0
+        || response[2] & 0x80 == 0
+        || query[2] & 0x78 != response[2] & 0x78
+    {
+        return Ok(false);
+    }
+    if query[..2] != response[..2] {
+        return Ok(false);
+    }
+    let query_questions = questions(query)?;
+    Ok(!query_questions.is_empty() && query_questions == questions(response)?)
+}
+
+fn validate_query(query: &[u8]) -> Result<()> {
+    parse_counts(query).context("invalid DNS query")?;
+    if query.len() < 12 || query[2] & 0x80 != 0 {
+        return Err(anyhow!("DNS packet is not a query"));
+    }
+    if questions(query)
+        .context("invalid DNS query question")?
+        .is_empty()
+    {
+        return Err(anyhow!("DNS query has no questions"));
+    }
+    Ok(())
+}
 pub async fn exchange_primary(
     query: &[u8],
     server: SocketAddr,
     proxy: &crate::route::Route,
     options: &crate::net::ConnectionOptions,
 ) -> Result<Vec<u8>> {
+    validate_query(query)?;
     if query.len() > u16::MAX as usize {
         return Err(anyhow!("primary DNS query exceeds TCP frame size"));
     }
@@ -167,16 +261,21 @@ pub async fn exchange_primary(
     timeout(Duration::from_millis(500), stream.write_all(&frame))
         .await
         .context("primary DNS send timeout")??;
-    let mut length = [0u8; 2];
-    timeout(Duration::from_millis(500), stream.read_exact(&mut length))
-        .await
-        .context("primary DNS receive timeout")??;
-    let mut b = vec![0; u16::from_be_bytes(length) as usize];
-    timeout(Duration::from_millis(500), stream.read_exact(&mut b))
-        .await
-        .context("primary DNS receive timeout")??;
-    parse_counts(&b).context("invalid primary DNS response")?;
-    Ok(b)
+    let receive_deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let mut length = [0u8; 2];
+        tokio::time::timeout_at(receive_deadline, stream.read_exact(&mut length))
+            .await
+            .context("primary DNS receive timeout")??;
+        let mut b = vec![0; u16::from_be_bytes(length) as usize];
+        tokio::time::timeout_at(receive_deadline, stream.read_exact(&mut b))
+            .await
+            .context("primary DNS receive timeout")??;
+        if response_matches(query, &b).unwrap_or(false) {
+            return Ok(b);
+        }
+        tracing::debug!("discarding uncorrelated primary DNS response");
+    }
 }
 /// HTTP-over-TLS DNS POST over a stream already connected to the secondary endpoint.
 pub async fn doh_on_stream(
@@ -187,6 +286,7 @@ pub async fn doh_on_stream(
     query: &[u8],
     tls_connector: &tokio_native_tls::TlsConnector,
 ) -> Result<Vec<u8>> {
+    validate_query(query)?;
     use bytes::Bytes;
     use http::{Request, header};
     use http_body_util::{BodyExt, Full};
@@ -216,7 +316,9 @@ pub async fn doh_on_stream(
                 append_doh_chunk(&mut bytes, &data)?;
             }
         }
-        parse_counts(&bytes).context("invalid DoH DNS response")?;
+        if !response_matches(query, &bytes).context("invalid DoH DNS response")? {
+            return Err(anyhow!("uncorrelated DoH DNS response"));
+        }
         Ok(bytes)
     })
     .await
@@ -655,6 +757,114 @@ mod tests {
         assert!(needs_fallback(&unanswered).is_err());
     }
 
+    #[test]
+    fn dns_response_correlation_checks_flag_id_and_question() {
+        let query = test_query(0x1234);
+        let mut response = query.clone();
+        response[2] = 0x80;
+        assert!(response_matches(&query, &response).unwrap());
+
+        response[2] = 0;
+        assert!(!response_matches(&query, &response).unwrap());
+        response[2] = 0x80;
+        response[1] ^= 1;
+        assert!(!response_matches(&query, &response).unwrap());
+        response[1] ^= 1;
+        response[2] |= 0x08;
+        assert!(!response_matches(&query, &response).unwrap());
+        response[2] &= !0x08;
+        response = query.clone();
+        response[2] = 0x80;
+        response[13] = b'A';
+        assert!(response_matches(&query, &response).unwrap());
+        response[13] = b'b';
+        assert!(!response_matches(&query, &response).unwrap());
+        response = query.clone();
+        response[2] = 0x80;
+        let qtype_position = response.len() - 3;
+        response[qtype_position] = 28; // QTYPE differs
+        assert!(!response_matches(&query, &response).unwrap());
+    }
+
+    #[tokio::test]
+    async fn primary_discards_mismatched_frames_and_returns_correlated_reply() {
+        let primary = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = primary.local_addr().unwrap();
+        let query = test_query(0x1234);
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = primary.accept().await.unwrap();
+            let mut length = [0; 2];
+            stream.read_exact(&mut length).await.unwrap();
+            let mut received = vec![0; u16::from_be_bytes(length) as usize];
+            stream.read_exact(&mut received).await.unwrap();
+
+            let mut mismatch = received.clone();
+            mismatch[0] ^= 1;
+            mismatch[2] = 0x80;
+            for packet in [mismatch, {
+                let mut response = received;
+                response[2] = 0x80;
+                response
+            }] {
+                stream
+                    .write_all(&(packet.len() as u16).to_be_bytes())
+                    .await
+                    .unwrap();
+                stream.write_all(&packet).await.unwrap();
+            }
+        });
+
+        let answer = exchange_primary(
+            &query,
+            address,
+            &crate::route::Route::Direct,
+            &crate::net::ConnectionOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(response_matches(&query, &answer).unwrap());
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn primary_mismatches_share_the_original_receive_deadline() {
+        let primary = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = primary.local_addr().unwrap();
+        let query = test_query(0x1234);
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = primary.accept().await.unwrap();
+            let mut length = [0; 2];
+            stream.read_exact(&mut length).await.unwrap();
+            let mut received = vec![0; u16::from_be_bytes(length) as usize];
+            stream.read_exact(&mut received).await.unwrap();
+            let mut mismatch = received;
+            mismatch[0] ^= 1;
+            mismatch[2] = 0x80;
+            loop {
+                stream
+                    .write_all(&(mismatch.len() as u16).to_be_bytes())
+                    .await?;
+                stream.write_all(&mismatch).await?;
+                tokio::time::sleep(Duration::from_millis(80)).await;
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), std::io::Error>(())
+        });
+
+        let started = tokio::time::Instant::now();
+        let error = exchange_primary(
+            &query,
+            address,
+            &crate::route::Route::Direct,
+            &crate::net::ConnectionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("primary DNS receive timeout"));
+        assert!(started.elapsed() < Duration::from_millis(700));
+        server_task.abort();
+    }
+
     #[tokio::test]
     async fn udp_service_drops_bad_primary_reply_then_serves_the_next_query() {
         let primary = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -672,6 +882,7 @@ mod tests {
                     vec![0]
                 } else {
                     let mut answer = query;
+                    answer[2] = 0x80;
                     answer[6..8].copy_from_slice(&1u16.to_be_bytes());
                     answer.extend_from_slice(&[
                         0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 7,
@@ -696,7 +907,10 @@ mod tests {
         ));
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        client.send_to(&[1, 2], server_address).await.unwrap();
+        client
+            .send_to(&test_query(0x1111), server_address)
+            .await
+            .unwrap();
 
         let mut response = [0u8; 128];
         assert!(
@@ -738,6 +952,7 @@ mod tests {
             let first_handler = tokio::spawn(async move {
                 wait_first.await.unwrap();
                 let mut answer = first_query;
+                answer[2] = 0x80;
                 answer[6..8].copy_from_slice(&1u16.to_be_bytes());
                 answer.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 7]);
                 first_stream
@@ -756,6 +971,7 @@ mod tests {
             stream.read_exact(&mut query).await.unwrap();
             accepted_tx.send(query[0..2].to_vec()).await.unwrap();
             let mut answer = query;
+            answer[2] = 0x80;
             answer[6..8].copy_from_slice(&1u16.to_be_bytes());
             answer.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 7]);
             stream

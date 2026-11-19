@@ -7,6 +7,14 @@ use tokio::{
 use unproxy::dns::{exchange, exchange_primary, needs_fallback, parse_counts};
 use unproxy::{net::ConnectionOptions, route::Route};
 
+fn dns_query(id: u16) -> Vec<u8> {
+    let mut query = vec![0u8; 12];
+    query[..2].copy_from_slice(&id.to_be_bytes());
+    query[5] = 1;
+    query.extend_from_slice(&[1, b'a', 0, 0, 1, 0, 1]);
+    query
+}
+
 #[test]
 fn dns_wire_parser_checks_all_declared_sections() {
     let mut packet = vec![0u8; 17];
@@ -50,6 +58,8 @@ async fn primary_exchange_supports_ipv6_server_addresses() {
         host: proxy_addr.ip().to_string(),
         port: proxy_addr.port(),
     });
+    let query = dns_query(7);
+    let expected_query = query.clone();
     let task = tokio::spawn(async move {
         let (mut stream, _) = proxy.accept().await.unwrap();
         let mut request = Vec::new();
@@ -71,15 +81,24 @@ async fn primary_exchange_supports_ipv6_server_addresses() {
         stream.read_exact(&mut length).await.unwrap();
         let mut query = vec![0; u16::from_be_bytes(length) as usize];
         stream.read_exact(&mut query).await.unwrap();
-        assert_eq!(query, vec![0; 12]);
-        stream.write_all(&[0, 12]).await.unwrap();
-        stream.write_all(&[0; 12]).await.unwrap();
+        assert_eq!(query, expected_query);
+        let mut response = query;
+        response[2] = 0x80;
+        stream
+            .write_all(&(response.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&response).await.unwrap();
     });
     assert_eq!(
-        exchange_primary(&[0u8; 12], addr, &route, &ConnectionOptions::default())
+        exchange_primary(&query, addr, &route, &ConnectionOptions::default())
             .await
             .unwrap(),
-        vec![0; 12]
+        {
+            let mut response = query;
+            response[2] = 0x80;
+            response
+        }
     );
     task.await.unwrap();
 }
@@ -94,6 +113,8 @@ async fn primary_exchange_sends_dns_tcp_through_selected_proxy_without_udp() {
         host: proxy_addr.ip().to_string(),
         port: proxy_addr.port(),
     });
+    let query = dns_query(8);
+    let expected_query = query.clone();
     let proxy_task = tokio::spawn(async move {
         let (mut stream, _) = proxy.accept().await.unwrap();
         let mut headers = Vec::new();
@@ -115,11 +136,12 @@ async fn primary_exchange_sends_dns_tcp_through_selected_proxy_without_udp() {
         stream.read_exact(&mut length).await.unwrap();
         let mut query = vec![0; u16::from_be_bytes(length) as usize];
         stream.read_exact(&mut query).await.unwrap();
-        assert_eq!(query, vec![0; 12]);
+        assert_eq!(query, expected_query);
         // A primary answer with no fallback condition.
-        let response = [
-            0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 127, 0, 0, 1,
-        ];
+        let mut response = query;
+        response[2] = 0x80;
+        response[7] = 1;
+        response.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 127, 0, 0, 1]);
         stream
             .write_all(&(response.len() as u16).to_be_bytes())
             .await
@@ -128,7 +150,7 @@ async fn primary_exchange_sends_dns_tcp_through_selected_proxy_without_udp() {
     });
     let secondary: http::Uri = "https://127.0.0.1/dns-query".parse().unwrap();
     let response = exchange(
-        &[0; 12],
+        &query,
         target,
         &secondary,
         &route,
@@ -164,7 +186,7 @@ async fn primary_exchange_fails_closed_when_selected_proxy_is_unavailable() {
 
     assert!(
         exchange(
-            &[0; 12],
+            &dns_query(9),
             target,
             &secondary,
             &route,
@@ -226,7 +248,9 @@ async fn doh_bounds_stalled_and_oversized_response_bodies() {
             let (stream, _) = listener.accept().await.unwrap();
             let mut stream = acceptor.accept(stream).await.unwrap();
             read_http_head(&mut stream).await;
-            let mut query = [0; 12];
+            let mut length = [0; 2];
+            stream.read_exact(&mut length).await.unwrap();
+            let mut query = vec![0; u16::from_be_bytes(length) as usize];
             stream.read_exact(&mut query).await.unwrap();
             if oversized {
                 stream
@@ -250,7 +274,7 @@ async fn doh_bounds_stalled_and_oversized_response_bodies() {
                 "localhost",
                 "localhost",
                 "/dns-query",
-                &[0; 12],
+                &dns_query(10),
                 &connector,
             ),
         )
@@ -266,6 +290,41 @@ async fn doh_bounds_stalled_and_oversized_response_bodies() {
 }
 
 #[tokio::test]
+async fn doh_rejects_a_response_with_a_different_transaction_id() {
+    use unproxy::{dns::doh_on_stream, net::BoxedIo};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (acceptor, connector) = doh_tls();
+    let query = dns_query(0x1234);
+    let mut mismatch = query.clone();
+    mismatch[0] ^= 1;
+    mismatch[2] = 0x80;
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = acceptor.accept(stream).await.unwrap();
+        read_http_head(&mut stream).await;
+        let response_head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\n\r\n",
+            mismatch.len()
+        );
+        stream.write_all(response_head.as_bytes()).await.unwrap();
+        stream.write_all(&mismatch).await.unwrap();
+    });
+    let stream: BoxedIo = Box::new(TcpStream::connect(addr).await.unwrap());
+    let result = doh_on_stream(
+        stream,
+        "localhost",
+        "localhost",
+        "/dns-query",
+        &query,
+        &connector,
+    )
+    .await;
+    assert!(result.unwrap_err().to_string().contains("uncorrelated DoH"));
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn exchange_returns_primary_without_fallback_when_it_has_answers() {
     let responder = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = responder.local_addr().unwrap();
@@ -277,10 +336,9 @@ async fn exchange_returns_primary_without_fallback_when_it_has_answers() {
         stream.read_exact(&mut query).await.unwrap();
         // Valid response with one root-name A record (empty answer body is invalid, so use a
         // complete question and answer RR).
-        let mut response = vec![0u8; 12];
-        response[5] = 1;
+        let mut response = query;
+        response[2] = 0x80;
         response[7] = 1;
-        response.extend_from_slice(&[0, 0, 1, 0, 1]);
         response.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 127, 0, 0, 1]);
         stream
             .write_all(&(response.len() as u16).to_be_bytes())
@@ -290,7 +348,7 @@ async fn exchange_returns_primary_without_fallback_when_it_has_answers() {
     });
     let uri: http::Uri = "https://127.0.0.1/dns-query".parse().unwrap();
     let response = exchange(
-        &[0; 12],
+        &dns_query(11),
         addr,
         &uri,
         &Route::Direct,
