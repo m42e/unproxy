@@ -172,6 +172,33 @@ async fn forward_proxy_send_suppresses_unapproved_netrc_credentials() {
     assert!(!request.contains("secret"));
 }
 
+#[cfg(feature = "negotiate")]
+#[tokio::test]
+async fn forward_proxy_rejects_non_tunnel_negotiate_before_connecting() {
+    let options = ConnectionOptions {
+        auth: AuthFactory::negotiate(Vec::new()),
+        ..ConnectionOptions::default()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let error =
+        match Connection::proxy(endpoint(address), false, &options, Duration::from_secs(1)).await {
+            Ok(_) => panic!("plaintext Negotiate proxy connection unexpectedly succeeded"),
+            Err(error) => error,
+        };
+    assert!(
+        error
+            .to_string()
+            .contains("ordinary plaintext proxy connection")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err(),
+        "proxy received a connection"
+    );
+}
+
 #[tokio::test]
 async fn forward_proxy_send_reports_missing_credentials_before_http_exchange() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

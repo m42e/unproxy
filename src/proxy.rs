@@ -1429,7 +1429,7 @@ async fn handle(
             cfg.strict_policy,
         )
         .await;
-    let (routes, resolved_destination) = match evaluation {
+    let (mut routes, resolved_destination) = match evaluation {
         Ok(result) => result,
         Err(_) => {
             let message = "PAC evaluation failed".to_owned();
@@ -1447,6 +1447,22 @@ async fn handle(
             return Ok(error_response(StatusCode::BAD_GATEWAY, message));
         }
     };
+    let blocked_plaintext_negotiate_route = !connect
+        && filter_plaintext_negotiate_routes(&mut routes, &destination.scheme, &cfg.options.auth);
+    if blocked_plaintext_negotiate_route && routes.0.is_empty() && !cfg.direct_fallback {
+        let message = "Negotiate authentication over a plaintext HTTP proxy requires HTTPS";
+        publish(
+            &events,
+            AccessEntry::for_request(
+                peer,
+                None,
+                &req,
+                start.elapsed(),
+                AccessOutcome::Error(message.into()),
+            ),
+        );
+        return Ok(error_response(StatusCode::BAD_GATEWAY, message));
+    }
     let direct_fallback =
         cfg.direct_fallback && !routes.0.iter().any(|route| matches!(route, Route::Direct));
     // Preserve policy order. Sequential selection also bounds socket use and gives deterministic behavior.
@@ -1615,6 +1631,54 @@ async fn handle(
     }
 }
 
+fn filter_plaintext_negotiate_routes(
+    routes: &mut Routes,
+    destination_scheme: &str,
+    auth: &crate::auth::AuthFactory,
+) -> bool {
+    if destination_scheme != "http" {
+        return false;
+    }
+    let mut blocked = false;
+    routes.0.retain(|route| {
+        let unsafe_route = matches!(route, Route::Http(proxy)
+            if auth.http_negotiate_enabled(&proxy.host));
+        blocked |= unsafe_route;
+        !unsafe_route
+    });
+    blocked
+}
+
+#[cfg(all(test, feature = "negotiate"))]
+mod plaintext_negotiate_route_tests {
+    use super::*;
+
+    #[test]
+    fn removes_only_plaintext_proxy_candidates_when_secure_alternatives_exist() {
+        let auth = crate::auth::AuthFactory::negotiate(Vec::new());
+        let plain = Endpoint {
+            host: "plain.proxy.test".into(),
+            port: 8080,
+        };
+        let secure = Endpoint {
+            host: "secure.proxy.test".into(),
+            port: 8443,
+        };
+        let mut routes = Routes(vec![
+            Route::Http(plain),
+            Route::Https(secure.clone()),
+            Route::Direct,
+        ]);
+
+        assert!(filter_plaintext_negotiate_routes(
+            &mut routes,
+            "http",
+            &auth
+        ));
+        assert_eq!(routes, Routes(vec![Route::Https(secure), Route::Direct]));
+    }
+}
+
 fn trusted_management_request(
     req: &Request<Incoming>,
     peer: SocketAddr,
@@ -1726,8 +1790,14 @@ async fn select_route(
         let dest = destination.clone();
         let options = options.clone();
         let excluded_direct_addrs = excluded_direct_addrs.clone();
-        let tunnel =
-            route.is_socks() || ((connect || force_tunnel) && !matches!(route, Route::Direct));
+        let negotiate_tunnel = match &route {
+            Route::Http(proxy) | Route::Https(proxy) => {
+                options.auth.http_negotiate_enabled(&proxy.host)
+            }
+            Route::Direct | Route::Socks4(_) | Route::Socks5(_) => false,
+        };
+        let tunnel = route.is_socks()
+            || ((connect || force_tunnel || negotiate_tunnel) && !matches!(route, Route::Direct));
         pending.push(Box::pin(async move {
             let result = net::connect_observed_resolved_excluding(
                 &route,

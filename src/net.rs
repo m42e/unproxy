@@ -464,6 +464,11 @@ async fn proxy_connect(
     } else {
         stream
     };
+    #[cfg(feature = "negotiate")]
+    if tunnel && let Some(context) = options.auth.http_negotiate_context(&proxy.host).await? {
+        negotiate_connect(&mut stream, proxy, destination, context, timeout).await?;
+        return Ok((stream, true));
+    }
     let mut auth_sent = false;
     if tunnel {
         // Basic credentials from netrc are reusable secrets. Only send them
@@ -522,6 +527,405 @@ async fn proxy_connect(
         }
     }
     Ok((stream, auth_sent))
+}
+
+#[cfg(feature = "negotiate")]
+async fn negotiate_connect(
+    stream: &mut BoxedIo,
+    proxy: &Endpoint,
+    destination: &Endpoint,
+    context: crate::auth::HttpNegotiateContext,
+    timeout: Duration,
+) -> Result<()> {
+    negotiate_connect_with(stream, proxy, destination, timeout, |input| {
+        context.step(input)
+    })
+    .await
+}
+
+#[cfg(feature = "negotiate")]
+async fn negotiate_connect_with<S, F, Fut>(
+    stream: &mut S,
+    proxy: &Endpoint,
+    destination: &Endpoint,
+    timeout: Duration,
+    mut step: F,
+) -> Result<()>
+where
+    S: AsyncIo,
+    F: FnMut(Option<Vec<u8>>) -> Fut,
+    Fut: Future<Output = Result<(Option<Vec<u8>>, bool)>>,
+{
+    let (mut token, _) = step(None).await?;
+    anyhow::ensure!(token.is_some(), "Negotiate produced no initial token");
+    let mut server_proof_complete = false;
+    for _ in 0..8 {
+        write_connect_request(stream, destination, token.as_deref()).await?;
+        let (status, headers) = read_connect_response(stream, timeout).await?;
+        if status == 407 {
+            let server_token = crate::auth::negotiate_server_token(&headers)
+                .ok_or_else(|| anyhow!("upstream Negotiate challenge is missing or invalid"))?;
+            consume_connect_response_body(stream, &headers).await?;
+            let (next_token, complete) = step(Some(server_token)).await?;
+            anyhow::ensure!(
+                complete || next_token.is_some(),
+                "incomplete Negotiate exchange produced no client token"
+            );
+            server_proof_complete = complete;
+            token = next_token;
+            continue;
+        }
+        if !(200..300).contains(&status) {
+            bail!("upstream proxy {proxy} rejected CONNECT with HTTP {status}");
+        }
+        if let Some(proof) = crate::auth::negotiate_server_token(&headers) {
+            let (_, complete) = step(Some(proof)).await?;
+            server_proof_complete = complete;
+        } else {
+            anyhow::ensure!(
+                !has_negotiate_challenge(&headers),
+                "upstream CONNECT response contains an invalid Negotiate proof"
+            );
+        }
+        anyhow::ensure!(
+            server_proof_complete,
+            "upstream CONNECT response is missing completed Negotiate proof"
+        );
+        return Ok(());
+    }
+    bail!("upstream Negotiate exchange exceeded 8 rounds")
+}
+
+#[cfg(feature = "negotiate")]
+fn has_negotiate_challenge(headers: &http::HeaderMap) -> bool {
+    headers
+        .get_all(http::header::PROXY_AUTHENTICATE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|challenge| {
+            challenge
+                .split_ascii_whitespace()
+                .next()
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("Negotiate"))
+        })
+}
+
+#[cfg(feature = "negotiate")]
+async fn write_connect_request<S: AsyncIo>(
+    stream: &mut S,
+    destination: &Endpoint,
+    token: Option<&[u8]>,
+) -> Result<()> {
+    use base64::Engine as _;
+    let authority = destination.authority();
+    let mut request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
+    if let Some(token) = token {
+        request.push_str("Proxy-Authorization: Negotiate ");
+        request.push_str(&base64::engine::general_purpose::STANDARD.encode(token));
+        request.push_str("\r\n");
+    }
+    request.push_str("Connection: keep-alive\r\n\r\n");
+    stream.write_all(request.as_bytes()).await?;
+    Ok(())
+}
+
+#[cfg(feature = "negotiate")]
+async fn read_connect_response<S: AsyncIo>(
+    stream: &mut S,
+    timeout: Duration,
+) -> Result<(u16, http::HeaderMap)> {
+    let mut response = Vec::new();
+    loop {
+        let mut byte = [0u8; 1];
+        let n = time::timeout(timeout, stream.read(&mut byte))
+            .await
+            .context("upstream CONNECT response timed out")??;
+        if n == 0 {
+            bail!("upstream proxy closed during CONNECT");
+        }
+        response.push(byte[0]);
+        if response.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if response.len() > 64 * 1024 {
+            bail!("upstream CONNECT headers too large");
+        }
+    }
+    let text = std::str::from_utf8(&response).context("invalid upstream CONNECT response")?;
+    let mut lines = text.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.split_ascii_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| anyhow!("invalid upstream CONNECT status"))?;
+    let mut headers = http::HeaderMap::new();
+    for line in lines.take_while(|line| !line.is_empty()) {
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| anyhow!("invalid upstream CONNECT header"))?;
+        headers.append(
+            http::HeaderName::from_bytes(name.trim().as_bytes())?,
+            http::HeaderValue::from_bytes(value.trim().as_bytes())?,
+        );
+    }
+    Ok((status, headers))
+}
+
+#[cfg(feature = "negotiate")]
+async fn consume_connect_response_body<S: AsyncIo>(
+    stream: &mut S,
+    headers: &http::HeaderMap,
+) -> Result<()> {
+    anyhow::ensure!(
+        !headers.contains_key(http::header::TRANSFER_ENCODING),
+        "chunked upstream CONNECT challenge bodies are unsupported"
+    );
+    let mut lengths = headers.get_all(http::header::CONTENT_LENGTH).iter();
+    let content_length = lengths.next();
+    anyhow::ensure!(
+        lengths.next().is_none(),
+        "multiple upstream CONNECT Content-Length headers"
+    );
+    let length = content_length
+        .map(|value| value.to_str().context("invalid CONNECT Content-Length"))
+        .transpose()?
+        .map(str::parse::<usize>)
+        .transpose()
+        .context("invalid CONNECT Content-Length")?
+        .unwrap_or(0);
+    anyhow::ensure!(
+        length <= 1024 * 1024,
+        "upstream CONNECT challenge body too large"
+    );
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).await?;
+    Ok(())
+}
+
+#[cfg(all(test, feature = "negotiate"))]
+mod http_negotiate_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    async fn scripted_connect(response: &'static [u8]) -> Result<()> {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let server_task = tokio::spawn(async move {
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                server.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("CONNECT destination.test:80 HTTP/1.1"));
+            assert!(request.contains("Proxy-Authorization: Negotiate Y2xpZW50"));
+            server.write_all(response).await.unwrap();
+        });
+        let proxy = Endpoint {
+            host: "proxy.test".into(),
+            port: 8080,
+        };
+        let destination = Endpoint {
+            host: "destination.test".into(),
+            port: 80,
+        };
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let steps = observed.clone();
+        let result = negotiate_connect_with(
+            &mut client,
+            &proxy,
+            &destination,
+            Duration::from_secs(1),
+            move |input| {
+                let steps = steps.clone();
+                async move {
+                    let mut steps = steps.lock().unwrap();
+                    steps.push(input.clone());
+                    match input.as_deref() {
+                        None => Ok((Some(b"client".to_vec()), false)),
+                        Some(b"proof") => Ok((None, true)),
+                        Some(_) => anyhow::bail!("invalid server proof"),
+                    }
+                }
+            },
+        )
+        .await;
+        server_task.await.unwrap();
+        assert_eq!(
+            observed.lock().unwrap().len(),
+            if response
+                .windows(b"Proxy-Authenticate:".len())
+                .any(|window| window == b"Proxy-Authenticate:")
+            {
+                2
+            } else {
+                1
+            }
+        );
+        result
+    }
+
+    #[tokio::test]
+    async fn rejects_success_response_without_negotiate_proof() {
+        let result = scripted_connect(b"HTTP/1.1 200 Connection Established\r\n\r\n").await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing completed Negotiate proof")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_negotiate_proof() {
+        let result = scripted_connect(
+            b"HTTP/1.1 200 Connection Established\r\nProxy-Authenticate: Negotiate YmFk\r\n\r\n",
+        )
+        .await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid server proof")
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_duplicate_connect_challenge_content_lengths() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(http::header::CONTENT_LENGTH, "0".parse().unwrap());
+        headers.append(http::header::CONTENT_LENGTH, "1".parse().unwrap());
+        let (mut client, _server) = tokio::io::duplex(16);
+        let error = consume_connect_response_body(&mut client, &headers)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("multiple upstream CONNECT Content-Length")
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_connect_after_server_proof_completes_context() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let server_task = tokio::spawn(async move {
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                server.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            assert!(
+                String::from_utf8(request)
+                    .unwrap()
+                    .contains("Proxy-Authorization: Negotiate Y2xpZW50\r\n")
+            );
+            server
+                .write_all(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate Y2hhbGxlbmdl\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                server.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            assert!(
+                String::from_utf8(request)
+                    .unwrap()
+                    .contains("Proxy-Authorization: Negotiate Y2xpZW50LWZpbmFs\r\n")
+            );
+            server
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let proxy = Endpoint {
+            host: "proxy.test".into(),
+            port: 8080,
+        };
+        let destination = Endpoint {
+            host: "destination.test".into(),
+            port: 443,
+        };
+        let result = negotiate_connect_with(
+            &mut client,
+            &proxy,
+            &destination,
+            Duration::from_secs(1),
+            |input| async move {
+                match input.as_deref() {
+                    None => Ok((Some(b"client".to_vec()), false)),
+                    Some(b"challenge") => Ok((Some(b"client-final".to_vec()), true)),
+                    Some(b"proof") => Ok((None, true)),
+                    _ => anyhow::bail!("invalid server proof"),
+                }
+            },
+        )
+        .await;
+        server_task.await.unwrap();
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn accepts_completed_407_proof_followed_by_200_without_another_token() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let server_task = tokio::spawn(async move {
+            let mut byte = [0];
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                server.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            server
+                .write_all(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate cHJvb2Y=\r\nContent-Length: 0\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            request.clear();
+            while !request.ends_with(b"\r\n\r\n") {
+                server.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            assert!(
+                !String::from_utf8(request)
+                    .unwrap()
+                    .contains("Proxy-Authorization:")
+            );
+            server
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let proxy = Endpoint {
+            host: "proxy.test".into(),
+            port: 8080,
+        };
+        let destination = Endpoint {
+            host: "destination.test".into(),
+            port: 443,
+        };
+        negotiate_connect_with(
+            &mut client,
+            &proxy,
+            &destination,
+            Duration::from_secs(1),
+            |input| async move {
+                match input.as_deref() {
+                    None => Ok((Some(b"client".to_vec()), false)),
+                    Some(b"proof") => Ok((None, true)),
+                    _ => anyhow::bail!("unexpected server proof"),
+                }
+            },
+        )
+        .await
+        .unwrap();
+        server_task.await.unwrap();
+    }
 }
 
 const MAX_PAC_BYTES: usize = 8 * 1024 * 1024;

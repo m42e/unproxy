@@ -3,7 +3,7 @@ use crate::{
     net::{self, BoxedIo, ConnectionOptions},
     route::{Endpoint, Route},
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{
     pin::Pin,
     task::{Context as TaskContext, Poll},
@@ -74,6 +74,12 @@ impl Connection {
         options: &ConnectionOptions,
         timeout: Duration,
     ) -> Result<Self> {
+        if !tunnel
+            && let Route::Http(endpoint) = &route
+            && options.auth.http_negotiate_enabled(&endpoint.host)
+        {
+            bail!("HTTP Negotiate cannot use an ordinary plaintext proxy connection");
+        }
         let transport = match route {
             Route::Direct => Transport::DirectTcp,
             Route::Socks4(_) | Route::Socks5(_) => Transport::SocksTunnel,

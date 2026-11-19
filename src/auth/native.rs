@@ -10,6 +10,8 @@ pub struct NegotiateContext {
     socks: bool,
     complete: bool,
 }
+#[cfg(all(feature = "negotiate", unix))]
+const GSS_C_MUTUAL_FLAG: u32 = 2;
 // GSS handles are owned by this context and all access during a SOCKS exchange
 // is serialized by one mutex before operations are moved to the relay task.
 #[cfg(all(feature = "negotiate", unix))]
@@ -225,7 +227,7 @@ impl NegotiateContext {
                 &self.lib,
             );
 
-            let (token, complete) = gss_step(
+            let (token, complete, mutual) = gss_step(
                 GssStepRequest {
                     ctx,
                     target,
@@ -237,6 +239,11 @@ impl NegotiateContext {
                 |minor, buffer| release_gss_buffer(lib, minor, buffer),
                 |status, kind| gss_status_text(lib, status, kind),
             )?;
+            if complete && !self.socks && !mutual {
+                return Err(anyhow!(
+                    "HTTP Negotiate did not establish mutual authentication"
+                ));
+            }
             self.complete = complete;
             Ok((token, complete))
         }
@@ -295,7 +302,7 @@ unsafe fn gss_step(
     init: GssInitSecContext,
     mut release_buffer: impl FnMut(&mut u32, &mut GssBuf),
     mut display_status: impl FnMut(u32, i32) -> String,
-) -> Result<(Option<Vec<u8>>, bool)> {
+) -> Result<(Option<Vec<u8>>, bool, bool)> {
     let GssStepRequest {
         ctx,
         target,
@@ -356,7 +363,11 @@ unsafe fn gss_step(
             display_status(minor, 2)
         ));
     }
-    Ok((token, (status as u32 & 0xffff) == 0))
+    Ok((
+        token,
+        (status as u32 & 0xffff) == 0,
+        flags & GSS_C_MUTUAL_FLAG != 0,
+    ))
 }
 
 #[cfg(all(feature = "negotiate", unix))]
@@ -813,9 +824,14 @@ impl NegotiateContext {
             self.ctx = next;
             storage.truncate(outbuf.size as usize);
             self.complete = status == 0;
-            if self.socks && self.complete && attrs & 2 == 0 {
+            if self.complete && attrs & 2 == 0 {
+                if self.socks {
+                    return Err(anyhow!(
+                        "Windows Negotiate did not establish mutual authentication for SOCKS5"
+                    ));
+                }
                 return Err(anyhow!(
-                    "Windows Negotiate did not establish mutual authentication for SOCKS5"
+                    "Windows Negotiate did not establish mutual authentication for HTTP"
                 ));
             }
             Ok(((!storage.is_empty()).then_some(storage), self.complete))
@@ -1280,7 +1296,7 @@ mod tests {
         let mut context = std::ptr::null_mut();
         let target = std::ptr::NonNull::<u8>::dangling().as_ptr().cast();
 
-        let (token, complete) = unsafe {
+        let (token, complete, _) = unsafe {
             gss_step(
                 GssStepRequest {
                     ctx: &mut context,
@@ -1299,7 +1315,7 @@ mod tests {
         assert!(!complete);
         assert!(!context.is_null());
 
-        let (token, complete) = unsafe {
+        let (token, complete, _) = unsafe {
             gss_step(
                 GssStepRequest {
                     ctx: &mut context,

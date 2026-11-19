@@ -307,6 +307,34 @@ impl AuthFactory {
         let _ = host;
         false
     }
+    /// HTTP Negotiate must finish a mutual-authentication exchange before any
+    /// ordinary request is sent to this proxy.
+    pub(crate) fn http_negotiate_enabled(&self, host: &str) -> bool {
+        #[cfg(feature = "negotiate")]
+        if let AuthMode::Negotiate(hosts) = &self.mode {
+            return hosts.is_empty() || hosts.iter().any(|allowed| allowed == host);
+        }
+        let _ = host;
+        false
+    }
+    #[cfg(feature = "negotiate")]
+    pub(crate) async fn http_negotiate_context(
+        &self,
+        host: &str,
+    ) -> Result<Option<HttpNegotiateContext>> {
+        if !self.http_negotiate_enabled(host) {
+            return Ok(None);
+        }
+        let host = host.to_owned();
+        tokio::task::spawn_blocking(move || {
+            native::NegotiateContext::new(&host)
+                .with_context(|| format!("initializing HTTP Negotiate for upstream {host}"))
+                .map(HttpNegotiateContext::new)
+        })
+        .await
+        .context("HTTP Negotiate initialization worker failed")?
+        .map(Some)
+    }
     #[cfg(feature = "negotiate")]
     pub(crate) fn socks_gss_context(&self, host: &str) -> Result<Option<NegotiateContext>> {
         if self.socks_gss_enabled(host) {
@@ -385,6 +413,28 @@ impl AuthFactory {
         .await
         .map_err(|_| anyhow!("authorization timed out for {timeout_host}"))?
         .with_context(|| format!("generating authorization for upstream {timeout_host}"))?
+    }
+}
+
+#[cfg(feature = "negotiate")]
+pub(crate) struct HttpNegotiateContext(Arc<std::sync::Mutex<native::NegotiateContext>>);
+
+#[cfg(feature = "negotiate")]
+impl HttpNegotiateContext {
+    fn new(context: native::NegotiateContext) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(context)))
+    }
+
+    pub(crate) async fn step(&self, input: Option<Vec<u8>>) -> Result<(Option<Vec<u8>>, bool)> {
+        let context = self.0.clone();
+        tokio::task::spawn_blocking(move || {
+            context
+                .lock()
+                .map_err(|_| anyhow!("HTTP Negotiate context lock poisoned"))?
+                .step_with_status(input.as_deref())
+        })
+        .await
+        .context("HTTP Negotiate worker failed")?
     }
 }
 
