@@ -19,6 +19,60 @@ const __originalIsValidIpAddress = isValidIpAddress;
 const __originalConvertAddr = convert_addr;
 const __originalParseIPv4 = __unproxyParseIPv4;
 const __originalDnsResolve = dnsResolve;
+const __unproxyInstallDnsResolveGuard = (() => {
+  const globalObject = globalThis;
+  const defineProperty = Object.defineProperty;
+  const apply = Reflect.apply;
+  const markOverride = __unproxyMarkDnsOverride;
+  let current = globalObject.dnsResolve;
+  let finalized = false;
+  return function(finalize) {
+    if (finalized) return;
+    const currentValue = globalObject.dnsResolve;
+    if (dnsResolve !== __originalDnsResolve || currentValue !== __originalDnsResolve) {
+      markOverride();
+    }
+    current = currentValue;
+    try {
+      apply(defineProperty, Object, [globalObject, 'dnsResolve', {
+        configurable: !finalize,
+        enumerable: true,
+        get() { return current; },
+        set(value) { markOverride(); current = value; }
+      }]);
+    } catch (_) {
+      markOverride();
+    }
+    finalized = finalize;
+  };
+})();
+(() => {
+  const globalObject = globalThis;
+  const objectConstructor = Object;
+  const reflectObject = Reflect;
+  const objectDefineProperty = objectConstructor.defineProperty;
+  const objectDefineProperties = objectConstructor.defineProperties;
+  const reflectDefineProperty = reflectObject.defineProperty;
+  const apply = reflectObject.apply;
+  const toString = String;
+  const markOverride = __unproxyMarkDnsOverride;
+  const hasOwn = Object.prototype.hasOwnProperty;
+  objectConstructor.defineProperty = function(target, property, descriptor) {
+    const result = apply(objectDefineProperty, objectConstructor, [target, property, descriptor]);
+    if (target === globalObject && toString(property) === 'dnsResolve') markOverride();
+    return result;
+  };
+  objectConstructor.defineProperties = function(target, descriptors) {
+    const result = apply(objectDefineProperties, objectConstructor, [target, descriptors]);
+    if (target === globalObject && apply(hasOwn, descriptors, ['dnsResolve'])) markOverride();
+    return result;
+  };
+  reflectObject.defineProperty = function(target, property, descriptor) {
+    const result = apply(reflectDefineProperty, reflectObject, [target, property, descriptor]);
+    if (result && target === globalObject && toString(property) === 'dnsResolve') markOverride();
+    return result;
+  };
+})();
 function isInNet(host, pattern, mask) {
   if (typeof host === 'string' && dnsResolve === __originalDnsResolve && isValidIpAddress === __originalIsValidIpAddress && convert_addr === __originalConvertAddr && __unproxyParseIPv4 === __originalParseIPv4) {
     const network = __unproxyParseIPv4(pattern), subnet = __unproxyParseIPv4(mask);

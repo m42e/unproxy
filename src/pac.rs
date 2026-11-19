@@ -27,6 +27,7 @@ const PAC_RECURSION_LIMIT: usize = 64;
 const PAC_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 const MAX_PAC_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
 const DNS_RESOLVE_BUDGET: usize = 4;
+const PAC_LOAD_DNS_SNAPSHOT_CAPACITY: usize = 64;
 const DNS_RESOLVE_TIMEOUT: Duration = Duration::from_millis(100);
 const DNS_RESOLVER_WORKERS: usize = 4;
 const DNS_RESOLVER_QUEUE_PER_WORKER: usize = 4;
@@ -98,6 +99,11 @@ pub struct Pac {
     last_routes: Option<(JsString, Rc<Routes>)>,
     route_cache_order: VecDeque<JsString>,
     cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    evaluated_dns: Arc<Mutex<HashMap<String, Option<IpAddr>>>>,
+    load_dns_snapshot: HashMap<String, Option<IpAddr>>,
+    load_dns_overflow: bool,
+    dns_override_detected: Arc<AtomicBool>,
+    dns_override_at_load: bool,
     glob_cache:
         Rc<RefCell<HashMap<JsString, std::result::Result<glob::Pattern, ShellPatternError>>>>,
     last_prune: Instant,
@@ -130,6 +136,11 @@ impl Pac {
             source: None,
             dns_resolver,
             cache: Arc::new(Mutex::new(HashMap::new())),
+            evaluated_dns: Arc::new(Mutex::new(HashMap::new())),
+            load_dns_snapshot: HashMap::new(),
+            load_dns_overflow: false,
+            dns_override_detected: Arc::new(AtomicBool::new(false)),
+            dns_override_at_load: false,
             glob_cache: Rc::new(RefCell::new(HashMap::new())),
             route_cache: HashMap::new(),
             last_routes: None,
@@ -156,6 +167,11 @@ impl Pac {
             source: None,
             dns_resolver: self.dns_resolver.clone(),
             cache: Arc::new(Mutex::new(HashMap::new())),
+            evaluated_dns: Arc::new(Mutex::new(HashMap::new())),
+            load_dns_snapshot: HashMap::new(),
+            load_dns_overflow: false,
+            dns_override_detected: Arc::new(AtomicBool::new(false)),
+            dns_override_at_load: false,
             glob_cache: Rc::new(RefCell::new(HashMap::new())),
             route_cache: HashMap::new(),
             last_routes: None,
@@ -178,6 +194,8 @@ impl Pac {
         self.last_prune = Instant::now();
         self.source = source.map(str::to_owned);
         let dns_cache = self.cache.clone();
+        let evaluated_dns = self.evaluated_dns.clone();
+        let dns_override_detected = self.dns_override_detected.clone();
         let dns_budget = self.dns_budget.clone();
         let dns_resolver = self.dns_resolver.clone();
         let dns = unsafe {
@@ -203,10 +221,11 @@ impl Pac {
                         None
                     } else {
                         let ip = dns_resolver.resolve(&host, DNS_RESOLVE_TIMEOUT);
-                        c.insert(host, CacheEntry { value: ip, at: now });
+                        c.insert(host.clone(), CacheEntry { value: ip, at: now });
                         ip
                     }
                 };
+                evaluated_dns.lock().unwrap().insert(host, value);
                 Ok(value
                     .map(|v| JsValue::from(JsString::from(v.to_string())))
                     .unwrap_or(JsValue::null()))
@@ -215,6 +234,19 @@ impl Pac {
         self.context
             .register_global_builtin_callable(JsString::from("dnsResolve"), 1, dns)
             .map_err(|e| anyhow!("register dnsResolve: {e}"))?;
+        let dns_override_marker = unsafe {
+            NativeFunction::from_closure(move |_, _, _| {
+                dns_override_detected.store(true, Ordering::Relaxed);
+                Ok(JsValue::undefined())
+            })
+        };
+        self.context
+            .register_global_builtin_callable(
+                JsString::from("__unproxyMarkDnsOverride"),
+                0,
+                dns_override_marker,
+            )
+            .map_err(|e| anyhow!("register DNS override marker: {e}"))?;
         let glob_cache = self.glob_cache.clone();
         let sh_exp_match = unsafe {
             NativeFunction::from_closure(move |_, args, _| {
@@ -397,6 +429,8 @@ impl Pac {
 
         eval_script_sync(include_str!("pac_helpers.js"), &mut self.context)
             .map_err(|e| anyhow!("PAC helper initialization: {e}"))?;
+        eval_script_sync("__unproxyInstallDnsResolveGuard(false)", &mut self.context)
+            .map_err(|e| anyhow!("PAC DNS guard initialization: {e}"))?;
         let script = source.unwrap_or(DEFAULT_SCRIPT);
         eval_script_sync(script, &mut self.context).map_err(|e| anyhow!("PAC script: {e}"))?;
         if source.is_some() {
@@ -407,6 +441,15 @@ impl Pac {
                 bail!("PAC script is missing callable FindProxyForURL")
             }
         }
+        let loaded_dns = self.evaluated_dns.lock().unwrap().clone();
+        self.load_dns_overflow = loaded_dns.len() > PAC_LOAD_DNS_SNAPSHOT_CAPACITY;
+        self.load_dns_snapshot = loaded_dns
+            .into_iter()
+            .take(PAC_LOAD_DNS_SNAPSHOT_CAPACITY)
+            .collect();
+        eval_script_sync("__unproxyInstallDnsResolveGuard(true)", &mut self.context)
+            .map_err(|e| anyhow!("PAC DNS guard initialization: {e}"))?;
+        self.dns_override_at_load = self.dns_override_detected.load(Ordering::Relaxed);
         eval_script_sync(
             "if (typeof _dnsCache === 'undefined') var _dnsCache = new _DnsCache();",
             &mut self.context,
@@ -460,9 +503,22 @@ impl Pac {
             .map_err(|e| anyhow!("PAC evaluation: {e}"))?;
         self.parse_routes(val)
     }
+    #[cfg(test)]
     async fn evaluate_bounded(&mut self, url: &str, host: &str) -> Result<Routes> {
+        self.evaluate_bounded_with_dns(url, host)
+            .await
+            .map(|(routes, _, _)| routes)
+    }
+    async fn evaluate_bounded_with_dns(
+        &mut self,
+        url: &str,
+        host: &str,
+    ) -> Result<(Routes, DnsAnswers, bool)> {
         self.prune_dns_cache();
         self.dns_budget.store(0, Ordering::Relaxed);
+        self.evaluated_dns.lock().unwrap().clear();
+        self.dns_override_detected
+            .store(self.dns_override_at_load, Ordering::Relaxed);
         self.set_evaluation_arguments(url, host)?;
         let value = tokio::time::timeout(
             PAC_EVAL_TIMEOUT,
@@ -472,7 +528,30 @@ impl Pac {
         .await
         .context("PAC evaluation exceeded its time limit")?
         .map_err(|e| anyhow!("PAC evaluation: {e}"))?;
-        self.parse_routes(value)
+        let routes = self.parse_routes(value)?;
+        let native_dns =
+            eval_script_sync("dnsResolve === __originalDnsResolve", &mut self.context)?
+                .as_boolean()
+                .unwrap_or(false)
+                && !self.dns_override_detected.load(Ordering::Relaxed)
+                && !self.load_dns_overflow;
+        let mut evaluated_dns = self
+            .evaluated_dns
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(host, answer)| (host.clone(), *answer))
+            .collect::<Vec<_>>();
+        // PAC scripts may resolve the destination while loading and reuse that
+        // answer from JavaScript state during later evaluations. Keep the
+        // bounded load snapshot until script replacement, independently of the
+        // shorter DNS cache TTL, then reconcile it with this evaluation.
+        evaluated_dns.extend(
+            self.load_dns_snapshot
+                .iter()
+                .map(|(queried, answer)| (queried.clone(), *answer)),
+        );
+        Ok((routes, evaluated_dns, native_dns))
     }
     fn set_evaluation_arguments(&mut self, url: &str, host: &str) -> Result<()> {
         let global = self.context.global_object();
@@ -513,8 +592,11 @@ impl Pac {
     }
 }
 
+type EvaluatedRoutes = Result<(Routes, Option<Option<IpAddr>>)>;
+
 enum Job {
     Eval(String, String, bool, oneshot::Sender<Result<Routes>>),
+    EvalWithDns(String, String, bool, oneshot::Sender<EvaluatedRoutes>),
     EvalEach(String, String, oneshot::Sender<Vec<Result<Routes, String>>>),
     Scripts(Vec<String>, oneshot::Sender<Result<()>>),
     Ip(IpAddr, oneshot::Sender<()>),
@@ -580,6 +662,23 @@ impl Policy {
                                 Err(anyhow!("routing policy is unavailable"))
                             } else {
                                 evaluate_scripts_bounded(
+                                    &mut pacs,
+                                    &u,
+                                    &h,
+                                    &runtime,
+                                    &worker_evaluation_stats,
+                                )
+                            };
+                            let _ = r.send(result);
+                        }
+                        Job::EvalWithDns(u, h, strict, r) => {
+                            if r.is_closed() {
+                                continue;
+                            }
+                            let result = if strict && !worker_loaded.load(Ordering::Acquire) {
+                                Err(anyhow!("routing policy is unavailable"))
+                            } else {
+                                evaluate_scripts_bounded_with_dns(
                                     &mut pacs,
                                     &u,
                                     &h,
@@ -665,6 +764,19 @@ impl Policy {
     }
     pub async fn evaluate_strict(&self, url: String, host: String) -> Result<Routes> {
         self.evaluate_with_policy(url, host, true).await
+    }
+    pub(crate) async fn evaluate_with_dns(
+        &self,
+        url: String,
+        host: String,
+        strict: bool,
+    ) -> Result<(Routes, Option<Option<IpAddr>>)> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Job::EvalWithDns(url, host, strict, tx))
+            .await
+            .map_err(|_| anyhow!("PAC worker stopped"))?;
+        rx.await.context("PAC worker stopped")?
     }
     pub async fn evaluate_each(
         &self,
@@ -752,6 +864,63 @@ fn evaluate_scripts_bounded(
     Ok("DIRECT".parse().expect("DIRECT is valid"))
 }
 
+fn evaluate_scripts_bounded_with_dns(
+    pacs: &mut [Pac],
+    url: &str,
+    host: &str,
+    runtime: &tokio::runtime::Runtime,
+    evaluation_stats: &Mutex<PacEvaluationAccumulator>,
+) -> Result<(Routes, Option<Option<IpAddr>>)> {
+    let mut destination_answers = Vec::new();
+    let mut dns_overridden = false;
+    for pac in pacs {
+        let (routes, queries, native_dns) =
+            evaluate_pac_bounded_with_dns(pac, url, host, runtime, evaluation_stats)?;
+        dns_overridden |= !native_dns;
+        destination_answers.extend(
+            queries
+                .iter()
+                .filter(|(queried, _)| same_dns_name(queried, host))
+                .map(|(_, answer)| *answer),
+        );
+        if routes.0.iter().any(|route| !matches!(route, Route::Direct)) {
+            return Ok((
+                routes,
+                direct_dns_answer(&destination_answers, dns_overridden),
+            ));
+        }
+    }
+    Ok((
+        "DIRECT".parse().expect("DIRECT is valid"),
+        direct_dns_answer(&destination_answers, dns_overridden),
+    ))
+}
+
+fn same_dns_name(left: &str, right: &str) -> bool {
+    left.strip_suffix('.')
+        .unwrap_or(left)
+        .eq_ignore_ascii_case(right.strip_suffix('.').unwrap_or(right))
+}
+
+fn agreed_dns_answer(answers: &[Option<IpAddr>]) -> Option<Option<IpAddr>> {
+    let first = answers.first().copied()?;
+    if answers.iter().all(|answer| *answer == first) {
+        Some(first)
+    } else {
+        // PAC saw conflicting answers; permit proxy routes, but prevent DIRECT
+        // from resolving the destination independently and bypassing policy.
+        Some(None)
+    }
+}
+
+fn direct_dns_answer(answers: &[Option<IpAddr>], dns_overridden: bool) -> Option<Option<IpAddr>> {
+    if dns_overridden {
+        Some(None)
+    } else {
+        agreed_dns_answer(answers)
+    }
+}
+
 fn evaluate_pac_bounded(
     pac: &mut Pac,
     url: &str,
@@ -759,8 +928,19 @@ fn evaluate_pac_bounded(
     runtime: &tokio::runtime::Runtime,
     evaluation_stats: &Mutex<PacEvaluationAccumulator>,
 ) -> Result<Routes> {
+    evaluate_pac_bounded_with_dns(pac, url, host, runtime, evaluation_stats)
+        .map(|(routes, _, _)| routes)
+}
+
+fn evaluate_pac_bounded_with_dns(
+    pac: &mut Pac,
+    url: &str,
+    host: &str,
+    runtime: &tokio::runtime::Runtime,
+    evaluation_stats: &Mutex<PacEvaluationAccumulator>,
+) -> Result<(Routes, DnsAnswers, bool)> {
     let started = Instant::now();
-    let result = runtime.block_on(pac.evaluate_bounded(url, host));
+    let result = runtime.block_on(pac.evaluate_bounded_with_dns(url, host));
     let duration = started.elapsed();
     evaluation_stats
         .lock()
@@ -872,6 +1052,7 @@ fn compile_shell_pattern(source: &str) -> std::result::Result<glob::Pattern, She
 }
 
 type HostLookup = dyn Fn(&str) -> Option<IpAddr> + Send + Sync;
+type DnsAnswers = Vec<(String, Option<IpAddr>)>;
 
 struct DnsRequest {
     host: String,
@@ -1181,6 +1362,271 @@ mod tests {
             Some(&Some("192.0.2.44".parse().unwrap()))
         );
         assert_eq!(cache.get("negative.test"), Some(&None));
+    }
+
+    #[tokio::test]
+    async fn policy_returns_only_the_destination_dns_answer_used_by_that_evaluation() {
+        assert!(super::same_dns_name("Target.Test.", "target.test"));
+        assert!(!super::same_dns_name("target.test..", "target.test"));
+
+        let resolver = DnsResolver::new(
+            1,
+            4,
+            Arc::new(|host| {
+                (host
+                    .trim_end_matches('.')
+                    .eq_ignore_ascii_case("target.test"))
+                .then(|| "198.51.100.17".parse().unwrap())
+            }),
+        );
+        let policy = Policy::new_scripts_with_resolver(
+            vec!["function FindProxyForURL(url, host){ return dnsResolve(host)==='198.51.100.17' ? 'DIRECT' : 'PROXY fallback.test:8080'; }".into()],
+            "127.0.0.1".parse().unwrap(),
+            resolver.clone(),
+        )
+        .unwrap();
+
+        let (routes, resolved) = policy
+            .evaluate_with_dns("http://target.test/".into(), "Target.Test.".into(), false)
+            .await
+            .unwrap();
+        assert_eq!(routes.to_string(), "DIRECT");
+        assert_eq!(resolved, Some(Some("198.51.100.17".parse().unwrap())));
+
+        let load_cached_policy = Policy::new_scripts_with_resolver(
+            vec!["const cachedDestination=dnsResolve('target.test'); function FindProxyForURL(){ return cachedDestination==='198.51.100.17' ? 'DIRECT' : 'PROXY fallback.test:8080'; }".into()],
+            "127.0.0.1".parse().unwrap(),
+            resolver.clone(),
+        )
+        .unwrap();
+        let (routes, loaded_answer) = load_cached_policy
+            .evaluate_with_dns("http://target.test/".into(), "target.test".into(), false)
+            .await
+            .unwrap();
+        assert_eq!(routes.to_string(), "DIRECT");
+        assert_eq!(loaded_answer, Some(Some("198.51.100.17".parse().unwrap())));
+
+        let negative_load_policy = Policy::new_scripts_with_resolver(
+            vec!["const cachedDestination=dnsResolve('missing.test'); function FindProxyForURL(){ return cachedDestination===null ? 'DIRECT' : 'PROXY fallback.test:8080'; }".into()],
+            "127.0.0.1".parse().unwrap(),
+            resolver.clone(),
+        )
+        .unwrap();
+        let (routes, negative_loaded_answer) = negative_load_policy
+            .evaluate_with_dns("http://missing.test/".into(), "missing.test".into(), false)
+            .await
+            .unwrap();
+        assert_eq!(routes.to_string(), "DIRECT");
+        assert_eq!(negative_loaded_answer, Some(None));
+
+        let mut load_cached_pac = Pac::new_with_ip_and_resolver(
+            Some("const cachedDestination=dnsResolve('target.test'); function FindProxyForURL(){ return cachedDestination==='198.51.100.17' ? 'DIRECT' : 'PROXY fallback.test:8080'; }"),
+            "127.0.0.1".parse().unwrap(),
+            resolver.clone(),
+        )
+        .unwrap();
+        load_cached_pac
+            .cache
+            .lock()
+            .unwrap()
+            .get_mut("target.test")
+            .unwrap()
+            .at = Instant::now() - Duration::from_secs(301);
+        let (routes, load_answers, native_dns) = load_cached_pac
+            .evaluate_bounded_with_dns("http://target.test/", "target.test")
+            .await
+            .unwrap();
+        assert_eq!(routes.to_string(), "DIRECT");
+        assert!(native_dns);
+        assert_eq!(
+            load_answers,
+            vec![("target.test".into(), Some("198.51.100.17".parse().unwrap()))]
+        );
+
+        let dns_calls = Arc::new(AtomicUsize::new(0));
+        let changing_resolver = DnsResolver::new(
+            1,
+            4,
+            Arc::new({
+                let dns_calls = dns_calls.clone();
+                move |_| {
+                    let answer = if dns_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                        "198.51.100.17"
+                    } else {
+                        "198.51.100.18"
+                    };
+                    Some(answer.parse().unwrap())
+                }
+            }),
+        );
+        let mut changed_pac = Pac::new_with_ip_and_resolver(
+            Some("const cachedDestination=dnsResolve('target.test'); function FindProxyForURL(url,host){ dnsResolve(host); return cachedDestination==='198.51.100.17' ? 'DIRECT' : 'PROXY fallback.test:8080'; }"),
+            "127.0.0.1".parse().unwrap(),
+            changing_resolver,
+        )
+        .unwrap();
+        changed_pac
+            .cache
+            .lock()
+            .unwrap()
+            .get_mut("target.test")
+            .unwrap()
+            .at = Instant::now() - Duration::from_secs(301);
+        let (routes, changed_answers, native_dns) = changed_pac
+            .evaluate_bounded_with_dns("http://target.test/", "target.test")
+            .await
+            .unwrap();
+        assert_eq!(routes.to_string(), "DIRECT");
+        assert!(native_dns);
+        let destination_answers = changed_answers
+            .iter()
+            .filter(|(queried, _)| super::same_dns_name(queried, "target.test"))
+            .map(|(_, answer)| *answer)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            super::direct_dns_answer(&destination_answers, !native_dns),
+            Some(None)
+        );
+
+        let (routes, unresolved) = policy
+            .evaluate_with_dns("http://missing.test/".into(), "missing.test".into(), false)
+            .await
+            .unwrap();
+        assert_eq!(routes.to_string(), "HTTP fallback.test:8080");
+        assert_eq!(unresolved, Some(None));
+
+        let malformed_alias_policy = Policy::new_scripts_with_resolver(
+            vec![
+                "function FindProxyForURL(){ dnsResolve('target.test..'); return 'DIRECT'; }"
+                    .into(),
+            ],
+            "127.0.0.1".parse().unwrap(),
+            resolver,
+        )
+        .unwrap();
+        let (routes, malformed_alias) = malformed_alias_policy
+            .evaluate_with_dns("http://target.test/".into(), "target.test".into(), false)
+            .await
+            .unwrap();
+        assert_eq!(routes.to_string(), "DIRECT");
+        assert_eq!(malformed_alias, None);
+    }
+
+    #[tokio::test]
+    async fn conflicting_equivalent_pac_dns_queries_disable_direct_resolution() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver = DnsResolver::new(
+            2,
+            2,
+            Arc::new({
+                let calls = calls.clone();
+                move |_| {
+                    let address = if calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                        "198.51.100.1"
+                    } else {
+                        "198.51.100.2"
+                    };
+                    Some(address.parse().unwrap())
+                }
+            }),
+        );
+        let policy = Policy::new_scripts_with_resolver(
+            vec!["function FindProxyForURL(url, host){ dnsResolve(host); dnsResolve(host.toUpperCase()); return 'DIRECT'; }".into()],
+            "127.0.0.1".parse().unwrap(),
+            resolver,
+        )
+        .unwrap();
+
+        let (routes, resolved) = policy
+            .evaluate_with_dns("http://target.test/".into(), "target.test".into(), false)
+            .await
+            .unwrap();
+        assert_eq!(routes.to_string(), "DIRECT");
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(resolved, Some(None));
+    }
+
+    #[tokio::test]
+    async fn overridden_dns_resolver_disables_direct_but_preserves_proxy_routes() {
+        for (script, expected_route, expected_resolved) in [
+            (
+                "const nativeDns=dnsResolve; dnsResolve=(host)=>{nativeDns(host); return '203.0.113.9';}; function FindProxyForURL(url,host){return dnsResolve(host)==='203.0.113.9'?'DIRECT':'PROXY fallback.test:8080';}",
+                "DIRECT",
+                Some(None),
+            ),
+            (
+                "dnsResolve=()=> '203.0.113.9'; function FindProxyForURL(url,host){return dnsResolve(host)==='203.0.113.9'?'DIRECT':'PROXY fallback.test:8080';}",
+                "DIRECT",
+                Some(None),
+            ),
+            (
+                "__unproxyMarkDnsOverride=()=>{}; function dnsResolve(host){return '203.0.113.9';} const observed=dnsResolve('target.test'); dnsResolve=__originalDnsResolve; function FindProxyForURL(){return observed==='203.0.113.9'?'DIRECT':'PROXY fallback.test:8080';}",
+                "DIRECT",
+                Some(None),
+            ),
+            (
+                "const nativeDns=dnsResolve; function FindProxyForURL(url,host){dnsResolve=(name)=>{nativeDns(name);return '203.0.113.9';}; const observed=dnsResolve(host); dnsResolve=nativeDns; return observed==='203.0.113.9'?'DIRECT':'PROXY fallback.test:8080';}",
+                "DIRECT",
+                Some(None),
+            ),
+            (
+                "const nativeDns=dnsResolve; Object.defineProperty(globalThis,'dnsResolve',{value:(name)=>{nativeDns(name);return '203.0.113.9';},configurable:true}); const observed=dnsResolve('target.test'); Object.defineProperty(globalThis,'dnsResolve',{value:nativeDns,writable:true,configurable:true}); function FindProxyForURL(){return observed==='203.0.113.9'?'DIRECT':'PROXY fallback.test:8080';}",
+                "DIRECT",
+                Some(None),
+            ),
+            (
+                "const nativeDns=dnsResolve; Object.defineProperties(globalThis,{dnsResolve:{value:(name)=>{nativeDns(name);return '203.0.113.9';},configurable:true}}); const observed=dnsResolve('target.test'); Object.defineProperties(globalThis,{dnsResolve:{value:nativeDns,writable:true,configurable:true}}); function FindProxyForURL(){return observed==='203.0.113.9'?'DIRECT':'PROXY fallback.test:8080';}",
+                "DIRECT",
+                Some(None),
+            ),
+            (
+                "function FindProxyForURL(){try{Object.defineProperty(globalThis,'dnsResolve',{value:()=> '203.0.113.9',configurable:true}); return 'DIRECT';}catch(_){return 'PROXY fallback.test:8080';}}",
+                "HTTP fallback.test:8080",
+                None,
+            ),
+            (
+                "dnsResolve=()=> '203.0.113.9'; function FindProxyForURL(){return 'PROXY fallback.test:8080';}",
+                "HTTP fallback.test:8080",
+                Some(None),
+            ),
+            (
+                "const nativeDns=dnsResolve; function FindProxyForURL(url,host){delete globalThis.dnsResolve; dnsResolve=(name)=>{nativeDns(name);return '203.0.113.9';}; const observed=dnsResolve(host); dnsResolve=nativeDns; return observed==='203.0.113.9'?'DIRECT':'PROXY fallback.test:8080';}",
+                "DIRECT",
+                Some(None),
+            ),
+        ] {
+            let resolver =
+                DnsResolver::new(1, 4, Arc::new(|_| Some("192.0.2.10".parse().unwrap())));
+            let policy = Policy::new_scripts_with_resolver(
+                vec![script.into()],
+                "127.0.0.1".parse().unwrap(),
+                resolver,
+            )
+            .unwrap();
+            let (routes, resolved) = policy
+                .evaluate_with_dns("http://target.test/".into(), "target.test".into(), false)
+                .await
+                .unwrap();
+            assert_eq!(routes.to_string(), expected_route);
+            assert_eq!(resolved, expected_resolved);
+        }
+    }
+
+    #[tokio::test]
+    async fn dns_aware_evaluation_preserves_empty_policy_strictness() {
+        let policy = Policy::new_scripts(Vec::new()).unwrap();
+        let (routes, resolved) = policy
+            .evaluate_with_dns("http://example.test/".into(), "example.test".into(), false)
+            .await
+            .unwrap();
+        assert_eq!(routes.to_string(), "DIRECT");
+        assert_eq!(resolved, None);
+        assert!(
+            policy
+                .evaluate_with_dns("http://example.test/".into(), "example.test".into(), true)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

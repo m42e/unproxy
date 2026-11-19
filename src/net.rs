@@ -283,11 +283,25 @@ async fn tcp_excluding(
     timeout: Duration,
     excluded: &[SocketAddr],
 ) -> Result<TcpStream> {
+    tcp_excluding_resolved(endpoint, options, timeout, excluded, None).await
+}
+
+async fn tcp_excluding_resolved(
+    endpoint: &Endpoint,
+    options: &ConnectionOptions,
+    timeout: Duration,
+    excluded: &[SocketAddr],
+    resolved: Option<Option<IpAddr>>,
+) -> Result<TcpStream> {
     time::timeout(timeout, async {
-        let addresses = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
-            .await
-            .with_context(|| format!("resolving {endpoint}"))?
-            .collect::<Vec<_>>();
+        let addresses = match resolved {
+            Some(Some(ip)) => vec![SocketAddr::new(ip, endpoint.port)],
+            Some(None) => anyhow::bail!("PAC could not resolve destination {endpoint}"),
+            None => tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
+                .await
+                .with_context(|| format!("resolving {endpoint}"))?
+                .collect::<Vec<_>>(),
+        };
         let mut last_error = None;
         for address in addresses {
             if excluded.contains(&address) {
@@ -376,11 +390,40 @@ pub(crate) async fn connect_observed_excluding(
     timeout: Duration,
     excluded_direct_addrs: &[SocketAddr],
 ) -> Result<(BoxedIo, bool)> {
+    connect_observed_resolved_excluding(
+        route,
+        destination,
+        tunnel,
+        options,
+        timeout,
+        excluded_direct_addrs,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn connect_observed_resolved_excluding(
+    route: &Route,
+    destination: &Endpoint,
+    tunnel: bool,
+    options: &ConnectionOptions,
+    timeout: Duration,
+    excluded_direct_addrs: &[SocketAddr],
+    resolved_destination: Option<Option<IpAddr>>,
+) -> Result<(BoxedIo, bool)> {
     time::timeout(timeout, async {
         match route {
             Route::Direct => Ok((
-                Box::new(tcp_excluding(destination, options, timeout, excluded_direct_addrs).await?)
-                    as BoxedIo,
+                Box::new(
+                    tcp_excluding_resolved(
+                        destination,
+                        options,
+                        timeout,
+                        excluded_direct_addrs,
+                        resolved_destination,
+                    )
+                    .await?,
+                ) as BoxedIo,
                 false,
             )),
             Route::Http(proxy) => {

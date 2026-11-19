@@ -1393,17 +1393,16 @@ async fn handle(
             "Routing policy has not loaded",
         ));
     }
-    let evaluation = if cfg.strict_policy {
-        cfg.policy
-            .evaluate_strict(route_input.clone(), destination.endpoint.host.clone())
-            .await
-    } else {
-        cfg.policy
-            .evaluate(route_input.clone(), destination.endpoint.host.clone())
-            .await
-    };
-    let mut routes = match evaluation {
-        Ok(routes) => routes,
+    let evaluation = cfg
+        .policy
+        .evaluate_with_dns(
+            route_input.clone(),
+            destination.endpoint.host.clone(),
+            cfg.strict_policy,
+        )
+        .await;
+    let (mut routes, resolved_destination) = match evaluation {
+        Ok(result) => result,
         Err(_) => {
             let message = "PAC evaluation failed".to_owned();
             tracing::warn!("PAC evaluation failed");
@@ -1440,6 +1439,7 @@ async fn handle(
         cfg.parallel,
         cfg.race,
         &cfg.bound_addrs,
+        resolved_destination,
     )
     .await;
     let Some((route, stream, tunneled, mut authentication_sent)) = chosen else {
@@ -1655,6 +1655,7 @@ async fn select_route(
     parallel: usize,
     race: bool,
     excluded_direct_addrs: &[SocketAddr],
+    resolved_destination: Option<Option<std::net::IpAddr>>,
 ) -> Option<ConnectedRoute> {
     type Attempt = BoxFuture<'static, (usize, Route, bool, anyhow::Result<(BoxedIo, bool)>)>;
     let mut pending: FuturesUnordered<Attempt> = FuturesUnordered::new();
@@ -1674,13 +1675,18 @@ async fn select_route(
         let tunnel =
             route.is_socks() || ((connect || force_tunnel) && !matches!(route, Route::Direct));
         pending.push(Box::pin(async move {
-            let result = net::connect_observed_excluding(
+            let result = net::connect_observed_resolved_excluding(
                 &route,
                 &dest,
                 tunnel,
                 &options,
                 timeout,
                 &excluded_direct_addrs,
+                if matches!(&route, Route::Direct) {
+                    resolved_destination
+                } else {
+                    None
+                },
             )
             .await;
             (idx, route, tunnel, result)
@@ -2448,10 +2454,65 @@ mod management_coverage_tests {
             1,
             false,
             &[],
+            None,
         )
         .await;
         assert!(selected.is_none());
         assert_eq!(status.snapshot().upstream_state, "error");
+    }
+
+    #[tokio::test]
+    async fn direct_route_dials_the_address_returned_by_pac_without_resolving_again() {
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let routes = Routes(vec![Route::Direct]);
+        let selected = select_route(
+            &routes,
+            &Endpoint {
+                host: "name-that-must-not-resolve.invalid".into(),
+                port: origin_addr.port(),
+            },
+            false,
+            false,
+            &ConnectionOptions::default(),
+            &RuntimeStatus::new(false),
+            Duration::from_secs(1),
+            1,
+            false,
+            &[],
+            Some(Some("127.0.0.1".parse().unwrap())),
+        )
+        .await;
+        assert!(
+            selected.is_some(),
+            "DIRECT did not use PAC's resolved address"
+        );
+        let _ = tokio::time::timeout(Duration::from_secs(1), origin.accept())
+            .await
+            .expect("DIRECT connected to the pinned address")
+            .unwrap();
+
+        let unresolved = select_route(
+            &routes,
+            &Endpoint {
+                host: "name-that-must-not-resolve.invalid".into(),
+                port: origin_addr.port(),
+            },
+            false,
+            false,
+            &ConnectionOptions::default(),
+            &RuntimeStatus::new(false),
+            Duration::from_secs(1),
+            1,
+            false,
+            &[],
+            Some(None),
+        )
+        .await;
+        assert!(
+            unresolved.is_none(),
+            "DIRECT ignored PAC's negative DNS result"
+        );
     }
 
     #[tokio::test]
