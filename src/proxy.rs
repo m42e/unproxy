@@ -1401,7 +1401,7 @@ async fn handle(
             cfg.strict_policy,
         )
         .await;
-    let (mut routes, resolved_destination) = match evaluation {
+    let (routes, resolved_destination) = match evaluation {
         Ok(result) => result,
         Err(_) => {
             let message = "PAC evaluation failed".to_owned();
@@ -1419,9 +1419,8 @@ async fn handle(
             return Ok(error_response(StatusCode::BAD_GATEWAY, message));
         }
     };
-    if cfg.direct_fallback && !routes.0.iter().any(|r| matches!(r, Route::Direct)) {
-        routes.0.push(Route::Direct)
-    }
+    let direct_fallback =
+        cfg.direct_fallback && !routes.0.iter().any(|route| matches!(route, Route::Direct));
     // Preserve policy order. Sequential selection also bounds socket use and gives deterministic behavior.
     let attempt_timeout = if connect || cfg.force_tunnel {
         cfg.timeout.saturating_mul(2)
@@ -1442,6 +1441,26 @@ async fn handle(
         resolved_destination,
     )
     .await;
+    let chosen = match (chosen, direct_fallback) {
+        (Some(chosen), _) => Some(chosen),
+        (None, true) => {
+            select_route(
+                &Routes(vec![Route::Direct]),
+                &destination.endpoint,
+                connect,
+                cfg.force_tunnel,
+                &cfg.options,
+                &cfg.runtime_status,
+                attempt_timeout,
+                1,
+                cfg.race,
+                &cfg.bound_addrs,
+                resolved_destination,
+            )
+            .await
+        }
+        (None, false) => None,
+    };
     let Some((route, stream, tunneled, mut authentication_sent)) = chosen else {
         publish(
             &events,

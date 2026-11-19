@@ -1067,6 +1067,150 @@ async fn direct_fallback_runs_after_proxy_connection_failure() {
 }
 
 #[tokio::test]
+async fn racing_direct_fallback_waits_for_pending_upstream_routes() {
+    use tokio::sync::oneshot;
+
+    let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = origin.local_addr().unwrap();
+
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let upstream_task = tokio::spawn(async move {
+        let (mut io, _) = upstream.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        loop {
+            io.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+            if request.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let _ = started_tx.send(());
+        let _ = release_rx.await;
+        drop(io);
+    });
+
+    #[cfg(target_os = "linux")]
+    let failed_upstream_addr = {
+        let refused = TcpSocket::new_v4().unwrap();
+        refused.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        refused.local_addr().unwrap()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let failed_upstream_addr = {
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = closed.local_addr().unwrap();
+        drop(closed);
+        address
+    };
+    let policy = Policy::new(Some(format!(
+        "function FindProxyForURL() {{ return 'PROXY {upstream_addr}; PROXY {failed_upstream_addr}'; }}"
+    )))
+    .unwrap();
+    let proxy = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
+        .listen("127.0.0.1:0".parse().unwrap())
+        .parallel_connect(2)
+        .race_connect(true)
+        .direct_fallback(true)
+        .bind()
+        .await
+        .unwrap();
+
+    let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
+    client
+        .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    started_rx.await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), origin.accept())
+            .await
+            .is_err(),
+        "automatic DIRECT must wait while an upstream route is pending"
+    );
+
+    release_tx.send(()).unwrap();
+    let mut response = Vec::new();
+    loop {
+        let mut byte = [0];
+        client.read_exact(&mut byte).await.unwrap();
+        response.push(byte[0]);
+        if response.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    let (origin_io, _) = origin.accept().await.unwrap();
+    upstream_task.await.unwrap();
+    drop(client);
+    drop(origin_io);
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
+async fn explicit_pac_direct_remains_eligible_for_racing() {
+    use tokio::sync::oneshot;
+
+    let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = origin.local_addr().unwrap();
+    let origin_task = tokio::spawn(async move {
+        let (mut io, _) = origin.accept().await.unwrap();
+        let mut byte = [0];
+        io.read_exact(&mut byte).await.unwrap();
+        byte[0]
+    });
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let upstream_task = tokio::spawn(async move {
+        let (_io, _) = upstream.accept().await.unwrap();
+        let _ = started_tx.send(());
+        let _ = release_rx.await;
+    });
+    let policy = Policy::new(Some(format!(
+        "function FindProxyForURL() {{ return 'PROXY {upstream_addr}; DIRECT'; }}"
+    )))
+    .unwrap();
+    let proxy = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
+        .listen("127.0.0.1:0".parse().unwrap())
+        .parallel_connect(2)
+        .race_connect(true)
+        .direct_fallback(true)
+        .bind()
+        .await
+        .unwrap();
+
+    let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
+    client
+        .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    started_rx.await.unwrap();
+    let mut response = Vec::new();
+    loop {
+        let mut byte = [0];
+        client.read_exact(&mut byte).await.unwrap();
+        response.push(byte[0]);
+        if response.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+    client.write_all(b"d").await.unwrap();
+    assert_eq!(origin_task.await.unwrap(), b'd');
+    release_tx.send(()).unwrap();
+    drop(client);
+    proxy.shutdown();
+    proxy.wait().await;
+    upstream_task.await.unwrap();
+}
+
+#[tokio::test]
 async fn access_sse_emits_records_and_reports_lag() {
     let proxy = ContextBuilder::new(
         Arc::new(Policy::new(None).unwrap()),
