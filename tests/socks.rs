@@ -204,7 +204,7 @@ async fn socks4a_and_socks5_forward_http_and_connect_without_http_proxy_credenti
 async fn socks_handshakes_reject_invalid_replies_and_timeout() {
     for (reply, expected) in [
         (vec![4, 0], "method version"),
-        (vec![5, 255], "unsupported authentication"),
+        (vec![5, 255], "unoffered authentication method"),
         (vec![5, 2], "unoffered"),
         (vec![5, 0, 5, 5, 0, 1], "CONNECT rejected"),
         (vec![5, 0, 4, 0, 0, 1], "invalid SOCKS5 CONNECT"),

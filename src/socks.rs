@@ -77,15 +77,14 @@ async fn socks5(
 ) -> Result<(BoxedIo, bool)> {
     let credentials = auth.socks_credentials(proxy_host);
     let gss_enabled = auth.socks_gss_enabled(proxy_host);
-    let mut methods = vec![0];
-    if credentials.is_some() {
+    // A matching Negotiate policy requires the GSS protected stream. Do not
+    // let the upstream select anonymous or username/password authentication.
+    let mut methods = if gss_enabled { vec![1] } else { vec![0] };
+    if !gss_enabled && credentials.is_some() {
         methods.push(2);
     }
-    if gss_enabled {
-        methods.push(1);
-    }
     let mut greeting = vec![5, methods.len() as u8];
-    greeting.extend(methods);
+    greeting.extend_from_slice(&methods);
     stream
         .write_all(&greeting)
         .await
@@ -96,13 +95,14 @@ async fn socks5(
         .await
         .context("SOCKS5 method selection")?;
     ensure!(selection[0] == 5, "invalid SOCKS5 method version");
+    ensure!(
+        methods.contains(&selection[1]),
+        "SOCKS5 selected unoffered authentication method {}",
+        selection[1]
+    );
     let authenticated = match selection[1] {
         0 => false,
         1 => {
-            ensure!(
-                gss_enabled,
-                "SOCKS5 selected unoffered GSSAPI authentication"
-            );
             #[cfg(feature = "negotiate")]
             {
                 let auth = auth.clone();
@@ -421,6 +421,45 @@ mod tests {
         assert!(AuthFactory::negotiate(Vec::new()).socks_gss_enabled("any.proxy.test"));
         assert!(!AuthFactory::no_auth().socks_gss_enabled("proxy.corp.test"));
     }
+
+    #[tokio::test]
+    async fn negotiate_rejects_socks5_anonymous_and_password_downgrades() {
+        for method in [0, 2] {
+            let (client, mut proxy) = tokio::io::duplex(1024);
+            let server = tokio::spawn(async move {
+                let mut greeting = [0; 3];
+                proxy.read_exact(&mut greeting).await.unwrap();
+                assert_eq!(greeting, [5, 1, 1]);
+                proxy.write_all(&[5, method]).await.unwrap();
+
+                // The failed method selection must not be followed by CONNECT
+                // or any application data.
+                let mut trailing = Vec::new();
+                proxy.read_to_end(&mut trailing).await.unwrap();
+                assert!(trailing.is_empty());
+            });
+
+            let result = socks5(
+                Box::new(client),
+                &"target.test:443".parse().unwrap(),
+                "proxy.corp.test",
+                &AuthFactory::negotiate(vec!["proxy.corp.test".into()]),
+            )
+            .await;
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("method {method} must be rejected"),
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("selected unoffered authentication method"),
+                "method {method}: {error:#}"
+            );
+            server.await.unwrap();
+        }
+    }
+
     impl GssSession for FixtureContext {
         fn step(&mut self, input: Option<&[u8]>) -> Result<(Option<Vec<u8>>, bool)> {
             let token = match (self.steps, input) {
