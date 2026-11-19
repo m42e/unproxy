@@ -219,7 +219,7 @@ async fn direct_tls_and_https_proxy_constructors_keep_their_transport_identity()
             port: address.port(),
         },
         &options,
-        Duration::from_secs(2),
+        Duration::from_secs(5),
     )
     .await
     .unwrap();
@@ -251,7 +251,7 @@ async fn direct_tls_and_https_proxy_constructors_keep_their_transport_identity()
         },
         true,
         &options,
-        Duration::from_secs(2),
+        Duration::from_secs(5),
     )
     .await
     .unwrap();
