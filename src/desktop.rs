@@ -2,9 +2,64 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
+    io::{Read, Write},
+    net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
+
+const STATUS_PROBE_DEADLINE: Duration = Duration::from_millis(250);
+const MAX_STATUS_RESPONSE_BYTES: usize = 16 * 1024;
+
+fn read_status_response(address: SocketAddr, deadline: Instant) -> Option<Vec<u8>> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let mut stream = TcpStream::connect_timeout(&address, remaining).ok()?;
+    stream.set_nonblocking(true).ok()?;
+
+    let request =
+        format!("GET /status.json HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
+    let mut written = 0;
+    while written < request.len() {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        match stream.write(&request.as_bytes()[written..]) {
+            Ok(0) => return None,
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+
+    let mut response = Vec::new();
+    let mut buffer = [0; 2048];
+    loop {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        let remaining_capacity = MAX_STATUS_RESPONSE_BYTES + 1 - response.len();
+        let read_capacity = buffer.len().min(remaining_capacity);
+        match stream.read(&mut buffer[..read_capacity]) {
+            Ok(0) => return Some(response),
+            Ok(count) => {
+                response.extend_from_slice(&buffer[..count]);
+                if response.len() > MAX_STATUS_RESPONSE_BYTES {
+                    return None;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+}
 
 pub const APP_BUNDLE_ID: &str = "de.m42e.unproxy.app";
 pub const HELPER_BUNDLE_ID: &str = "de.m42e.unproxy.login-helper";
@@ -871,6 +926,24 @@ mod native {
         notice: Option<String>,
         tray_status: TrayStatus,
         last_icon_key: String,
+        status_poller: MacStatusPoller,
+    }
+    struct MacStatusPoller {
+        sender: std::sync::mpsc::Sender<(Preferences, Option<TrayStatus>)>,
+        receiver: std::sync::mpsc::Receiver<(Preferences, Option<TrayStatus>)>,
+        in_flight: bool,
+        next_poll: Instant,
+    }
+    impl Default for MacStatusPoller {
+        fn default() -> Self {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            Self {
+                sender,
+                receiver,
+                in_flight: false,
+                next_poll: Instant::now(),
+            }
+        }
     }
     unsafe extern "C-unwind" fn action(_this: *mut AnyObject, _cmd: Sel, sender: *mut AnyObject) {
         let tag: i64 = unsafe { msg_send![sender, tag] };
@@ -1102,26 +1175,15 @@ mod native {
             netrc
         }
     }
+    #[cfg(test)]
     fn probe_runtime_status(address: std::net::SocketAddr) -> Option<TrayStatus> {
-        use std::{
-            io::{Read, Write},
-            net::TcpStream,
-            time::Duration,
-        };
-        let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(180)).ok()?;
-        stream
-            .set_read_timeout(Some(Duration::from_millis(180)))
-            .ok()?;
-        stream
-            .set_write_timeout(Some(Duration::from_millis(180)))
-            .ok()?;
-        write!(
-            stream,
-            "GET /status.json HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
-        )
-        .ok()?;
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).ok()?;
+        probe_runtime_status_until(address, Instant::now() + STATUS_PROBE_DEADLINE)
+    }
+    fn probe_runtime_status_until(
+        address: std::net::SocketAddr,
+        deadline: Instant,
+    ) -> Option<TrayStatus> {
+        let response = super::read_status_response(address, deadline)?;
         parse_runtime_status_response(&response)
     }
     fn parse_runtime_status_response(response: &[u8]) -> Option<TrayStatus> {
@@ -1151,18 +1213,39 @@ mod native {
         })
     }
     fn refresh_runtime_status(state: &mut State, running: bool) {
+        if let Ok((preferences, status)) = state.status_poller.receiver.try_recv() {
+            state.status_poller.in_flight = false;
+            if running && preferences == state.prefs {
+                if let Some(status) = status {
+                    state.tray_status = status;
+                } else {
+                    state.tray_status.pac_loaded = None;
+                    state.tray_status.authentication_configured = auth_is_configured(&state.prefs);
+                }
+            }
+        }
         if running {
-            let status = state
-                .prefs
-                .effective_listeners()
-                .iter()
-                .filter_map(|listener| listener.parse::<std::net::SocketAddr>().ok())
-                .find_map(probe_runtime_status);
-            if let Some(status) = status {
-                state.tray_status = status;
-            } else {
-                state.tray_status.pac_loaded = None;
-                state.tray_status.authentication_configured = auth_is_configured(&state.prefs);
+            if Instant::now() >= state.status_poller.next_poll {
+                state.status_poller.next_poll = Instant::now() + Duration::from_secs(1);
+                if !state.status_poller.in_flight {
+                    let preferences = state.prefs.clone();
+                    let listeners = preferences.effective_listeners();
+                    let sender = state.status_poller.sender.clone();
+                    let deadline = Instant::now() + STATUS_PROBE_DEADLINE;
+                    if thread::Builder::new()
+                        .name("unproxy-runtime-status".into())
+                        .spawn(move || {
+                            let status = listeners
+                                .iter()
+                                .filter_map(|listener| listener.parse::<SocketAddr>().ok())
+                                .find_map(|address| probe_runtime_status_until(address, deadline));
+                            let _ = sender.send((preferences, status));
+                        })
+                        .is_ok()
+                    {
+                        state.status_poller.in_flight = true;
+                    }
+                }
             }
         } else {
             state.tray_status.pac_loaded = None;
@@ -3251,6 +3334,7 @@ mod native {
                 ..TrayStatus::default()
             },
             last_icon_key: String::new(),
+            status_poller: MacStatusPoller::default(),
         }));
         *STATE.lock().unwrap() = Some(state.clone());
         {
@@ -3544,6 +3628,7 @@ mod native {
                 notice: None,
                 tray_status: TrayStatus::default(),
                 last_icon_key: String::new(),
+                status_poller: MacStatusPoller::default(),
             }));
             *STATE.lock().unwrap() = Some(state.clone());
             exercise_runtime_status_probe()?;
@@ -4548,6 +4633,7 @@ mod native {
                     upstream_checked_at: Some(now),
                 },
                 last_icon_key: String::new(),
+                status_poller: MacStatusPoller::default(),
             };
             assert_eq!(
                 icon_statuses(&state, true),
@@ -4776,6 +4862,79 @@ fn launch_helper_main_app_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status_probe_with_server(
+        deadline: Duration,
+        serve: impl FnOnce(std::net::TcpListener) + Send + 'static,
+    ) -> (Option<Vec<u8>>, Duration) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || serve(listener));
+        let started = Instant::now();
+        let response = read_status_response(address, Instant::now() + deadline);
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+        (response, elapsed)
+    }
+
+    #[test]
+    fn status_probe_preserves_a_normal_response() {
+        use std::io::{BufRead, BufReader, Write};
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec();
+        let expected = response.clone();
+        let (actual, _) = status_probe_with_server(Duration::from_secs(1), move |listener| {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            request.read_line(&mut line).unwrap();
+            assert!(line.starts_with("GET /status.json "));
+            stream.write_all(&response).unwrap();
+        });
+        assert_eq!(actual, Some(expected));
+    }
+
+    #[test]
+    fn status_probe_deadline_bounds_slow_and_never_ending_replies() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            thread::sleep,
+        };
+        for slow in [false, true] {
+            let (response, elapsed) =
+                status_probe_with_server(Duration::from_millis(120), move |listener| {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = BufReader::new(stream.try_clone().unwrap());
+                    let mut line = String::new();
+                    request.read_line(&mut line).unwrap();
+                    if slow {
+                        for byte in b"HTTP/1.1 200 OK\r\n\r\n{}" {
+                            if stream.write_all(&[*byte]).is_err() {
+                                return;
+                            }
+                            sleep(Duration::from_millis(30));
+                        }
+                    } else {
+                        sleep(Duration::from_millis(250));
+                    }
+                });
+            assert!(response.is_none(), "slow={slow}");
+            assert!(elapsed < Duration::from_millis(220), "{elapsed:?}");
+        }
+    }
+
+    #[test]
+    fn status_probe_rejects_responses_over_the_total_byte_limit() {
+        use std::io::{BufRead, BufReader, Write};
+        let (response, _) = status_probe_with_server(Duration::from_secs(1), |listener| {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            request.read_line(&mut line).unwrap();
+            let response = vec![b'x'; MAX_STATUS_RESPONSE_BYTES + 1];
+            stream.write_all(&response).unwrap();
+        });
+        assert!(response.is_none());
+    }
 
     #[test]
     fn remote_pac_viewer_rejects_nul_and_preserves_normal_text() {

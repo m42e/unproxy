@@ -6,8 +6,8 @@ mod settings;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::{
-    io::{Read, Write},
-    net::{SocketAddr, TcpStream},
+    io::Write,
+    net::SocketAddr,
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -1086,7 +1086,10 @@ fn load_icon(directory: &Path, key: &str) -> Result<Icon> {
 }
 
 fn read_runtime_status(preferences: &Preferences) -> Option<RuntimeStatus> {
-    read_runtime_status_with(preferences, read_runtime_status_at)
+    let deadline = Instant::now() + super::STATUS_PROBE_DEADLINE;
+    read_runtime_status_with(preferences, |address| {
+        read_runtime_status_until(address, deadline)
+    })
 }
 
 fn read_runtime_status_with(
@@ -1100,42 +1103,13 @@ fn read_runtime_status_with(
         .find_map(read_at)
 }
 
+#[cfg(test)]
 fn read_runtime_status_at(address: SocketAddr) -> Option<RuntimeStatus> {
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(200)).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .ok()?;
-    stream
-        .set_write_timeout(Some(Duration::from_millis(200)))
-        .ok()?;
-    write!(
-        stream,
-        "GET /status.json HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
-    )
-    .ok()?;
+    read_runtime_status_until(address, Instant::now() + super::STATUS_PROBE_DEADLINE)
+}
 
-    let mut response = Vec::new();
-    let mut buffer = [0; 2048];
-    loop {
-        match stream.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(count) => {
-                if response.len() + count > 16 * 1024 {
-                    return None;
-                }
-                response.extend_from_slice(&buffer[..count]);
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                ) =>
-            {
-                break;
-            }
-            Err(_) => return None,
-        }
-    }
+fn read_runtime_status_until(address: SocketAddr, deadline: Instant) -> Option<RuntimeStatus> {
+    let response = super::read_status_response(address, deadline)?;
     let response = String::from_utf8_lossy(&response);
     let (headers, body) = response.split_once("\r\n\r\n")?;
     if !headers.starts_with("HTTP/1.1 200") {
