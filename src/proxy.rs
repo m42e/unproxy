@@ -1329,10 +1329,32 @@ async fn handle(
             _ => error_response(StatusCode::NOT_FOUND, "Resource not found"),
         });
     }
-    if !connect && req.uri().scheme_str() == Some("https") {
+    if connect && req.uri().scheme().is_some() {
+        return Ok(error_response(
+            StatusCode::BAD_REQUEST,
+            "CONNECT requests must use authority-form",
+        ));
+    }
+    if !connect
+        && req
+            .uri()
+            .scheme_str()
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https"))
+    {
         return Ok(error_response(
             StatusCode::BAD_REQUEST,
             "HTTPS requests must use CONNECT for end-to-end TLS",
+        ));
+    }
+    if !connect
+        && req
+            .uri()
+            .scheme_str()
+            .is_some_and(|scheme| !scheme.eq_ignore_ascii_case("http"))
+    {
+        return Ok(error_response(
+            StatusCode::BAD_REQUEST,
+            "Only HTTP absolute-form requests are supported",
         ));
     }
     let destination = if connect {

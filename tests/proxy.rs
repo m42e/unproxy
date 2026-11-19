@@ -582,12 +582,35 @@ async fn get_management(addr: SocketAddr, target: &str, owner: bool) -> String {
 
 #[tokio::test]
 async fn unsupported_absolute_requests_return_local_errors() {
-    let proxy = start(Policy::new(None).unwrap()).await;
+    let policy = Arc::new(
+        Policy::new(Some(
+            "function FindProxyForURL(){return 'DIRECT';}".to_owned(),
+        ))
+        .unwrap(),
+    );
+    let proxy = ContextBuilder::new(policy.clone(), ConnectionOptions::default())
+        .listen("127.0.0.1:0".parse().unwrap())
+        .bind()
+        .await
+        .unwrap();
     let addr = proxy.local_addrs()[0];
+    let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let (accepted_tx, mut accepted_rx) = tokio::sync::oneshot::channel();
+    let origin_task = tokio::spawn(async move {
+        let (mut stream, _) = origin.accept().await.unwrap();
+        let _ = accepted_tx.send(());
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            .await
+            .unwrap();
+    });
 
     for (target, status) in [
         ("https://example.test/path", "HTTP/1.1 400"),
-        ("ftp://example.test/path", "HTTP/1.1 502"),
+        ("HTTPS://example.test/path", "HTTP/1.1 400"),
+        (&format!("ftp://{origin_addr}/path"), "HTTP/1.1 400"),
+        ("ws://example.test:80/path", "HTTP/1.1 400"),
     ] {
         let mut client = TcpStream::connect(addr).await.unwrap();
         client
@@ -601,6 +624,29 @@ async fn unsupported_absolute_requests_return_local_errors() {
         client.read_to_string(&mut response).await.unwrap();
         assert!(response.starts_with(status), "{response}");
     }
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(
+            format!(
+                "CONNECT ftp://{origin_addr}/ HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+
+    assert_eq!(policy.evaluation_stats().evaluations, 0);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut accepted_rx)
+            .await
+            .is_err(),
+        "unsupported URI reached the origin listener"
+    );
+    origin_task.abort();
 
     proxy.shutdown();
     proxy.wait().await;
