@@ -254,6 +254,14 @@ fn parse_remote_filter_uri(source: &str) -> Result<Option<http::Uri>> {
     Ok(uri)
 }
 
+fn validate_remote_pac_viewer_content(content: String) -> Result<String> {
+    anyhow::ensure!(
+        !content.contains('\0'),
+        "downloaded PAC content contains a NUL byte and cannot be displayed in the macOS viewer"
+    );
+    Ok(content)
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn resolve_pac_source(path: PathBuf) -> Result<PathBuf> {
     let source = path.to_string_lossy();
@@ -2078,6 +2086,7 @@ mod native {
                     Err(error) => Some(Err(error.into())),
                 };
                 let Some(outcome) = outcome else { return };
+                let outcome = outcome.and_then(validate_remote_pac_viewer_content);
                 let payload = serde_json::json!({
                     "generation": generation,
                     "source": source,
@@ -4767,6 +4776,20 @@ fn launch_helper_main_app_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_pac_viewer_rejects_nul_and_preserves_normal_text() {
+        let error = validate_remote_pac_viewer_content("function FindProxyForURL() {\0}".into())
+            .unwrap_err();
+        assert!(error.to_string().contains("contains a NUL byte"));
+        assert!(error.to_string().contains("macOS viewer"));
+
+        let content = "function FindProxyForURL() { return 'DIRECT'; }\n";
+        assert_eq!(
+            validate_remote_pac_viewer_content(content.into()).unwrap(),
+            content
+        );
+    }
 
     #[test]
     fn macos_status_icons_use_only_white_and_keep_unhealthy_lights_empty() {
