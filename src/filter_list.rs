@@ -172,10 +172,15 @@ impl FilterList {
     }
 
     async fn read_source(source: &str, proxy: Option<SocketAddr>) -> Result<String> {
-        let text = if source.starts_with("http://") || source.starts_with("https://") {
+        let text = if let Some((scheme, remainder)) = remote_uri_parts(source) {
+            let uri = if scheme.eq_ignore_ascii_case("https") {
+                format!("https://{remainder}")
+            } else {
+                bail!("remote filter list URL must use HTTPS: {source}");
+            };
             let result = match proxy {
-                Some(proxy) => crate::net::fetch_remote_text_via_proxy(source, proxy).await,
-                None => crate::net::fetch_remote_text(source).await,
+                Some(proxy) => crate::net::fetch_remote_text_via_proxy(&uri, proxy).await,
+                None => crate::net::fetch_remote_text(&uri).await,
             };
             result.with_context(|| format!("downloading filter list from {source}"))?
         } else {
@@ -188,6 +193,17 @@ impl FilterList {
         }
         Ok(text)
     }
+}
+
+fn remote_uri_parts(source: &str) -> Option<(&str, &str)> {
+    let (scheme, remainder) = source.split_once("://")?;
+    let mut bytes = scheme.bytes();
+    if !bytes.next()?.is_ascii_alphabetic()
+        || !bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+    {
+        return None;
+    }
+    Some((scheme, remainder))
 }
 
 impl FilterListSnapshots {
@@ -422,62 +438,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delayed_retry_uses_pac_route_and_updates_the_live_filter() {
+    async fn delayed_retry_loads_local_filter_and_updates_the_live_filter() {
         use crate::{net::ConnectionOptions, pac::Policy, proxy::ContextBuilder};
         use tokio::{
             io::{AsyncReadExt, AsyncWriteExt},
-            net::{TcpListener, TcpStream},
+            net::TcpStream,
         };
 
-        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let upstream_addr = upstream.local_addr().unwrap();
-        let upstream_task = tokio::spawn(async move {
-            loop {
-                let (mut stream, _) = upstream.accept().await.unwrap();
-                tokio::spawn(async move {
-                    let mut request = Vec::new();
-                    let mut chunk = [0; 1024];
-                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        let count = stream.read(&mut chunk).await.unwrap();
-                        if count == 0 {
-                            return;
-                        }
-                        request.extend_from_slice(&chunk[..count]);
-                    }
-                    let body = if request.windows(9).any(|window| window == b"hosts.txt") {
-                        "blocked.example.test\n"
-                    } else {
-                        ""
-                    };
-                    stream
-                        .write_all(
-                            format!(
-                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                body.len(),
-                                body
-                            )
-                            .as_bytes(),
-                        )
-                        .await
-                        .unwrap();
-                });
-            }
-        });
-
-        let unavailable = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let unavailable_addr = unavailable.local_addr().unwrap();
-        drop(unavailable);
-        let sources = vec![format!("http://{unavailable_addr}/hosts.txt")];
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("hosts.txt");
+        let sources = vec![source_path.to_string_lossy().into_owned()];
         let (initial, complete) = FilterList::load_best_effort_with_status(&sources).await;
         assert!(!complete);
 
-        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy_addr = proxy.local_addr().unwrap();
-        drop(proxy);
-        let policy = Policy::new(Some(format!(
-            "function FindProxyForURL() {{ return 'PROXY {upstream_addr}'; }}"
-        )))
-        .unwrap();
+        let proxy_addr = "127.0.0.1:0".parse().unwrap();
+        let policy = Policy::new(None).unwrap();
         let context = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
             .listen(proxy_addr)
             .filter_list(initial)
@@ -489,10 +464,12 @@ mod tests {
             FilterListSnapshots::default(),
             std::time::Duration::from_millis(5),
         );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        std::fs::write(&source_path, "blocked.example.test\n").unwrap();
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
         loop {
-            let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+            let mut client = TcpStream::connect(context.local_addrs()[0]).await.unwrap();
             client
                 .write_all(
                     b"GET http://blocked.example.test/check HTTP/1.1\r\nHost: blocked.example.test\r\nConnection: close\r\n\r\n",
@@ -518,6 +495,5 @@ mod tests {
 
         context.shutdown();
         context.wait().await;
-        upstream_task.abort();
     }
 }

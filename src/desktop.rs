@@ -243,6 +243,17 @@ fn parse_remote_pac_uri(source: &str) -> Result<Option<http::Uri>> {
     Ok(Some(uri))
 }
 
+fn parse_remote_filter_uri(source: &str) -> Result<Option<http::Uri>> {
+    let uri = parse_remote_pac_uri(source)?;
+    if let Some(uri) = &uri {
+        anyhow::ensure!(
+            uri.scheme_str() == Some("https"),
+            "remote filter-list URLs must use HTTPS: {uri}"
+        );
+    }
+    Ok(uri)
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn resolve_pac_source(path: PathBuf) -> Result<PathBuf> {
     let source = path.to_string_lossy();
@@ -1915,11 +1926,11 @@ mod native {
         commit_editor_preferences()
     }
     fn add_remote_filter_list() -> Result<()> {
-        let Some(value) = prompt("HTTP or HTTPS filter-list URL", "https://") else {
+        let Some(value) = prompt("HTTPS filter-list URL", "https://") else {
             return Ok(());
         };
         let uri =
-            parse_remote_pac_uri(&value)?.context("enter a valid HTTP or HTTPS filter-list URL")?;
+            parse_remote_filter_uri(&value)?.context("enter a valid HTTPS filter-list URL")?;
         let mut values = EDITOR_FILTER_LISTS.lock().unwrap();
         values.push(uri.to_string());
         let index = values.len() - 1;
@@ -2535,7 +2546,7 @@ mod native {
         let mut filter_lists = Vec::with_capacity(filter_values.len());
         let mut unique_filter_lists = std::collections::HashSet::new();
         for value in filter_values {
-            let path = if let Some(uri) = parse_remote_pac_uri(&value)? {
+            let path = if let Some(uri) = parse_remote_filter_uri(&value)? {
                 PathBuf::from(uri.to_string())
             } else {
                 let path = PathBuf::from(value.trim());
@@ -2766,7 +2777,7 @@ mod native {
             content,
             target,
             "Add URL…",
-            "Add a remote HTTP or HTTPS filter list",
+            "Add a remote HTTPS filter list",
             1307,
             rect(640.0, 234.0, 106.0, 26.0),
             None,
@@ -4852,6 +4863,20 @@ mod tests {
         );
         let absolute = std::env::current_exe().unwrap();
         assert_eq!(resolve_pac_source(absolute.clone()).unwrap(), absolute);
+    }
+
+    #[test]
+    fn remote_filter_urls_require_https_and_local_paths_remain_valid() {
+        let uri = parse_remote_filter_uri("HTTPS://filters.example.org/hosts.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(uri.to_string(), "https://filters.example.org/hosts.txt");
+        assert!(parse_remote_filter_uri("http://filters.example.org/hosts.txt").is_err());
+        assert!(
+            parse_remote_filter_uri("/etc/unproxy/hosts.txt")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[cfg(unix)]

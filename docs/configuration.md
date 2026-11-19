@@ -50,7 +50,7 @@ Desktop apps use their own preferences and launch their proxy with explicit sett
 | --- | --- | --- |
 | `--listen IP:PORT` / `-L` | Numeric listener; repeat for multiple addresses. Unspecified IPs are rejected. | IPv4 and IPv6 loopback, port 3128 |
 | `--pac-file PATH_OR_URL` / `-p` | Ordered PAC source; repeat to compose sources. | Discover a local default PAC |
-| `--filter-list PATH_OR_URL` | Optional domain blocking source; repeat for multiple lists. | None |
+| `--filter-list PATH_OR_URL` | Optional local file or HTTPS domain blocking source; remote HTTP URLs are rejected. Repeat for multiple lists. | None |
 | `--reload-pac-on-network-change` | Reload PAC after default-route local address changes. | Off |
 | `--my-ip-address IP` | Override the address returned by PAC `myIpAddress()`. | Automatic |
 | `--strict-policy` | Reject traffic until policy loads and on PAC evaluation errors. | Off |

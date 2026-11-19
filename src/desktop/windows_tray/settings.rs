@@ -329,9 +329,13 @@ fn parse_source_lines(text: &str, description: &str, required: bool) -> Result<V
     let mut sources = Vec::new();
     let mut unique = HashSet::new();
     for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let source = if let Some(uri) = parse_remote_pac_uri(line)
-            .with_context(|| format!("invalid {description} URL {line:?}"))?
-        {
+        let parsed_uri = if description == "filter-list" {
+            super::super::parse_remote_filter_uri(line)
+        } else {
+            parse_remote_pac_uri(line)
+        }
+        .with_context(|| format!("invalid {description} URL {line:?}"))?;
+        let source = if let Some(uri) = parsed_uri {
             ensure!(
                 description != "PAC" || uri.scheme_str() == Some("https"),
                 "remote PAC URLs must use HTTPS: {line}"
@@ -967,6 +971,14 @@ mod tests {
         assert!(
             parse_source_lines(
                 "http://filters.example.test/hosts.txt",
+                "filter-list",
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            parse_source_lines(
+                "https://filters.example.test/hosts.txt",
                 "filter-list",
                 false
             )

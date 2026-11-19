@@ -154,4 +154,4 @@ be denied access to selected whole domains, such as known ad or tracking
 domains. It is hostname-level blocking, so it cannot block only a page path or
 inspect encrypted page content.
 
-Lists are loaded at startup. Restart to load changes. The combined list size limit is 64 MiB. Check logs for failed sources; do not assume every configured list loaded successfully. Leaving desktop filter sources empty turns blocking off.
+Remote filter lists must use HTTPS; HTTP URLs are rejected before any request is made. HTTPS redirects cannot downgrade to HTTP. Local files remain supported. Lists are loaded at startup. Restart to load changes. The combined list size limit is 64 MiB. Check logs for failed sources; do not assume every configured list loaded successfully. Leaving desktop filter sources empty turns blocking off.

@@ -55,7 +55,7 @@ Use **+** under PAC files for a local file or **Add URL…** for an HTTPS URL. S
 
 ## Add ad blocking lists
 
-In **Ad blocking lists**, add local files or remote HTTP(S) URLs. Windows accepts one path or URL per line and can append a local file with **Browse filter list…**; macOS uses **+** and **Add URL…**. Remove a source to disable it. An empty list turns blocking off.
+In **Ad blocking lists**, add local files or remote HTTPS URLs. Remote HTTP URLs are rejected before any request is made. Windows accepts one path or URL per line and can append a local file with **Browse filter list…**; macOS uses **+** and **Add URL…**. Remove a source to disable it. An empty list turns blocking off.
 
 Lists support hosts-format mappings and plain domain names. A blocked domain and its subdomains receive HTTP 403. See [filter list behavior](routing.md#block-domains-with-filter-lists) for format and loading details.
 

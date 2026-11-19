@@ -237,7 +237,7 @@ async fn http_remote_policy_retry_does_not_connect_to_the_source() {
 }
 
 #[tokio::test]
-async fn unavailable_filter_list_does_not_prevent_proxy_startup() {
+async fn http_filter_list_is_rejected_without_preventing_proxy_startup() {
     let temp = tempfile::tempdir().unwrap();
     let netrc = temp.path().join("netrc");
     std::fs::write(&netrc, "").unwrap();
@@ -247,18 +247,6 @@ async fn unavailable_filter_list_does_not_prevent_proxy_startup() {
 
     let remote = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let remote_address = remote.local_addr().unwrap();
-    let fetch_task = tokio::spawn(async move {
-        let (mut client, _) = remote.accept().await.unwrap();
-        let mut request = [0; 1024];
-        let _ = client.read(&mut request).await.unwrap();
-        client
-            .write_all(
-                b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )
-            .await
-            .unwrap();
-    });
-
     let address = reserve_address();
     let filter_lists = vec![format!("http://{remote_address}/hosts.txt")];
     let mut child = process_with_log(
@@ -269,7 +257,12 @@ async fn unavailable_filter_list_does_not_prevent_proxy_startup() {
         &filter_lists,
     );
     wait_for_listener(address, &mut child).await;
-    fetch_task.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), remote.accept())
+            .await
+            .is_err(),
+        "HTTP filter sources must be rejected without a network request"
+    );
     let (origin_address, origin_task) = origin().await;
     await_status(address, origin_address, 200).await;
     stop_child(&mut child).await;
@@ -280,7 +273,7 @@ async fn unavailable_filter_list_does_not_prevent_proxy_startup() {
         log.contains("filter list unavailable; skipping it for this attempt"),
         "{log}"
     );
-    assert!(log.contains("downloading filter list from"), "{log}");
+    assert!(log.contains("must use HTTPS"), "{log}");
     assert!(!log.contains("downloading PAC from"), "{log}");
 }
 

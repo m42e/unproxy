@@ -45,38 +45,37 @@ async fn best_effort_loading_keeps_available_lists_when_another_source_fails() {
 }
 
 #[tokio::test]
-async fn loads_remote_filter_list_over_http() {
+async fn rejects_http_filter_sources_without_contacting_them() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let body = "127.0.0.1 remote-block.example.test\n";
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut request = [0; 1024];
-        let _ = stream.read(&mut request).await.unwrap();
-        stream
-            .write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-    });
-    let list = FilterList::load(&[format!("http://{addr}/hosts.txt")])
+    let source = format!("http://{addr}/hosts.txt");
+    let error = FilterList::load(std::slice::from_ref(&source))
+        .await
+        .err()
+        .unwrap();
+    assert!(format!("{error:#}").contains("must use HTTPS"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let local = directory.path().join("safe-hosts.txt");
+    tokio::fs::write(&local, "safe.example.test\n")
         .await
         .unwrap();
-    assert!(list.contains("remote-block.example.test"));
-    server.await.unwrap();
+    let best_effort =
+        FilterList::load_best_effort(&[source, local.to_string_lossy().into_owned()]).await;
+    assert!(best_effort.contains("safe.example.test"));
+    assert!(!best_effort.contains("remote-block.example.test"));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
-async fn loads_remote_filter_list_through_pac_routing() {
+async fn generic_http_text_fetch_through_pac_routing_remains_supported() {
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = upstream.local_addr().unwrap();
-    let body = "blocked-by-pac-route.example.test\n";
+    let body = "generic-fetch.example.test\n";
     let server = tokio::spawn(async move {
         let (mut stream, _) = upstream.accept().await.unwrap();
         let mut request = Vec::new();
@@ -119,7 +118,7 @@ async fn loads_remote_filter_list_through_pac_routing() {
     )
     .await
     .unwrap();
-    assert!(FilterList::parse(&text).contains("blocked-by-pac-route.example.test"));
+    assert!(FilterList::parse(&text).contains("generic-fetch.example.test"));
     server.await.unwrap();
     context.shutdown();
     context.wait().await;
