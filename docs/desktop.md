@@ -47,11 +47,11 @@ PAC sources are evaluated in their displayed order. A result containing a proxy 
 
 ### Windows
 
-Enter one PAC file path or HTTP(S) URL per line. The line order sets the PAC evaluation order. Use **Browse PAC file…** to append a local file, then choose **Save** to apply.
+Enter one local PAC file path or HTTPS URL per line. Remote PAC files must use HTTPS. The line order sets the PAC evaluation order. Use **Browse PAC file…** to append a local file, then choose **Save** to apply.
 
 ### macOS
 
-Use **+** under PAC files for a local file or **Add URL…** for an HTTP(S) URL. Select a row and use **Open / View** to open a local file in TextEdit or display a remote script. Remote scripts load in the background. Use **Cancel** below the PAC controls to stop a download. Closing Settings also cancels an in-progress download. Double-click a row to edit it; use the ordering controls to change priority. Valid changes apply immediately.
+Use **+** under PAC files for a local file or **Add URL…** for an HTTPS URL. Select a row and use **Open / View** to open a local file in TextEdit or display a remote script. Remote scripts load in the background. Use **Cancel** below the PAC controls to stop a download. Closing Settings also cancels an in-progress download. Double-click a row to edit it; use the ordering controls to change priority. Valid changes apply immediately.
 
 ## Add ad blocking lists
 

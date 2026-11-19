@@ -1885,10 +1885,11 @@ mod native {
         cocoa_text(path)
     }
     fn add_remote_pac_file() -> Result<()> {
-        let Some(value) = prompt("HTTP or HTTPS PAC URL", "https://") else {
+        let Some(value) = prompt("HTTPS PAC URL", "https://") else {
             return Ok(());
         };
-        let uri = parse_remote_pac_uri(&value)?.context("enter a valid HTTP or HTTPS PAC URL")?;
+        let uri = parse_remote_pac_uri(&value)?.context("enter a valid HTTPS PAC URL")?;
+        anyhow::ensure!(uri.scheme_str() == Some("https"), "PAC URLs must use HTTPS");
         let mut values = EDITOR_PAC_FILES.lock().unwrap();
         values.push(uri.to_string());
         let index = values.len() - 1;
@@ -2487,6 +2488,10 @@ mod native {
         let mut unique_pac_files = std::collections::HashSet::new();
         for value in pac_values {
             let path = if let Some(uri) = parse_remote_pac_uri(&value)? {
+                anyhow::ensure!(
+                    uri.scheme_str() == Some("https"),
+                    "remote PAC URL must use HTTPS"
+                );
                 PathBuf::from(uri.to_string())
             } else {
                 let path = PathBuf::from(value.trim());
@@ -2705,7 +2710,7 @@ mod native {
             content,
             target,
             "Add URL…",
-            "Add a remote HTTP or HTTPS PAC URL",
+            "Add a remote HTTPS PAC URL",
             1207,
             rect(330.0, 234.0, 82.0, 26.0),
             None,
@@ -4115,6 +4120,13 @@ mod native {
             );
             *EDITOR_PAC_FILES.lock().unwrap() = vec![valid_pac.clone()];
             anyhow::ensure!(validated_editor_preferences().is_ok());
+            *EDITOR_PAC_FILES.lock().unwrap() = vec!["http://proxy.example.org/company.pac".into()];
+            anyhow::ensure!(
+                validated_editor_preferences()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("remote PAC URL must use HTTPS")
+            );
             *EDITOR_PAC_FILES.lock().unwrap() =
                 vec!["HTTPS://proxy.example.org/company.pac".into()];
             let remote_prefs = validated_editor_preferences()?;

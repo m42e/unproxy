@@ -69,11 +69,8 @@ async fn inline_context_preserves_ip_before_executing_top_level_code() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn ordered_sources_mix_symlink_and_http() {
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-    };
+async fn ordered_sources_keep_local_symlink_when_http_source_is_rejected() {
+    use tokio::net::TcpListener;
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("direct.pac");
     let link = dir.path().join("link.pac");
@@ -82,25 +79,9 @@ async fn ordered_sources_mix_symlink_and_http() {
     let remote = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/proxy.pac", remote.local_addr().unwrap());
     let fetch = tokio::spawn(async move {
-        let (mut stream, _) = remote.accept().await.unwrap();
-        let mut head = Vec::new();
-        while !head.ends_with(b"\r\n\r\n") {
-            let mut byte = [0];
-            stream.read_exact(&mut byte).await.unwrap();
-            head.push(byte[0]);
-            assert!(head.len() < 4096);
-        }
-        let body = script("PROXY remote.test:3128");
-        stream
-            .write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .as_bytes(),
-            )
+        tokio::time::timeout(std::time::Duration::from_millis(100), remote.accept())
             .await
-            .unwrap();
+            .is_err()
     });
     let policy = Arc::new(Policy::new(None).unwrap());
     let context = ContextBuilder::new(policy.clone(), ConnectionOptions::default())
@@ -109,8 +90,8 @@ async fn ordered_sources_mix_symlink_and_http() {
         .bind()
         .await
         .unwrap();
-    assert_eq!(route(&policy).await, "HTTP remote.test:3128");
-    fetch.await.unwrap();
+    assert_eq!(route(&policy).await, "DIRECT");
+    assert!(fetch.await.unwrap());
     context.shutdown();
     context.wait().await;
 }

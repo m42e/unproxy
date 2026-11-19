@@ -557,7 +557,9 @@ pub async fn fetch_remote_pac(uri: &str) -> Result<String> {
 
 /// Download a remote text resource without a conditional request.
 pub async fn fetch_remote_text(uri: &str) -> Result<String> {
-    Ok(fetch_remote_pac_cached(uri, None).await?.script)
+    Ok(fetch_remote_resource(uri, None, None, MAX_PAC_BYTES, "*/*")
+        .await?
+        .script)
 }
 
 /// Download JSON metadata from a remote endpoint, including GitHub's preferred
@@ -584,7 +586,21 @@ pub async fn fetch_remote_pac_cached(
     uri: &str,
     cached: Option<&CachedRemotePac>,
 ) -> Result<CachedRemotePac> {
+    validate_remote_pac_uri(uri)?;
     fetch_remote_resource(uri, cached, None, MAX_PAC_BYTES, "*/*").await
+}
+
+fn validate_remote_pac_uri(uri: &str) -> Result<http::Uri> {
+    let parsed = http::Uri::try_from(uri).context("invalid PAC URI")?;
+    anyhow::ensure!(
+        parsed.host().is_some(),
+        "remote PAC URL must include a host"
+    );
+    anyhow::ensure!(
+        parsed.scheme_str() == Some("https"),
+        "remote PAC URL must use HTTPS"
+    );
+    Ok(parsed)
 }
 
 async fn fetch_remote_resource(
@@ -699,6 +715,10 @@ fn validate_remote_redirect(previous_scheme: &str, next: &http::Uri) -> Result<(
 #[cfg(test)]
 mod pac_redirect_tests {
     use super::*;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     #[test]
     fn https_pac_redirects_cannot_downgrade() {
@@ -708,9 +728,58 @@ mod pac_redirect_tests {
         let missing_authority: http::Uri = "/script.pac".parse().unwrap();
         assert!(validate_remote_redirect("https", &http).is_err());
         assert!(validate_remote_redirect("https", &https).is_ok());
-        assert!(validate_remote_redirect("http", &https).is_ok());
         assert!(validate_remote_redirect("http", &unsupported).is_err());
         assert!(validate_remote_redirect("http", &missing_authority).is_err());
+    }
+
+    #[test]
+    fn remote_pac_requires_https_and_accepts_https_sources() {
+        assert!(validate_remote_pac_uri("https://pac.example/script.pac").is_ok());
+        assert!(validate_remote_pac_uri("http://pac.example/script.pac").is_err());
+    }
+
+    #[tokio::test]
+    async fn generic_remote_resource_revalidates_cached_etags_over_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut first, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                first.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            first
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nETag: \"v1\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntext",
+                )
+                .await
+                .unwrap();
+
+            let (mut second, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                second.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            second
+                .write_all(b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let uri = format!("http://{address}/resource");
+        let cached = fetch_remote_resource(&uri, None, None, 1024, "*/*")
+            .await
+            .unwrap();
+        assert_eq!(cached.script, "text");
+        let unchanged = fetch_remote_resource(&uri, Some(&cached), None, 1024, "*/*")
+            .await
+            .unwrap();
+        assert_eq!(unchanged.script, "text");
+        let request = server.await.unwrap();
+        assert!(request.contains("If-None-Match: \"v1\"\r\n"));
     }
 }
 

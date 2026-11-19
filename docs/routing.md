@@ -4,7 +4,7 @@ Your applications send requests to Unproxy. Unproxy evaluates your PAC policy an
 
 ## Load a local or remote PAC file
 
-Use desktop Settings or pass a local path or HTTP(S) URL:
+Use desktop Settings or pass a local path or HTTPS URL:
 
 ```sh
 unproxy --pac-file /path/to/company.pac
@@ -20,6 +20,9 @@ PAC file installed or maintained on the machine; a URL suits a centrally
 maintained policy that should be fetched from the organization’s server.
 
 A PAC script defines `FindProxyForURL(url, host)` and returns routes such as `PROXY proxy.example.org:8080` or `DIRECT`. Use trusted PAC sources supplied by your organization.
+
+Remote PAC files must use HTTPS. Unproxy rejects HTTP PAC URLs and HTTPS redirects
+that downgrade to HTTP. Local PAC files continue to work as before.
 
 With no explicit `--pac-file`, the CLI looks for a default `proxy.pac` in its [configuration locations](configuration.md#cli-settings-file). Without a loaded policy, normal mode permits direct routing.
 

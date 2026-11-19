@@ -333,6 +333,10 @@ fn parse_source_lines(text: &str, description: &str, required: bool) -> Result<V
             .with_context(|| format!("invalid {description} URL {line:?}"))?
         {
             ensure!(
+                description != "PAC" || uri.scheme_str() == Some("https"),
+                "remote PAC URLs must use HTTPS: {line}"
+            );
+            ensure!(
                 !line.contains('#'),
                 "{description} URLs must not include fragments: {line}"
             );
@@ -958,6 +962,16 @@ mod tests {
     #[test]
     fn remote_sources_reject_credentials_and_fragments() {
         assert!(parse_source_lines("https://user@pac.example.test/file.pac", "PAC", true).is_err());
+        assert!(parse_source_lines("http://pac.example.test/file.pac", "PAC", true).is_err());
+        assert!(parse_source_lines("https://pac.example.test/file.pac", "PAC", true).is_ok());
+        assert!(
+            parse_source_lines(
+                "http://filters.example.test/hosts.txt",
+                "filter-list",
+                false
+            )
+            .is_ok()
+        );
         assert!(
             parse_source_lines("https://pac.example.test/file.pac#fragment", "PAC", true).is_err()
         );

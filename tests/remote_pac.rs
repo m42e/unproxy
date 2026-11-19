@@ -5,7 +5,7 @@ use tokio::{
     task::JoinHandle,
     time::timeout,
 };
-use unproxy::net::{fetch_remote_pac, fetch_remote_pac_cached};
+use unproxy::net::{fetch_remote_pac, fetch_remote_pac_cached, fetch_remote_text};
 
 const LIMIT: usize = 8 * 1024 * 1024;
 const TEST_DEADLINE: Duration = Duration::from_secs(4);
@@ -51,9 +51,21 @@ fn response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
 }
 
 async fn fetch(uri: String) -> anyhow::Result<String> {
+    timeout(TEST_DEADLINE, fetch_remote_text(&uri))
+        .await
+        .expect("remote text fetch exceeded test deadline")
+}
+
+async fn fetch_pac(uri: String) -> anyhow::Result<String> {
     timeout(TEST_DEADLINE, fetch_remote_pac(&uri))
         .await
         .expect("PAC fetch exceeded test deadline")
+}
+
+async fn fetch_text(uri: String) -> anyhow::Result<String> {
+    timeout(TEST_DEADLINE, fetch_remote_text(&uri))
+        .await
+        .expect("remote text fetch exceeded test deadline")
 }
 
 async fn fetch_error(uri: String) -> String {
@@ -68,56 +80,32 @@ async fn fetch_error(uri: String) -> String {
 }
 
 #[tokio::test]
-async fn fetches_utf8_pac_with_get_and_requested_target() {
-    let body = b"function FindProxyForURL";
-    let (addr, task) = one_shot(response(
-        "200 OK",
-        &format!("Content-Length: {}\r\nConnection: close\r\n", body.len()),
-        body,
-    ))
-    .await;
-    let uri = format!("http://{addr}/policy.pac?rev=3");
-    assert_eq!(fetch(uri).await.unwrap(), "function FindProxyForURL");
-    let request = task.await.unwrap().to_ascii_lowercase();
-    assert!(request.starts_with("get /policy.pac?rev=3 http/1.1\r\n"));
-    assert!(request.contains(&format!("host: {addr}\r\n").to_ascii_lowercase()));
-    assert!(request.contains("connection: close\r\n"));
+async fn rejects_plain_http_pac_before_connecting() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let uri = format!("http://{address}/policy.pac?rev=3");
+    let error = format!("{:#}", fetch_pac(uri.clone()).await.unwrap_err());
+    assert!(error.contains("remote PAC URL must use HTTPS"), "{error}");
+    assert!(
+        timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
-async fn revalidates_cached_pac_with_etag_and_keeps_cached_body_on_not_modified() {
+async fn rejects_http_cached_pac_sources() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut first, _) = listener.accept().await.unwrap();
-        let first_request = request_head(&mut first).await;
-        first
-            .write_all(&response(
-                "200 OK",
-                "ETag: \"policy-v1\"\r\nContent-Length: 8\r\nConnection: close\r\n",
-                b"PAC BODY",
-            ))
-            .await
-            .unwrap();
-
-        let (mut second, _) = listener.accept().await.unwrap();
-        let second_request = request_head(&mut second).await;
-        second
-            .write_all(b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n")
-            .await
-            .unwrap();
-        (first_request, second_request)
-    });
     let uri = format!("http://{addr}/policy.pac");
-    let cached = fetch_remote_pac_cached(&uri, None).await.unwrap();
-    assert_eq!(cached.script, "PAC BODY");
-    let unchanged = fetch_remote_pac_cached(&uri, Some(&cached)).await.unwrap();
-    assert_eq!(unchanged.script, "PAC BODY");
-    let (first, second) = server.await.unwrap();
-    assert!(!first.to_ascii_lowercase().contains("if-none-match:"));
-    assert!(second.contains("If-None-Match: \"policy-v1\"\r\n"));
+    let error = fetch_remote_pac_cached(&uri, None).await.unwrap_err();
+    assert!(format!("{error:#}").contains("remote PAC URL must use HTTPS"));
+    assert!(
+        timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
 }
-
 #[tokio::test]
 async fn rejects_not_modified_response_without_a_cached_validator() {
     let (addr, task) = one_shot(response("304 Not Modified", "Connection: close\r\n", b"")).await;
@@ -144,7 +132,7 @@ async fn decodes_chunked_response_without_content_length() {
     ))
     .await;
     assert_eq!(
-        fetch(format!("http://{addr}/chunks")).await.unwrap(),
+        fetch_text(format!("http://{addr}/chunks")).await.unwrap(),
         std::str::from_utf8(body).unwrap()
     );
     task.await.unwrap();
@@ -172,7 +160,7 @@ async fn every_supported_absolute_redirect_status_is_followed() {
         ))
         .await;
         assert_eq!(
-            fetch(format!("http://{source}/start")).await.unwrap(),
+            fetch_text(format!("http://{source}/start")).await.unwrap(),
             "ok",
             "{status}"
         );
@@ -320,7 +308,7 @@ async fn accepts_a_body_at_the_exact_eight_mib_limit() {
         &body,
     ))
     .await;
-    let result = fetch(format!("http://{addr}/limit")).await.unwrap();
+    let result = fetch_text(format!("http://{addr}/limit")).await.unwrap();
     assert_eq!(result.len(), LIMIT);
     task.await.unwrap();
 }
@@ -358,7 +346,8 @@ async fn https_fetch_uses_default_certificate_verification() {
         let _ = timeout(TEST_DEADLINE, acceptor.accept(stream)).await;
     });
     let uri = format!("https://{address}/policy.pac");
-    let error = fetch_error(uri).await;
+    let error = format!("{:#}", fetch_pac(uri.clone()).await.unwrap_err());
+    assert!(error.contains(&uri), "{error}");
     assert!(error.to_ascii_lowercase().contains("tls"), "{error}");
     server.await.unwrap();
 }

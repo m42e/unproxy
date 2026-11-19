@@ -130,7 +130,7 @@ pub struct MainArgs {
     /// Accept connections from a named socket-activation listener.
     #[arg(long = "activate-socket")]
     pub activate_socket: Option<String>,
-    /// Load a PAC script from a local path or HTTP(S) URL; may be repeated.
+    /// Load a PAC script from a local path or HTTPS URL; may be repeated.
     #[arg(short = 'p', long = "pac-file", action = clap::ArgAction::Append)]
     pub pac_file: Vec<String>,
     /// Load optional Pi-hole/hosts-format ad blocking lists from paths or HTTP(S) URLs.
