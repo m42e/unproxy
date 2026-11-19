@@ -1283,14 +1283,10 @@ async fn handle(
         let candidates = cfg.bound_addrs.iter().copied().chain(local);
         let port = destination.endpoint.port;
         let loops_back = host.parse::<std::net::IpAddr>().ok().is_some_and(|ip| {
-            candidates.clone().any(|addr| {
-                addr.port() == port
-                    && (addr.ip() == ip || (addr.ip().is_loopback() && ip.is_loopback()))
-            })
-        }) || (host.eq_ignore_ascii_case("localhost")
-            && candidates
+            candidates
                 .clone()
-                .any(|addr| addr.port() == port && addr.ip().is_loopback()));
+                .any(|addr| addr == SocketAddr::new(ip, port))
+        });
         if loops_back {
             return Ok(error_response(
                 StatusCode::BAD_REQUEST,
@@ -1362,6 +1358,7 @@ async fn handle(
         attempt_timeout,
         cfg.parallel,
         cfg.race,
+        &cfg.bound_addrs,
     )
     .await;
     let Some((route, stream, tunneled, mut authentication_sent)) = chosen else {
@@ -1529,6 +1526,7 @@ async fn select_route(
     timeout: Duration,
     parallel: usize,
     race: bool,
+    excluded_direct_addrs: &[SocketAddr],
 ) -> Option<ConnectedRoute> {
     type Attempt = BoxFuture<'static, (usize, Route, bool, anyhow::Result<(BoxedIo, bool)>)>;
     let mut pending: FuturesUnordered<Attempt> = FuturesUnordered::new();
@@ -1539,14 +1537,24 @@ async fn select_route(
         .collect();
     let mut next_ordered = 0usize;
     let max = parallel.max(1);
+    let excluded_direct_addrs = excluded_direct_addrs.to_vec();
     let launch = |idx: usize, pending: &mut FuturesUnordered<Attempt>, in_flight: &mut usize| {
         let route = routes.0[idx].clone();
         let dest = destination.clone();
         let options = options.clone();
+        let excluded_direct_addrs = excluded_direct_addrs.clone();
         let tunnel =
             route.is_socks() || ((connect || force_tunnel) && !matches!(route, Route::Direct));
         pending.push(Box::pin(async move {
-            let result = net::connect_observed(&route, &dest, tunnel, &options, timeout).await;
+            let result = net::connect_observed_excluding(
+                &route,
+                &dest,
+                tunnel,
+                &options,
+                timeout,
+                &excluded_direct_addrs,
+            )
+            .await;
             (idx, route, tunnel, result)
         }));
         *in_flight += 1;
@@ -2236,6 +2244,7 @@ mod management_coverage_tests {
             Duration::from_secs(1),
             1,
             false,
+            &[],
         )
         .await;
         assert!(selected.is_none());

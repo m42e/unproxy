@@ -1078,6 +1078,164 @@ async fn direct_get_forwards_origin_form_and_returns_body() {
     proxy.wait().await;
 }
 
+#[tokio::test]
+async fn direct_route_blocks_localhost_aliases_to_every_bound_listener_and_allows_other_hosts() {
+    let policy = Policy::new(Some(
+        "function FindProxyForURL(url, host) { return 'DIRECT'; }".into(),
+    ))
+    .unwrap();
+    let proxy = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
+        .listen("127.0.0.1:0".parse().unwrap())
+        .listen("127.0.0.1:0".parse().unwrap())
+        .bind()
+        .await
+        .unwrap();
+
+    for addr in proxy.local_addrs() {
+        let resolved = tokio::net::lookup_host(("localhost.", addr.port()))
+            .await
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert!(
+            resolved.contains(addr),
+            "localhost. did not resolve to {addr}: {resolved:?}"
+        );
+        let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
+        client
+            .write_all(
+                format!(
+                    "GET http://localhost.:{}/access.log HTTP/1.1\r\nHost: localhost.:{}\r\nConnection: close\r\n\r\n",
+                    addr.port(),
+                    addr.port()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        loop {
+            let mut byte = [0];
+            client.read_exact(&mut byte).await.unwrap();
+            response.push(byte[0]);
+            if response.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        assert!(response.starts_with(b"HTTP/1.1 502"), "{response:?}");
+
+        let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
+        client
+            .write_all(
+                format!(
+                    "CONNECT localhost.:{} HTTP/1.1\r\nHost: localhost.:{}\r\n\r\n",
+                    addr.port(),
+                    addr.port()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        loop {
+            let mut byte = [0];
+            client.read_exact(&mut byte).await.unwrap();
+            response.push(byte[0]);
+            if response.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        assert!(response.starts_with(b"HTTP/1.1 502"), "{response:?}");
+    }
+
+    let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let origin_task = tokio::spawn(async move {
+        let (mut io, _) = origin.accept().await.unwrap();
+        let mut head = Vec::new();
+        loop {
+            let mut byte = [0];
+            io.read_exact(&mut byte).await.unwrap();
+            head.push(byte[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        io.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nallowed")
+            .await
+            .unwrap();
+    });
+    let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
+    client
+        .write_all(
+            format!(
+                "GET http://{origin_addr}/ HTTP/1.1\r\nHost: {origin_addr}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("allowed"), "{response}");
+    origin_task.await.unwrap();
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
+async fn direct_route_allows_distinct_loopback_address_on_same_port() {
+    let origin = match tokio::net::TcpListener::bind("[::1]:0").await {
+        Ok(origin) => origin,
+        Err(_) => return,
+    };
+    let origin_addr = origin.local_addr().unwrap();
+    let proxy_addr = SocketAddr::from(([127, 0, 0, 1], origin_addr.port()));
+    let policy = Policy::new(Some(
+        "function FindProxyForURL(url, host) { return 'DIRECT'; }".into(),
+    ))
+    .unwrap();
+    let proxy = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
+        .listen(proxy_addr)
+        .bind()
+        .await
+        .unwrap();
+    let origin_task = tokio::spawn(async move {
+        let (mut io, _) = origin.accept().await.unwrap();
+        let mut head = Vec::new();
+        loop {
+            let mut byte = [0];
+            io.read_exact(&mut byte).await.unwrap();
+            head.push(byte[0]);
+            if head.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        io.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nallowed")
+            .await
+            .unwrap();
+    });
+    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+    client
+        .write_all(
+            format!(
+                "GET http://[::1]:{}/ HTTP/1.1\r\nHost: [::1]:{}\r\nConnection: close\r\n\r\n",
+                origin_addr.port(),
+                origin_addr.port()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("allowed"), "{response}");
+    origin_task.await.unwrap();
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
 async fn http_proxy_get(
     netrc: Option<&'static str>,
     expected_auth: Option<&'static str>,

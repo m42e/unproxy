@@ -274,15 +274,40 @@ async fn tcp(
     options: &ConnectionOptions,
     timeout: Duration,
 ) -> Result<TcpStream> {
-    let stream = time::timeout(
-        timeout,
-        TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
-    )
+    tcp_excluding(endpoint, options, timeout, &[]).await
+}
+
+async fn tcp_excluding(
+    endpoint: &Endpoint,
+    options: &ConnectionOptions,
+    timeout: Duration,
+    excluded: &[SocketAddr],
+) -> Result<TcpStream> {
+    time::timeout(timeout, async {
+        let addresses = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
+            .await
+            .with_context(|| format!("resolving {endpoint}"))?
+            .collect::<Vec<_>>();
+        let mut last_error = None;
+        for address in addresses {
+            if excluded.contains(&address) {
+                continue;
+            }
+            match TcpStream::connect(address).await {
+                Ok(stream) => {
+                    configure_keepalive(&stream, &options.keepalive)?;
+                    return Ok(stream);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if let Some(error) = last_error {
+            return Err(error).with_context(|| format!("connecting to {endpoint}"));
+        }
+        anyhow::bail!("no usable addresses for {endpoint}")
+    })
     .await
     .context("TCP connection timed out")?
-    .with_context(|| format!("connecting to {endpoint}"))?;
-    configure_keepalive(&stream, &options.keepalive)?;
-    Ok(stream)
 }
 
 async fn secure(stream: BoxedIo, host: &str, connector: &TlsConnector) -> Result<BoxedIo> {
@@ -338,10 +363,24 @@ pub async fn connect_observed(
     options: &ConnectionOptions,
     timeout: Duration,
 ) -> Result<(BoxedIo, bool)> {
+    connect_observed_excluding(route, destination, tunnel, options, timeout, &[]).await
+}
+
+/// Establish a route while preventing direct connections to local listener addresses.
+/// Proxy routes are unaffected because their endpoint is not the request destination.
+pub(crate) async fn connect_observed_excluding(
+    route: &Route,
+    destination: &Endpoint,
+    tunnel: bool,
+    options: &ConnectionOptions,
+    timeout: Duration,
+    excluded_direct_addrs: &[SocketAddr],
+) -> Result<(BoxedIo, bool)> {
     time::timeout(timeout, async {
         match route {
             Route::Direct => Ok((
-                Box::new(tcp(destination, options, timeout).await?) as BoxedIo,
+                Box::new(tcp_excluding(destination, options, timeout, excluded_direct_addrs).await?)
+                    as BoxedIo,
                 false,
             )),
             Route::Http(proxy) => {
