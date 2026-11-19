@@ -351,7 +351,7 @@ async fn read_subnegotiation<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(u8
 #[cfg(feature = "negotiate")]
 fn protected_stream(stream: BoxedIo, context: SharedGss) -> Result<BoxedIo> {
     let (application, relay) = tokio::io::duplex(128 * 1024);
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let (mut app_read, mut app_write) = tokio::io::split(application);
         let (mut net_read, mut net_write) = tokio::io::split(stream);
         let outbound_context = context.clone();
@@ -380,7 +380,13 @@ fn protected_stream(stream: BoxedIo, context: SharedGss) -> Result<BoxedIo> {
         let inbound_context = context;
         let inbound = async {
             loop {
-                let (kind, token) = read_subnegotiation(&mut net_read).await?;
+                let Some((kind, token)) = read_subnegotiation_or_eof(&mut net_read).await? else {
+                    app_write
+                        .shutdown()
+                        .await
+                        .context("shutting down SOCKS5 GSSAPI application read side")?;
+                    return Ok::<_, anyhow::Error>(());
+                };
                 ensure!(
                     kind == 3,
                     "unexpected SOCKS5 GSSAPI data message type {kind}"
@@ -401,7 +407,77 @@ fn protected_stream(stream: BoxedIo, context: SharedGss) -> Result<BoxedIo> {
             tracing::debug!(%error, "SOCKS5 GSSAPI stream ended");
         }
     });
-    Ok(Box::new(relay))
+    Ok(Box::new(CancelOnDropStream {
+        stream: relay,
+        task,
+    }))
+}
+
+#[cfg(feature = "negotiate")]
+async fn read_subnegotiation_or_eof<S: AsyncRead + Unpin>(
+    stream: &mut S,
+) -> Result<Option<(u8, Vec<u8>)>> {
+    let mut version = [0; 1];
+    if stream.read(&mut version).await? == 0 {
+        return Ok(None);
+    }
+    let mut header = [0; 3];
+    stream.read_exact(&mut header).await?;
+    ensure!(version[0] == 1, "invalid SOCKS5 GSSAPI message version");
+    ensure!(header[0] != 0xff, "SOCKS5 GSSAPI authentication rejected");
+    let len = u16::from_be_bytes([header[1], header[2]]) as usize;
+    let mut token = vec![0; len];
+    stream.read_exact(&mut token).await?;
+    Ok(Some((header[0], token)))
+}
+
+#[cfg(feature = "negotiate")]
+struct CancelOnDropStream {
+    stream: tokio::io::DuplexStream,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(feature = "negotiate")]
+impl Drop for CancelOnDropStream {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[cfg(feature = "negotiate")]
+impl AsyncRead for CancelOnDropStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+#[cfg(feature = "negotiate")]
+impl AsyncWrite for CancelOnDropStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
 }
 
 #[cfg(all(test, feature = "negotiate"))]
@@ -548,6 +624,57 @@ mod tests {
         client.read_exact(&mut response).await.unwrap();
         assert_eq!(&response, b"ready");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_protected_stream_cancels_relay_and_closes_upstream() {
+        let (client, mut proxy) = tokio::io::duplex(1024);
+        let context: SharedGss = Arc::new(Mutex::new(Box::new(FixtureContext { steps: 0 })));
+        let client = protected_stream(Box::new(client), context).unwrap();
+        drop(client);
+
+        let mut trailing = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            proxy.read_to_end(&mut trailing),
+        )
+        .await
+        .expect("dropping the protected stream should close the upstream")
+        .unwrap();
+        assert!(trailing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn protected_stream_preserves_application_write_half_close() {
+        let (upstream, mut proxy) = tokio::io::duplex(1024);
+        let context: SharedGss = Arc::new(Mutex::new(Box::new(FixtureContext { steps: 0 })));
+        let mut client = protected_stream(Box::new(upstream), context).unwrap();
+
+        client.shutdown().await.unwrap();
+        let mut eof = [0; 1];
+        assert_eq!(proxy.read(&mut eof).await.unwrap(), 0);
+
+        write_subnegotiation(&mut proxy, 3, b"\xccreverse traffic")
+            .await
+            .unwrap();
+        let mut response = [0; 15];
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"reverse traffic");
+    }
+
+    #[tokio::test]
+    async fn protected_stream_preserves_upstream_write_half_close() {
+        let (upstream, mut proxy) = tokio::io::duplex(1024);
+        let context: SharedGss = Arc::new(Mutex::new(Box::new(FixtureContext { steps: 0 })));
+        let mut client = protected_stream(Box::new(upstream), context).unwrap();
+
+        proxy.shutdown().await.unwrap();
+        let mut eof = [0; 1];
+        assert_eq!(client.read(&mut eof).await.unwrap(), 0);
+        client.write_all(b"still writable").await.unwrap();
+        let (kind, token) = read_subnegotiation(&mut proxy).await.unwrap();
+        assert_eq!(kind, 3);
+        assert_eq!(token, [b"\xcc".as_slice(), b"still writable"].concat());
     }
 
     #[tokio::test]
