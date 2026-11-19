@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Match valid single-label filter-list entries against their exact normalized host.
 - Cap `undns` at 64 concurrent DNS exchanges and drop excess datagrams when
   upstream work is saturated.
 - Route `undns` primary DNS queries through the selected proxy using DNS-over-TCP

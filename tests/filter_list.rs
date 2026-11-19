@@ -160,6 +160,42 @@ async fn blocked_request_is_rejected_before_policy_routing() {
 }
 
 #[tokio::test]
+async fn single_label_hosts_are_matched_after_request_host_normalization() {
+    let list = FilterList::parse("127.0.0.1 LOCALHOST\n");
+    let (mut client, server_io) = tokio::io::duplex(4096);
+    let context = ContextBuilder::new(
+        Arc::new(Policy::new(None).unwrap()),
+        ConnectionOptions::default(),
+    )
+    .filter_list(list)
+    .serve_stream(server_io, "127.0.0.1:12345".parse::<SocketAddr>().unwrap())
+    .await
+    .unwrap();
+
+    client
+        .write_all(
+            b"GET http://LOCALHOST./resource HTTP/1.1\r\nHost: LOCALHOST.\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        client.read_to_end(&mut response),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        response.starts_with(b"HTTP/1.1 403"),
+        "{}",
+        String::from_utf8_lossy(&response)
+    );
+    context.shutdown();
+    context.wait().await;
+}
+
+#[tokio::test]
 async fn unlisted_request_is_not_rejected_by_filter() {
     let list = FilterList::parse("blocked.example.test\n");
     let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();

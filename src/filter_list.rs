@@ -10,6 +10,7 @@ pub struct FilterList(Arc<HashSet<String>>);
 impl FilterList {
     pub fn parse(text: &str) -> Self {
         let mut domains = HashSet::new();
+        let mut malformed_entries = 0;
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
@@ -21,16 +22,22 @@ impl FilterList {
             // lines are also accepted, as are common adblock URL rules.
             if first.parse::<std::net::IpAddr>().is_ok() {
                 for domain in fields {
-                    insert_domain(&mut domains, domain);
+                    malformed_entries += usize::from(!insert_domain(&mut domains, domain));
                 }
             } else if !first.starts_with("||") && !first.starts_with('!') && !first.contains('/') {
-                insert_domain(&mut domains, first);
+                malformed_entries += usize::from(!insert_domain(&mut domains, first));
             } else if let Some(domain) = first
                 .strip_prefix("||")
                 .and_then(|s| s.split(['^', '/', '*']).next())
             {
-                insert_domain(&mut domains, domain);
+                malformed_entries += usize::from(!insert_domain(&mut domains, domain));
             }
+        }
+        if malformed_entries > 0 {
+            tracing::warn!(
+                malformed_entries,
+                "ignored malformed filter-list domain entries"
+            );
         }
         Self(Arc::new(domains))
     }
@@ -40,9 +47,10 @@ impl FilterList {
             .trim_end_matches('.')
             .trim_matches(['[', ']'])
             .to_ascii_lowercase();
+        let single_label_request = !host.contains('.');
         let mut candidate = host.as_str();
         loop {
-            if self.0.contains(candidate) {
+            if (single_label_request || candidate.contains('.')) && self.0.contains(candidate) {
                 return true;
             }
             match candidate.find('.') {
@@ -144,14 +152,43 @@ impl FilterList {
     }
 }
 
-fn insert_domain(set: &mut HashSet<String>, raw: &str) {
-    let domain = raw
-        .trim_matches('.')
-        .trim_matches(['[', ']'])
-        .to_ascii_lowercase();
-    if !domain.is_empty() && domain.len() <= 253 && domain.contains('.') && !domain.contains(' ') {
+fn insert_domain(set: &mut HashSet<String>, raw: &str) -> bool {
+    let unbracketed = match (raw.starts_with('['), raw.ends_with(']')) {
+        (false, false) if !raw.contains(['[', ']']) => raw,
+        (true, true) if !raw[1..raw.len() - 1].contains(['[', ']']) => &raw[1..raw.len() - 1],
+        _ => return false,
+    };
+    let domain = unbracketed.trim_matches('.').to_ascii_lowercase();
+    let single_label = unbracketed.strip_suffix('.').unwrap_or(unbracketed);
+    let valid_single_label = !unbracketed.starts_with('.')
+        && !single_label.contains('.')
+        && is_valid_domain(&single_label.to_ascii_lowercase());
+    // Keep the parser's existing permissive handling of multi-label entries.
+    // DNS label validation is needed for the newly accepted single-label form
+    // so arbitrary tokens do not become overly broad suffix matches.
+    if (!domain.is_empty() && domain.len() <= 253 && domain.contains('.') && !domain.contains(' '))
+        || valid_single_label
+    {
         set.insert(domain);
+        true
+    } else {
+        false
     }
+}
+
+fn is_valid_domain(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && domain.split('.').all(|label| {
+            let bytes = label.as_bytes();
+            !bytes.is_empty()
+                && bytes.len() <= 63
+                && bytes[0].is_ascii_alphanumeric()
+                && bytes[bytes.len() - 1].is_ascii_alphanumeric()
+                && bytes
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        })
 }
 
 #[cfg(test)]
@@ -189,6 +226,36 @@ mod tests {
         assert!(list.contains("banner.test"));
         assert!(!list.contains("example.test"));
         assert!(!list.contains("safe.test"));
+    }
+
+    #[test]
+    fn parses_and_matches_single_label_hosts_in_all_supported_forms() {
+        let list = FilterList::parse(
+            "127.0.0.1 localhost. HOSTS-ONLY\nplain-only\n||adblock-only^\n[bracketed]\n",
+        );
+
+        assert_eq!(list.domain_count(), 5);
+        assert!(list.contains("localhost"));
+        assert!(list.contains("LOCALHOST."));
+        assert!(list.contains("hosts-only"));
+        assert!(list.contains("PLAIN-ONLY"));
+        assert!(list.contains("adblock-only"));
+        assert!(list.contains("bracketed"));
+        assert!(!list.contains("sub.localhost"));
+        assert!(!list.contains("localhost.evil"));
+        assert!(!list.contains("other"));
+    }
+
+    #[test]
+    fn ignores_malformed_domain_entries_without_matching_them() {
+        let list = FilterList::parse(
+            "-leading-hyphen\ntrailing-hyphen-\ninvalid_domain\n.localhost\nlocalhost..\n[localhost\nlocalhost]\n",
+        );
+
+        assert_eq!(list.domain_count(), 0);
+        assert!(!list.contains("-leading-hyphen"));
+        assert!(!list.contains("invalid_domain"));
+        assert!(!list.contains("localhost"));
     }
 
     #[test]
