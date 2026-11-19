@@ -38,39 +38,154 @@ fn dns_parser_rejects_bad_compression_and_trailing_sections() {
 }
 
 #[tokio::test]
-async fn primary_exchange_uses_a_fresh_connected_udp_socket() {
-    // This exchange validates primary wire processing, so use a complete empty DNS header.
-    let responder = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let addr = responder.local_addr().unwrap();
-    let task = tokio::spawn(async move {
-        let mut buf = [0; 64];
-        let (_, peer) = responder.recv_from(&mut buf).await.unwrap();
-        let response = [0u8; 12];
-        responder.send_to(&response, peer).await.unwrap();
-    });
-    let response = exchange_primary(&[0u8; 12], addr).await.unwrap();
-    assert_eq!(response, vec![0; 12]);
-    task.await.unwrap();
-    let _ = addr;
-}
-
-#[tokio::test]
 async fn primary_exchange_supports_ipv6_server_addresses() {
     let responder = match UdpSocket::bind("[::1]:0").await {
         Ok(socket) => socket,
         Err(_) => return,
     };
     let addr = responder.local_addr().unwrap();
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let route = Route::Http(unproxy::route::Endpoint {
+        host: proxy_addr.ip().to_string(),
+        port: proxy_addr.port(),
+    });
     let task = tokio::spawn(async move {
-        let mut buf = [0; 64];
-        let (_, peer) = responder.recv_from(&mut buf).await.unwrap();
-        responder.send_to(&[0u8; 12], peer).await.unwrap();
+        let (mut stream, _) = proxy.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+        }
+        assert!(
+            String::from_utf8(request)
+                .unwrap()
+                .starts_with(&format!("CONNECT {addr} "))
+        );
+        stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await
+            .unwrap();
+        let mut length = [0; 2];
+        stream.read_exact(&mut length).await.unwrap();
+        let mut query = vec![0; u16::from_be_bytes(length) as usize];
+        stream.read_exact(&mut query).await.unwrap();
+        assert_eq!(query, vec![0; 12]);
+        stream.write_all(&[0, 12]).await.unwrap();
+        stream.write_all(&[0; 12]).await.unwrap();
     });
     assert_eq!(
-        exchange_primary(&[0u8; 12], addr).await.unwrap(),
+        exchange_primary(&[0u8; 12], addr, &route, &ConnectionOptions::default())
+            .await
+            .unwrap(),
         vec![0; 12]
     );
     task.await.unwrap();
+}
+
+#[tokio::test]
+async fn primary_exchange_sends_dns_tcp_through_selected_proxy_without_udp() {
+    let udp_target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let target = udp_target.local_addr().unwrap();
+    let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    let route = Route::Http(unproxy::route::Endpoint {
+        host: proxy_addr.ip().to_string(),
+        port: proxy_addr.port(),
+    });
+    let proxy_task = tokio::spawn(async move {
+        let (mut stream, _) = proxy.accept().await.unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).await.unwrap();
+            headers.push(byte[0]);
+        }
+        assert!(
+            String::from_utf8(headers)
+                .unwrap()
+                .starts_with(&format!("CONNECT {target} "))
+        );
+        stream
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await
+            .unwrap();
+        let mut length = [0; 2];
+        stream.read_exact(&mut length).await.unwrap();
+        let mut query = vec![0; u16::from_be_bytes(length) as usize];
+        stream.read_exact(&mut query).await.unwrap();
+        assert_eq!(query, vec![0; 12]);
+        // A primary answer with no fallback condition.
+        let response = [
+            0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 127, 0, 0, 1,
+        ];
+        stream
+            .write_all(&(response.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&response).await.unwrap();
+    });
+    let secondary: http::Uri = "https://127.0.0.1/dns-query".parse().unwrap();
+    let response = exchange(
+        &[0; 12],
+        target,
+        &secondary,
+        &route,
+        &ConnectionOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(parse_counts(&response).unwrap().answers, 1);
+    proxy_task.await.unwrap();
+    assert!(
+        timeout(std::time::Duration::from_millis(50), async {
+            let mut buffer = [0; 32];
+            udp_target.recv_from(&mut buffer).await
+        })
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn primary_exchange_fails_closed_when_selected_proxy_is_unavailable() {
+    let udp_target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let target = udp_target.local_addr().unwrap();
+    let tcp_target = TcpListener::bind(target).await.unwrap();
+    let unavailable_proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = unavailable_proxy.local_addr().unwrap();
+    drop(unavailable_proxy);
+    let route = Route::Http(unproxy::route::Endpoint {
+        host: proxy_addr.ip().to_string(),
+        port: proxy_addr.port(),
+    });
+    let secondary: http::Uri = "https://127.0.0.1/dns-query".parse().unwrap();
+
+    assert!(
+        exchange(
+            &[0; 12],
+            target,
+            &secondary,
+            &route,
+            &ConnectionOptions::default(),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        timeout(std::time::Duration::from_millis(50), tcp_target.accept())
+            .await
+            .is_err()
+    );
+    assert!(
+        timeout(std::time::Duration::from_millis(50), async {
+            let mut buffer = [0; 32];
+            udp_target.recv_from(&mut buffer).await
+        })
+        .await
+        .is_err()
+    );
 }
 
 fn doh_tls() -> (
@@ -152,11 +267,14 @@ async fn doh_bounds_stalled_and_oversized_response_bodies() {
 
 #[tokio::test]
 async fn exchange_returns_primary_without_fallback_when_it_has_answers() {
-    let responder = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let responder = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = responder.local_addr().unwrap();
     let task = tokio::spawn(async move {
-        let mut query = [0u8; 512];
-        let (_, peer) = responder.recv_from(&mut query).await.unwrap();
+        let (mut stream, _) = responder.accept().await.unwrap();
+        let mut length = [0u8; 2];
+        stream.read_exact(&mut length).await.unwrap();
+        let mut query = vec![0; u16::from_be_bytes(length) as usize];
+        stream.read_exact(&mut query).await.unwrap();
         // Valid response with one root-name A record (empty answer body is invalid, so use a
         // complete question and answer RR).
         let mut response = vec![0u8; 12];
@@ -164,7 +282,11 @@ async fn exchange_returns_primary_without_fallback_when_it_has_answers() {
         response[7] = 1;
         response.extend_from_slice(&[0, 0, 1, 0, 1]);
         response.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 1, 0, 4, 127, 0, 0, 1]);
-        responder.send_to(&response, peer).await.unwrap();
+        stream
+            .write_all(&(response.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&response).await.unwrap();
     });
     let uri: http::Uri = "https://127.0.0.1/dns-query".parse().unwrap();
     let response = exchange(

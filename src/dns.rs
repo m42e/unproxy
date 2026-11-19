@@ -4,7 +4,11 @@ use std::{
     net::{IpAddr, SocketAddr},
     time::Duration,
 };
-use tokio::{net::UdpSocket, time::timeout};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::UdpSocket,
+    time::timeout,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DnsCounts {
@@ -131,25 +135,42 @@ fn skip_name(b: &[u8], start: usize) -> Result<usize> {
         }
     }
 }
-pub async fn exchange_primary(query: &[u8], server: SocketAddr) -> Result<Vec<u8>> {
-    let bind = if server.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
+pub async fn exchange_primary(
+    query: &[u8],
+    server: SocketAddr,
+    proxy: &crate::route::Route,
+    options: &crate::net::ConnectionOptions,
+) -> Result<Vec<u8>> {
+    if query.len() > u16::MAX as usize {
+        return Err(anyhow!("primary DNS query exceeds TCP frame size"));
+    }
+    let endpoint = crate::route::Endpoint {
+        host: server.ip().to_string(),
+        port: server.port(),
     };
-    let sock = UdpSocket::bind(bind).await?;
-    sock.connect(server).await?;
-    let n = timeout(Duration::from_millis(500), sock.send(query))
+    // DNS-over-TCP is supported by the proxy stack's stream tunnels. Using it
+    // here ensures the selected proxy carries the primary query; failure to
+    // establish that route is returned without a direct-network fallback.
+    let mut stream = timeout(
+        Duration::from_millis(1500),
+        crate::net::connect(proxy, &endpoint, true, options, Duration::from_millis(1500)),
+    )
+    .await
+    .context("primary DNS proxy tunnel timeout")??;
+    let mut frame = Vec::with_capacity(query.len() + 2);
+    frame.extend_from_slice(&(query.len() as u16).to_be_bytes());
+    frame.extend_from_slice(query);
+    timeout(Duration::from_millis(500), stream.write_all(&frame))
         .await
         .context("primary DNS send timeout")??;
-    if n != query.len() {
-        tracing::warn!(sent = n, expected = query.len(), "short primary DNS send")
-    }
-    let mut b = vec![0; 65507];
-    let n = timeout(Duration::from_millis(500), sock.recv(&mut b))
+    let mut length = [0u8; 2];
+    timeout(Duration::from_millis(500), stream.read_exact(&mut length))
         .await
         .context("primary DNS receive timeout")??;
-    b.truncate(n);
+    let mut b = vec![0; u16::from_be_bytes(length) as usize];
+    timeout(Duration::from_millis(500), stream.read_exact(&mut b))
+        .await
+        .context("primary DNS receive timeout")??;
     parse_counts(&b).context("invalid primary DNS response")?;
     Ok(b)
 }
@@ -294,7 +315,7 @@ pub async fn exchange(
     proxy: &crate::route::Route,
     options: &crate::net::ConnectionOptions,
 ) -> Result<Vec<u8>> {
-    let answer = exchange_primary(query, primary_addr).await?;
+    let answer = exchange_primary(query, primary_addr, proxy, options).await?;
     if needs_fallback(&answer)? {
         secondary(query, secondary_uri, proxy, options).await
     } else {
@@ -509,19 +530,30 @@ mod tests {
 
     #[tokio::test]
     async fn primary_dns_timeout_has_receive_context() {
-        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = server.local_addr().unwrap();
         let mut query = vec![0u8; 17];
         query[5] = 1;
         query[12..].copy_from_slice(&[0, 0, 1, 0, 1]);
         let server_task = tokio::spawn(async move {
-            let mut buffer = [0u8; 64];
-            server.recv_from(&mut buffer).await.unwrap();
+            let (mut stream, _) = server.accept().await.unwrap();
+            let mut length = [0; 2];
+            stream.read_exact(&mut length).await.unwrap();
+            let mut buffer = vec![0; u16::from_be_bytes(length) as usize];
+            stream.read_exact(&mut buffer).await.unwrap();
+            std::future::pending::<()>().await;
         });
 
-        let error = exchange_primary(&query, address).await.unwrap_err();
+        let error = exchange_primary(
+            &query,
+            address,
+            &crate::route::Route::Direct,
+            &crate::net::ConnectionOptions::default(),
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("primary DNS receive timeout"));
-        server_task.await.unwrap();
+        server_task.abort();
     }
 
     #[tokio::test]
@@ -585,34 +617,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_service_drops_bad_upstream_reply_then_serves_the_next_query() {
-        let primary = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    async fn udp_service_drops_bad_primary_reply_then_serves_the_next_query() {
+        let primary = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let primary_address = primary.local_addr().unwrap();
         let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let server_address = server.local_addr().unwrap();
+        let primary_task = tokio::spawn(async move {
+            for request_index in 0..2 {
+                let (mut stream, _) = primary.accept().await.unwrap();
+                let mut length = [0; 2];
+                stream.read_exact(&mut length).await.unwrap();
+                let mut query = vec![0; u16::from_be_bytes(length) as usize];
+                stream.read_exact(&mut query).await.unwrap();
+                let response = if request_index == 0 {
+                    vec![0]
+                } else {
+                    let mut answer = query;
+                    answer[6..8].copy_from_slice(&1u16.to_be_bytes());
+                    answer.extend_from_slice(&[
+                        0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 7,
+                    ]);
+                    answer
+                };
+                stream
+                    .write_all(&(response.len() as u16).to_be_bytes())
+                    .await
+                    .unwrap();
+                stream.write_all(&response).await.unwrap();
+            }
+        });
         let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(serve_socket(
             server,
             primary_address,
             "https://dns.example.test/dns-query".parse().unwrap(),
-            crate::route::Route::Http(crate::route::Endpoint {
-                host: "proxy.example.test".into(),
-                port: 8080,
-            }),
+            crate::route::Route::Direct,
             crate::net::ConnectionOptions::default(),
             shutdown,
         ));
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         client.send_to(&[1, 2], server_address).await.unwrap();
-        let mut upstream = [0u8; 128];
-        let (size, peer) =
-            tokio::time::timeout(Duration::from_secs(2), primary.recv_from(&mut upstream))
-                .await
-                .unwrap()
-                .unwrap();
-        assert_eq!(&upstream[..size], &[1, 2]);
-        primary.send_to(&[0], peer).await.unwrap();
 
         let mut response = [0u8; 128];
         assert!(
@@ -623,25 +668,17 @@ mod tests {
 
         let query = test_query(0x1234);
         client.send_to(&query, server_address).await.unwrap();
-        let (size, peer) =
-            tokio::time::timeout(Duration::from_secs(2), primary.recv_from(&mut upstream))
-                .await
-                .unwrap()
-                .unwrap();
-        let mut answer = upstream[..size].to_vec();
-        answer[6..8].copy_from_slice(&1u16.to_be_bytes());
-        answer.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 7]);
-        primary.send_to(&answer, peer).await.unwrap();
         let (size, _) =
             tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut response))
                 .await
                 .unwrap()
                 .unwrap();
-        assert_eq!(&response[..size], answer);
+        assert_eq!(&response[..2], &query[..2]);
         assert_eq!(parse_counts(&response[..size]).unwrap().answers, 1);
 
         stop.send(()).unwrap();
         task.await.unwrap().unwrap();
+        primary_task.await.unwrap();
     }
 
     fn test_query(id: u16) -> Vec<u8> {

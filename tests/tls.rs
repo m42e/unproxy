@@ -209,16 +209,38 @@ async fn dns_fallback_posts_original_wire_bytes_inside_verified_nested_tls() {
     query[5] = 1;
     query.extend_from_slice(&[0, 0, 1, 0, 1]);
     let expected = query.clone();
+    let mut primary_response = expected.clone();
+    primary_response[2] |= 0x80;
     let dns_response = vec![0x12, 0x34, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let response_copy = dns_response.clone();
-    let primary_task = tokio::spawn(async move {
-        let mut bytes = [0u8; 512];
-        let (len, peer) = primary.recv_from(&mut bytes).await.unwrap();
-        bytes[2] |= 0x80;
-        primary.send_to(&bytes[..len], peer).await.unwrap();
-    });
     let tls_acceptor = acceptor();
     let proxy_task = tokio::spawn(async move {
+        // First connection: DNS-over-TCP to the primary resolver through CONNECT.
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut outer_tls = tls_acceptor.accept(stream).await.unwrap();
+        let connect_head = read_head(&mut outer_tls).await;
+        assert!(connect_head.starts_with(&format!("CONNECT {primary_addr} HTTP/1.1")));
+        assert!(
+            !connect_head
+                .to_ascii_lowercase()
+                .contains("proxy-authorization")
+        );
+        outer_tls
+            .write_all(b"HTTP/1.1 200 Tunnel\r\n\r\n")
+            .await
+            .unwrap();
+        let mut length = [0; 2];
+        outer_tls.read_exact(&mut length).await.unwrap();
+        let mut primary_query = vec![0; u16::from_be_bytes(length) as usize];
+        outer_tls.read_exact(&mut primary_query).await.unwrap();
+        assert_eq!(primary_query, expected);
+        outer_tls
+            .write_all(&(primary_response.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        outer_tls.write_all(&primary_response).await.unwrap();
+
+        // Second connection: the existing nested TLS DoH fallback tunnel.
         let (stream, _) = listener.accept().await.unwrap();
         let mut outer_tls = tls_acceptor.accept(stream).await.unwrap();
         let connect_head = read_head(&mut outer_tls).await;
@@ -263,6 +285,13 @@ async fn dns_fallback_posts_original_wire_bytes_inside_verified_nested_tls() {
     .await
     .unwrap();
     assert_eq!(response, dns_response);
-    primary_task.await.unwrap();
     proxy_task.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), async {
+            let mut buffer = [0; 32];
+            primary.recv_from(&mut buffer).await
+        })
+        .await
+        .is_err()
+    );
 }

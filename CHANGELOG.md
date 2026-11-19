@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Route `undns` primary DNS queries through the selected proxy using DNS-over-TCP
+  and fail closed when that route cannot carry the query. The public
+  `dns::exchange_primary` signature now requires the selected route and
+  connection options; this is a source compatibility change for Rust callers.
+
 ## 0.4.7
 
 - Fix the macOS proxy child aborting when its inherited sandbox entitlements
