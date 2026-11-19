@@ -22,14 +22,14 @@ fn access_records_use_real_seconds_and_omit_size_for_errors() {
     entry.timestamp = chrono::DateTime::parse_from_rfc3339("2026-10-02T12:34:56+02:00").unwrap();
     assert_eq!(
         entry.to_string(),
-        "2026-10-02T12:34:56+02:00 127.0.0.1:1234 DIRECT \"GET http://example.test/a?q=1 HTTP/1.1\" 1.234s 200 42b \"fixture\""
+        "2026-10-02T12:34:56+02:00 127.0.0.1:1234 DIRECT \"GET <redacted> HTTP/1.1\" 1.234s 200 42b \"fixture\""
     );
     entry.outcome = AccessOutcome::Error("refused\nby upstream".into());
     entry.user_agent = None;
     assert!(
         entry
             .to_string()
-            .ends_with("1.234s error: \"refused\\nby upstream\" \"-\"")
+            .ends_with("1.234s error: \"request failed\" \"-\"")
     );
     assert!(entry.event().ends_with("\n\n"));
 }
@@ -56,7 +56,7 @@ fn successful_proxy_access_records_show_endpoint_size_and_agent() {
     entry.timestamp = chrono::DateTime::parse_from_rfc3339("2026-10-02T12:34:56+02:00").unwrap();
     let output = entry.to_string();
     assert!(output.contains("HTTP proxy.example:8080"));
-    assert!(output.contains("GET http://example.test/resource HTTP/1.1"));
+    assert!(output.contains("GET <redacted> HTTP/1.1"));
     assert!(output.contains("200 4096b \"fixture-agent\""));
     assert!(!output.contains("\"-\""));
 }
@@ -80,7 +80,7 @@ fn successful_access_records_mark_missing_size_and_agent() {
 }
 
 #[test]
-fn failed_access_records_quote_untrusted_error_text_and_missing_agent() {
+fn failed_access_records_redact_destination_and_error_details() {
     let request = http::Request::get("http://example.test/resource")
         .body(())
         .unwrap();
@@ -92,6 +92,7 @@ fn failed_access_records_quote_untrusted_error_text_and_missing_agent() {
         AccessOutcome::Error("bad \"header\"\\path\r\nnext".into()),
     );
     let text = entry.to_string();
-    assert!(text.contains("- \"GET http://example.test/resource HTTP/1.1\""));
-    assert!(text.contains("error: \"bad \\\"header\\\"\\\\path\\r\\nnext\" \"-\""));
+    assert!(text.contains("- \"GET <redacted> HTTP/1.1\""));
+    assert!(text.contains("error: \"request failed\" \"-\""));
+    assert!(!text.contains("bad "));
 }

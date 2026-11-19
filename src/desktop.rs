@@ -4572,8 +4572,9 @@ mod native {
                     if header == "\r\n" || header.is_empty() {
                         break;
                     }
+                    assert!(!header.to_ascii_lowercase().starts_with("authorization:"));
                 }
-                let body = r#"{"pac_loaded":true,"authentication_configured":false,"upstream_state":"ok","authentication_state":"disabled"}"#;
+                let body = r#"{"pac_loaded":true,"pac_files":["remote PAC file"],"upstream_route":"HTTP proxy","authentication_configured":false,"upstream_state":"ok","authentication_state":"disabled"}"#;
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),

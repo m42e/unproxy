@@ -80,6 +80,17 @@ files and manually migrate trusted settings and referenced PAC files into the
 active config. The service never loads the review copies. Logs are stored in
 `C:\Program Files\Unproxy\data\logs`.
 
+Run elevated service setup using the same Windows account that owns the
+per-user tray app. Setup creates a random management token in
+`data\management.token`; the service config points to that file. Its ACL grants
+read access to NetworkService, SYSTEM, Administrators, and the installing user
+SID. The tray gets a separate owner-only copy in that user’s
+`%LOCALAPPDATA%\Unproxy` directory. Neither token file grants access to
+BUILTIN\Users or Everyone. Repair preserves the token only when the recorded
+owner SID matches the installing account; changing owners rotates it. The tray
+still polls only sanitized public status. To open detailed logs, enter the
+token as the password in the browser’s management authentication prompt.
+
 The service runs as NetworkService, so Negotiate uses the computer account on
 a domain. You can change the service logon account in Windows Services if your
 organization requires a different identity; grant that account Read & execute access to

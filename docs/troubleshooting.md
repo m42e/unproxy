@@ -198,16 +198,17 @@ systemctl --user stop unproxy
 
 ## Find status and logs
 
-On Windows or macOS, choose **Open Status Page** from the tray or menu bar menu to open the current listener in your default browser. Use the links on that page to reach the live access log, diagnostic log, and status JSON.
+On Windows or macOS, choose **Open Status Page** from the tray or menu bar menu to open the current listener in your default browser. The status page is sanitized and remains available to the tray. Opening a log viewer prompts for HTTP Basic credentials; use username `unproxy` and the owner capability as the password. The browser then uses its same-origin auth cache for the live stream and route resolver. See [Listener access and privacy](configuration.md#listener-access-and-privacy) for token setup.
 
 For a CLI or service, use the following paths at your configured listener’s HTTP address. For example, with the default listener, `/access.html` becomes `http://127.0.0.1:3128/access.html`.
 
 | Path | Use it for |
 | --- | --- |
 | `/` | Policy, upstream, and authentication summary. |
-| `/access.html` | Recent requests and their results. |
-| `/log.html` | Runtime messages. |
-| `/status.json` | Machine-readable runtime state. |
+| `/access.html` | Static viewer for the owner-authenticated live access stream. |
+| `/log.html` | Static viewer for the owner-authenticated runtime log stream. |
+| `/resolve.json` | Owner-authenticated PAC route evaluation. |
+| `/status.json` | Public, sanitized machine-readable runtime state. |
 
 File locations are listed in [Configuration reference](configuration.md#desktop-files). The OS instructions above show how to read the relevant log from a terminal.
 

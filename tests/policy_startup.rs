@@ -155,7 +155,8 @@ async fn supplied_listener_context_exposes_policy_and_access_operations() {
         user_agent: Some("coverage-fixture".into()),
     });
     let event = events.recv().await.unwrap();
-    assert!(event.contains("/probe"));
+    assert!(event.contains("<redacted>"));
+    assert!(!event.contains("/probe"));
     assert!(event.contains("coverage-fixture"));
 
     context.clear_policy().await.unwrap();

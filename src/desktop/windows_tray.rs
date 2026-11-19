@@ -971,6 +971,40 @@ mod tests {
     }
 
     #[test]
+    fn tray_status_probe_uses_public_sanitized_endpoint_without_owner_secret() {
+        use std::io::{BufRead, BufReader};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            request.read_line(&mut line).unwrap();
+            assert!(line.starts_with("GET /status.json "));
+            loop {
+                line.clear();
+                request.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                assert!(!line.to_ascii_lowercase().starts_with("authorization:"));
+            }
+            let body = r#"{"pac_loaded":true,"pac_files":["remote PAC file"],"upstream_route":"HTTP proxy","authentication_configured":false,"upstream_state":"ok","authentication_state":"disabled"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let status = read_runtime_status_at(address).expect("sanitized status remains available");
+        server.join().unwrap();
+        assert_eq!(status.pac_loaded, Some(true));
+        assert_eq!(status.upstream_state, "ok");
+    }
+
+    #[test]
     fn icon_key_reflects_proxy_and_runtime_status() {
         let preferences = Preferences::default();
         assert_eq!(

@@ -71,7 +71,11 @@ impl fmt::Display for AccessEntry {
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "-".into()),
             self.method,
-            self.uri,
+            if self.method == Method::CONNECT {
+                "<CONNECT>"
+            } else {
+                "<redacted>"
+            },
             self.version,
             self.elapsed.as_secs_f64()
         )?;
@@ -87,7 +91,9 @@ impl fmt::Display for AccessEntry {
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "-".into())
             )?,
-            AccessOutcome::Error(error) => write!(f, "error: \"{}\"", quoted(error))?,
+            // Connection errors can include a destination authority. Keep the useful outcome
+            // category while ensuring request-controlled URI data never reaches diagnostics.
+            AccessOutcome::Error(_) => write!(f, "error: \"request failed\"")?,
         }
         write!(
             f,
@@ -123,7 +129,7 @@ mod tests {
         );
 
         let formatted = entry.to_string();
-        assert!(formatted.contains("GET http://example.test/resource HTTP/1.1"));
+        assert!(formatted.contains("GET <redacted> HTTP/1.1"));
         assert!(formatted.contains("204 -b"));
     }
 
@@ -145,8 +151,50 @@ mod tests {
 
         let formatted = entry.to_string();
         assert!(formatted.contains("DIRECT"));
-        assert!(formatted.contains("error: \"bad\\\\request\\\"\\nnext\\rline\""));
+        assert!(formatted.contains("error: \"request failed\""));
+        assert!(!formatted.contains("bad\\\\request"));
         assert!(formatted.ends_with("\"agent\\\\name\\\"quoted\""));
         assert!(entry.event().starts_with("data:"));
+    }
+
+    #[test]
+    fn diagnostics_redact_uri_path_query_and_connect_authority() {
+        let peer = "127.0.0.1:1234".parse().unwrap();
+        let ordinary = http::Request::builder()
+            .method(Method::GET)
+            .uri("https://example.test/private/path?token=secret")
+            .body(())
+            .unwrap();
+        let entry = AccessEntry::for_request(
+            peer,
+            None,
+            &ordinary,
+            Duration::ZERO,
+            AccessOutcome::Error("could not connect to secret.example".into()),
+        );
+        let rendered = entry.to_string();
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("private"));
+        assert!(!rendered.contains("token=secret"));
+        assert!(!rendered.contains("secret.example"));
+
+        let connect = http::Request::builder()
+            .method(Method::CONNECT)
+            .uri("secret.example:443")
+            .body(())
+            .unwrap();
+        let entry = AccessEntry::for_request(
+            peer,
+            None,
+            &connect,
+            Duration::ZERO,
+            AccessOutcome::Response {
+                status: StatusCode::OK,
+                content_length: None,
+            },
+        );
+        let rendered = entry.to_string();
+        assert!(rendered.contains("<CONNECT>"));
+        assert!(!rendered.contains("secret.example"));
     }
 }

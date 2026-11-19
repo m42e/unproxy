@@ -142,6 +142,25 @@ prints the available version and URL without opening a browser.
 
 ## Listener access and privacy
 
-Listeners do not require client authentication. Anyone who can reach one can use the proxy and read its status, access log, and diagnostic endpoints. Keep loopback listeners for personal use. For intentional sharing, bind a specific trusted interface and restrict access with a firewall.
+Proxy requests and the sanitized status page do not require client authentication. The public status response reports PAC source type and route protocol without source paths, PAC hosts, or upstream proxy addresses. The access log page and stream, application log page and stream, and PAC route resolver require the owner capability. A missing or incorrect token denies them even for a loopback client with a trusted `Host` header.
+
+For a foreground runtime and its tray app, create a 32-byte random token in the owner’s process environment before starting them. On macOS or Linux:
+
+```sh
+export UNPROXY_MANAGEMENT_TOKEN="$(openssl rand -hex 32)"
+```
+
+In PowerShell:
+
+```powershell
+$bytes = New-Object byte[] 32
+$rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
+try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+$env:UNPROXY_MANAGEMENT_TOKEN = ([BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
+```
+
+The tray’s **Open Status Page** opens the sanitized page. Opening a log viewer prompts the browser for Basic authentication: use username `unproxy` and the token as the password. Programmatic clients can send it as a Bearer token. The browser keeps HTTP Basic credentials in its origin-scoped auth cache; Unproxy never puts the token in a URL, cookie, process argument, or log.
+
+Windows service setup creates a random token file readable only by NetworkService, SYSTEM, Administrators, and the installing user; the service config refers to it with `--management-token-file`. The tray gets an owner-only copy in that user’s support directory. Repair preserves the token only when the installing-user SID matches the recorded owner; changing the owner rotates it. For a manually managed service, provide a protected token file and grant access only to the service account and intended owner. Without a token, the tray continues to show sanitized status while detailed management endpoints remain closed.
 
 Logs can reveal destinations, network details, and errors. Review and redact them before sharing a support report.

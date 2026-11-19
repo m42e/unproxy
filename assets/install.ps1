@@ -156,6 +156,13 @@ function Assert-ServiceFileHasSingleLink([string]$path) {
     }
 }
 
+function New-UnproxyManagementToken {
+    $bytes = New-Object byte[] 32
+    $rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return ([BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
+}
+
 function Protect-ServiceRoot([string]$root) {
     Assert-NoServicePathReparsePoints $root
     $acl = Get-Acl -LiteralPath $root
@@ -359,6 +366,68 @@ if ($AsService) {
     Protect-ServiceRoot $serviceRoot
     New-Item -ItemType Directory -Path $serviceData -Force | Out-Null
     Protect-ServiceData $serviceData
+    $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $administratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+    $networkServiceSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-20')
+    $serviceTokenFile = Join-Path $serviceData 'management.token'
+    $serviceTokenOwnerFile = Join-Path $serviceData 'management.token.owner'
+    $previousTokenOwner = if (Test-Path -LiteralPath $serviceTokenOwnerFile) {
+        ([IO.File]::ReadAllText($serviceTokenOwnerFile)).Trim()
+    } else { '' }
+    $managementToken = if ($previousTokenOwner -eq $ownerSid.Value -and (Test-Path -LiteralPath $serviceTokenFile)) {
+        ([IO.File]::ReadAllText($serviceTokenFile)).TrimEnd("`r", "`n")
+    } else { '' }
+    if ($managementToken -notmatch '^[0-9a-fA-F]{64}$') {
+        $managementToken = New-UnproxyManagementToken
+        [IO.File]::WriteAllText($serviceTokenFile, $managementToken)
+        [IO.File]::WriteAllText($serviceTokenOwnerFile, $ownerSid.Value)
+    }
+    $serviceTokenAcl = Get-Acl -LiteralPath $serviceTokenFile
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+    $none = [System.Security.AccessControl.PropagationFlags]::None
+    $serviceTokenAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+        $ownerSid, 'Read', [System.Security.AccessControl.InheritanceFlags]::None, $none, $allow))
+    Set-Acl -LiteralPath $serviceTokenFile -AclObject $serviceTokenAcl
+    $allowedTokenSids = @($systemSid.Value, $administratorsSid.Value, $networkServiceSid.Value, $ownerSid.Value)
+    foreach ($rule in (Get-Acl -LiteralPath $serviceTokenFile).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        if ($allowedTokenSids -notcontains $rule.IdentityReference.Value) {
+            throw 'The service management token file has an unexpected ACL entry.'
+        }
+    }
+    $serviceTokenSids = @((Get-Acl -LiteralPath $serviceTokenFile).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value })
+    foreach ($sid in @($systemSid.Value, $administratorsSid.Value, $networkServiceSid.Value, $ownerSid.Value)) {
+        if ($serviceTokenSids -notcontains $sid) { throw 'A required service management token ACL entry is missing.' }
+    }
+
+    $traySupport = Join-Path $env:LOCALAPPDATA 'Unproxy'
+    New-Item -ItemType Directory -Path $traySupport -Force | Out-Null
+    Assert-NoServicePathReparsePoints $traySupport
+    $trayTokenFile = Join-Path $traySupport 'management.token'
+    if (-not (Test-Path -LiteralPath $trayTokenFile)) {
+        $emptyTokenFile = [IO.File]::Open($trayTokenFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $emptyTokenFile.Dispose()
+    }
+    $trayTokenItem = Get-Item -LiteralPath $trayTokenFile -Force
+    if (($trayTokenItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'The tray management token file cannot be a reparse point.'
+    }
+    Assert-ServiceFileHasSingleLink $trayTokenFile
+    $trayTokenAcl = [System.Security.AccessControl.FileSecurity]::new()
+    $trayTokenAcl.SetAccessRuleProtection($true, $false)
+    $trayTokenAcl.SetOwner($ownerSid)
+    foreach ($sid in @($systemSid, $administratorsSid, $ownerSid)) {
+        $trayTokenAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $sid, 'FullControl', [System.Security.AccessControl.InheritanceFlags]::None, $none, $allow))
+    }
+    Set-Acl -LiteralPath $trayTokenFile -AclObject $trayTokenAcl
+    [IO.File]::WriteAllText($trayTokenFile, $managementToken)
+    $allowedTrayTokenSids = @($systemSid.Value, $administratorsSid.Value, $ownerSid.Value)
+    foreach ($rule in (Get-Acl -LiteralPath $trayTokenFile).GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier])) {
+        if ($allowedTrayTokenSids -notcontains $rule.IdentityReference.Value) {
+            throw 'The tray management token file has an unexpected ACL entry.'
+        }
+    }
 
     Copy-Item (Join-Path $PSScriptRoot 'unproxy.exe') $serviceExecutable -Force
     Copy-Item (Join-Path $PSScriptRoot 'unproxy-register.exe') $serviceRegister -Force
@@ -389,6 +458,7 @@ if ($AsService) {
     @(
         ('--pac-file "' + $servicePac + '"')
         ('--logfile "' + $serviceLog + '"')
+        ('--management-token-file "' + $serviceTokenFile + '"')
         $authHint
     ) | Set-Content -Encoding UTF8 $serviceConfig
 

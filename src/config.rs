@@ -114,6 +114,9 @@ pub fn netrc_default() -> Option<PathBuf> {
 }
 #[derive(Args, Debug, Clone)]
 pub struct MainArgs {
+    /// Read the management capability from a protected file. Useful for service deployments.
+    #[arg(long)]
+    pub management_token_file: Option<PathBuf>,
     /// Increase log verbosity; repeat to enable DEBUG and TRACE output.
     #[arg(short='v',long="verbose",action=clap::ArgAction::Count)]
     pub verbose: u8,
@@ -456,6 +459,26 @@ mod tests {
                 .listen_addrs()
                 .is_err()
         )
+    }
+
+    #[test]
+    fn management_token_file_is_configurable_for_protected_service_settings() {
+        let args = try_parse_main_from(
+            vec![
+                "unproxy",
+                "--management-token-file",
+                "/secure/management.token",
+            ]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            args.management_token_file.as_deref(),
+            Some(Path::new("/secure/management.token"))
+        );
     }
     #[test]
     fn routing_options_default_off_and_can_be_enabled_together() {

@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
+use base64::Engine as _;
 use bytes::Bytes;
 use futures_util::{
     future::BoxFuture,
@@ -143,6 +144,7 @@ pub struct ContextBuilder {
     inline_scripts: Vec<String>,
     initialize_inline: bool,
     trusted_management_hosts: Vec<String>,
+    management_token: Option<String>,
     session_limit: Arc<tokio::sync::Semaphore>,
     exchange_timeout: Duration,
     relay_handles: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
@@ -174,6 +176,7 @@ impl Clone for ContextBuilder {
             inline_scripts: self.inline_scripts.clone(),
             initialize_inline: self.initialize_inline,
             trusted_management_hosts: self.trusted_management_hosts.clone(),
+            management_token: self.management_token.clone(),
             session_limit: self.session_limit.clone(),
             exchange_timeout: self.exchange_timeout,
             relay_handles: self.relay_handles.clone(),
@@ -208,6 +211,7 @@ impl ContextBuilder {
             inline_scripts: vec![],
             initialize_inline: false,
             trusted_management_hosts: vec![],
+            management_token: None,
             session_limit: Arc::new(tokio::sync::Semaphore::new(256)),
             exchange_timeout: Duration::from_secs(30),
             relay_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -239,6 +243,11 @@ impl ContextBuilder {
     /// This is intended for reverse-proxy and embedded deployments.
     pub fn trusted_management_host(mut self, authority: impl Into<String>) -> Self {
         self.trusted_management_hosts.push(authority.into());
+        self
+    }
+    /// Set the owner capability required for access logs and route diagnostics.
+    pub fn management_token(mut self, token: impl Into<String>) -> Self {
+        self.management_token = Some(token.into());
         self
     }
     pub fn exchange_timeout(mut self, timeout: Duration) -> Self {
@@ -322,18 +331,16 @@ impl ContextBuilder {
             let scripts =
                 match load_pac_sources_cached_inner(&self.pac_sources, &self.pac_cache).await {
                     Ok(scripts) => scripts,
-                    Err((source @ PathOrUri::Uri(_), error)) => {
-                        let error = error.context(format!("loading PAC source {source}"));
+                    Err((PathOrUri::Uri(_), _error)) => {
                         tracing::warn!(
-                            source = %source,
-                            error = %format!("{error:#}"),
+                            pac_source_count = self.pac_sources.len(),
                             "initial remote PAC load failed; keeping the proxy running and retrying"
                         );
                         self.require_loaded_policy.store(true, Ordering::Release);
                         return Ok(true);
                     }
-                    Err((source, error)) => {
-                        return Err(error.context(format!("loading PAC source {source}")));
+                    Err((_source, _error)) => {
+                        return Err(anyhow::anyhow!("could not load PAC source"));
                     }
                 };
             self.policy.set_scripts(scripts).await?;
@@ -535,11 +542,12 @@ async fn load_pac_source(source: &PathOrUri) -> Result<String> {
         PathOrUri::Path(path) => {
             let bytes = tokio::fs::read(path)
                 .await
-                .with_context(|| format!("reading PAC file {}", path.display()))?;
-            String::from_utf8(bytes)
-                .with_context(|| format!("PAC file {} is not UTF-8", path.display()))
+                .context("could not read PAC file")?;
+            String::from_utf8(bytes).context("PAC file is not UTF-8")
         }
-        PathOrUri::Uri(uri) => net::fetch_remote_pac(&uri.to_string()).await,
+        PathOrUri::Uri(uri) => net::fetch_remote_pac(&uri.to_string())
+            .await
+            .map_err(|_| anyhow::anyhow!("could not fetch remote PAC file")),
     }
 }
 
@@ -550,7 +558,7 @@ pub async fn load_pac_sources(sources: &[PathOrUri]) -> Result<Vec<String>> {
         scripts.push(
             load_pac_source(source)
                 .await
-                .with_context(|| format!("loading PAC source {source}"))?,
+                .context("loading PAC source")?,
         );
     }
     Ok(scripts)
@@ -562,7 +570,7 @@ async fn load_pac_sources_cached(
 ) -> Result<Vec<String>> {
     load_pac_sources_cached_inner(sources, cache)
         .await
-        .map_err(|(source, error)| error.context(format!("loading PAC source {source}")))
+        .map_err(|(_, error)| error.context("loading PAC source"))
 }
 
 async fn load_pac_sources_cached_inner(
@@ -680,13 +688,15 @@ impl Context {
                 };
                 match result {
                     Ok(()) => {
-                        tracing::info!(sources = ?sources, "remote PAC sources loaded after retry");
+                        tracing::info!(
+                            pac_source_count = sources.len(),
+                            "remote PAC sources loaded after retry"
+                        );
                         return;
                     }
-                    Err(error) => {
+                    Err(_) => {
                         tracing::warn!(
-                            sources = ?sources,
-                            error = %format!("{error:#}"),
+                            pac_source_count = sources.len(),
                             retry_after = ?delay,
                             "remote PAC retry failed; retaining the current policy"
                         );
@@ -701,7 +711,7 @@ impl Context {
             return;
         };
         tracing::info!(
-            sources = ?sources,
+            source_count = sources.len(),
             %proxy,
             retry_after = ?initial_delay,
             "filter list load incomplete; scheduling PAC-routed retry"
@@ -720,7 +730,7 @@ impl Context {
                     }
                 }
                 tracing::info!(
-                    sources = ?sources,
+                    source_count = sources.len(),
                     %proxy,
                     "retrying filter list download through PAC"
                 );
@@ -743,12 +753,15 @@ impl Context {
                 }
                 drop(current);
                 if complete {
-                    tracing::info!(sources = ?sources, "filter list retry completed successfully");
+                    tracing::info!(
+                        source_count = sources.len(),
+                        "filter list retry completed successfully"
+                    );
                     return;
                 }
                 delay = delay.saturating_mul(2).min(Duration::from_secs(300));
                 tracing::info!(
-                    sources = ?sources,
+                    source_count = sources.len(),
                     retry_after = ?delay,
                     "filter list retry incomplete; scheduling another PAC-routed retry"
                 );
@@ -1019,6 +1032,58 @@ fn percent_decode(value: &str) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
+fn diagnostic_pac_label(source: &str) -> String {
+    let Ok(uri) = source.parse::<Uri>() else {
+        return "local PAC file".into();
+    };
+    let (Some(scheme), Some(host)) = (uri.scheme_str(), uri.host()) else {
+        return "local PAC file".into();
+    };
+    let port = uri
+        .port_u16()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    format!(
+        "{}://{}{}",
+        scheme.to_ascii_lowercase(),
+        host.to_ascii_lowercase(),
+        port
+    )
+}
+
+fn public_pac_label(source: &str) -> &'static str {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        "remote PAC file"
+    } else {
+        "local PAC file"
+    }
+}
+
+fn public_route_label(route: Option<&str>) -> Option<&'static str> {
+    match route?.split_whitespace().next()? {
+        "DIRECT" => Some("DIRECT"),
+        "HTTP" | "HTTPS" => Some("HTTP proxy"),
+        "SOCKS4" | "SOCKS5" => Some("SOCKS proxy"),
+        _ => Some("proxy"),
+    }
+}
+
+fn diagnostic_uri_origin(uri: &Uri) -> String {
+    let (Some(scheme), Some(host)) = (uri.scheme_str(), uri.host()) else {
+        return "(redacted)".into();
+    };
+    let port = uri
+        .port_u16()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    format!(
+        "{}://{}{}",
+        scheme.to_ascii_lowercase(),
+        host.to_ascii_lowercase(),
+        port
+    )
+}
+
 #[cfg(test)]
 mod management_url_tests {
     use super::percent_decode;
@@ -1094,6 +1159,19 @@ async fn handle(
                 "Untrusted management authority",
             ));
         }
+        if matches!(
+            path,
+            "/resolve.json" | "/access.html" | "/access.log" | "/log.html" | "/log"
+        ) && !management_authorized(&req, cfg.management_token.as_deref())
+        {
+            let mut response =
+                error_response(StatusCode::UNAUTHORIZED, "Management capability required");
+            response.headers_mut().insert(
+                http::header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Basic realm=\"Unproxy management\", charset=\"UTF-8\""),
+            );
+            return Ok(response);
+        }
         return Ok(match path {
             "/" if user_agent
                 .as_deref()
@@ -1144,7 +1222,9 @@ async fn handle(
                     "application/json; charset=utf-8",
                     serde_json::json!({
                         "pac_loaded": pac_loaded,
-                        "pac_files": if pac_loaded { status.pac_files } else { Vec::new() },
+                        "pac_files": if pac_loaded {
+                            status.pac_files.iter().map(|source| public_pac_label(source)).collect::<Vec<_>>()
+                        } else { Vec::new() },
                         "pac_evaluation": {
                             "evaluations": pac_evaluation.evaluations,
                             "errors": pac_evaluation.errors,
@@ -1157,7 +1237,7 @@ async fn handle(
                         "upstream_state": status.upstream_state,
                         "authentication_state": status.authentication_state,
                         "upstream_checked_at": status.upstream_checked_at,
-                        "upstream_route": status.upstream_route,
+                        "upstream_route": public_route_label(status.upstream_route.as_deref()),
                         "authentication_sent": status.authentication_sent,
                     })
                     .to_string(),
@@ -1186,11 +1266,8 @@ async fn handle(
                 };
                 let destination = match Destination::from_uri(&uri) {
                     Ok(destination) => destination,
-                    Err(error) => {
-                        return Ok(json_error(
-                            StatusCode::BAD_REQUEST,
-                            &format!("Invalid URL: {error}"),
-                        ));
+                    Err(_) => {
+                        return Ok(json_error(StatusCode::BAD_REQUEST, "Invalid URL"));
                     }
                 };
                 let host = destination.endpoint.host;
@@ -1206,10 +1283,10 @@ async fn handle(
                     .await
                 {
                     Ok(results) => results,
-                    Err(error) => {
+                    Err(_) => {
                         return Ok(json_error(
                             StatusCode::SERVICE_UNAVAILABLE,
-                            &format!("PAC evaluation unavailable: {error}"),
+                            "PAC evaluation unavailable",
                         ));
                     }
                 };
@@ -1223,10 +1300,14 @@ async fn handle(
                             .cloned()
                             .unwrap_or_else(|| format!("PAC {}", index + 1));
                         match result {
-                            Ok(routes) => {
-                                serde_json::json!({"pac": name, "routes": routes.to_string()})
-                            }
-                            Err(error) => serde_json::json!({"pac": name, "error": error}),
+                            Ok(routes) => serde_json::json!({
+                                "pac": diagnostic_pac_label(&name),
+                                "routes": routes.to_string()
+                            }),
+                            Err(_) => serde_json::json!({
+                                "pac": diagnostic_pac_label(&name),
+                                "error": "PAC evaluation failed"
+                            }),
                         }
                     })
                     .collect();
@@ -1234,7 +1315,7 @@ async fn handle(
                     StatusCode::OK,
                     "application/json; charset=utf-8",
                     serde_json::json!({
-                        "url": url,
+                        "url": diagnostic_uri_origin(&uri),
                         "filter_list": {
                             "host": host,
                             "blocked": filter_list_blocked,
@@ -1323,9 +1404,9 @@ async fn handle(
     };
     let mut routes = match evaluation {
         Ok(routes) => routes,
-        Err(e) => {
-            let message = format!("PAC evaluation failed for URL {route_input}: {e:#}");
-            tracing::warn!("{message}");
+        Err(_) => {
+            let message = "PAC evaluation failed".to_owned();
+            tracing::warn!("PAC evaluation failed");
             publish(
                 &events,
                 AccessEntry::for_request(
@@ -1398,15 +1479,15 @@ async fn handle(
                 if let Err(error) = net::relay(&mut client, &mut upstream).await {
                     match error.source.kind() {
                         std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe => {
-                            tracing::debug!(%error,"CONNECT relay ended")
+                            tracing::debug!("CONNECT relay ended")
                         }
                         std::io::ErrorKind::NotConnected
                             if error.a_read == error.b_written
                                 && error.b_read == error.a_written =>
                         {
-                            tracing::debug!(%error,"CONNECT relay ended without lost bytes")
+                            tracing::debug!("CONNECT relay ended without lost bytes")
                         }
-                        _ => tracing::warn!(elapsed=?start.elapsed(),%error,"CONNECT relay failed"),
+                        _ => tracing::warn!(elapsed=?start.elapsed(),"CONNECT relay failed"),
                     }
                 }
             }
@@ -1457,7 +1538,7 @@ async fn handle(
         Err(e) => {
             cfg.runtime_status
                 .observe(&route, false, authentication_sent, Some(&format!("{e:#}")));
-            tracing::debug!("forward failed: {e:#}");
+            tracing::debug!("forward failed");
             publish(
                 &events,
                 AccessEntry {
@@ -1512,6 +1593,53 @@ fn trusted_management_request(
                     && authority.port_u16() == Some(addr.port())
                     && authority.host().eq_ignore_ascii_case("localhost"))
         })
+}
+
+fn management_authorized(req: &Request<Incoming>, expected: Option<&str>) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
+    if !management_token_is_valid(expected) {
+        return false;
+    }
+    let authorization = req
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    if let Some(value) = authorization.and_then(|value| value.strip_prefix("Bearer "))
+        && constant_time_eq(value.as_bytes(), expected.as_bytes())
+    {
+        return true;
+    }
+    let Some(encoded) = authorization.and_then(|value| value.strip_prefix("Basic ")) else {
+        return false;
+    };
+    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+        return false;
+    };
+    let Ok(credentials) = std::str::from_utf8(&decoded) else {
+        return false;
+    };
+    let Some((username, password)) = credentials.split_once(':') else {
+        return false;
+    };
+    username == "unproxy" && constant_time_eq(password.as_bytes(), expected.as_bytes())
+}
+
+pub(crate) fn management_token_is_valid(token: &str) -> bool {
+    token.len() >= 32
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let max_len = left.len().max(right.len());
+    let mut difference = left.len() ^ right.len();
+    for index in 0..max_len {
+        difference |= usize::from(*left.get(index).unwrap_or(&0) ^ *right.get(index).unwrap_or(&0));
+    }
+    difference == 0
 }
 
 // Each argument is an independent input to the request-scoped route selector.
@@ -1578,7 +1706,7 @@ async fn select_route(
             }
             Err(e) => {
                 runtime_status.observe(&route, false, false, Some(&format!("{e:#}")));
-                tracing::debug!("route {route} failed for {destination}: {e:#}");
+                tracing::debug!("route attempt failed");
                 results[idx] = Some(None);
                 true
             }
@@ -1794,21 +1922,38 @@ fn access_html() -> &'static str {
     <script>
         const output = document.querySelector('#log');
         const state = document.querySelector('#state');
-        const source = new EventSource('/access.log');
-        source.onopen = () => { state.textContent = 'Connected'; };
-        source.onmessage = event => {
-            const line = document.createElement('div');
-            line.textContent = event.data;
-            output.append(line);
-            while (output.childElementCount > 500) output.firstElementChild.remove();
-            output.scrollTop = output.scrollHeight;
-        };
-        source.addEventListener('lagged', event => {
-            state.textContent = 'Some access messages were skipped (' + event.data + ').';
-        });
-        source.onerror = () => { state.textContent = 'Connection interrupted; reconnecting…'; };
+        let reader;
+        async function connect() {
+            try {
+                const response = await fetch('/access.log', {cache: 'no-store'});
+                if (!response.ok) { state.textContent = 'Management authentication is required.'; return; }
+                state.textContent = 'Connected';
+                reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let pending = '';
+                while (true) {
+                    const {value, done} = await reader.read();
+                    if (done) break;
+                    pending += decoder.decode(value, {stream: true});
+                    const blocks = pending.split(/\r?\n\r?\n/);
+                    pending = blocks.pop();
+                    for (const block of blocks) {
+                        const event = block.match(/^event:\s*(.+)$/m)?.[1];
+                        const data = [...block.matchAll(/^data:\s?(.*)$/gm)].map(match => match[1]).join('\n');
+                        if (event === 'lagged') state.textContent = 'Some access messages were skipped (' + data + ').';
+                        else if (data) {
+                            const line = document.createElement('div'); line.textContent = data; output.append(line);
+                            while (output.childElementCount > 500) output.firstElementChild.remove();
+                            output.scrollTop = output.scrollHeight;
+                        }
+                    }
+                }
+                state.textContent = 'Connection interrupted.';
+            } catch (_) { state.textContent = 'Connection interrupted.'; }
+        }
+        connect();
         document.querySelector('#stop').onclick = () => {
-            source.close();
+            reader?.cancel();
             state.textContent = 'Stopped';
         };
     </script>
@@ -1925,21 +2070,38 @@ fn log_html() -> &'static str {
             }
             appendAnsiText(element, text.slice(start));
         }
-        const source = new EventSource('/log');
-        source.onopen = () => { state.textContent = 'Connected'; };
-        source.onmessage = event => {
-            const line = document.createElement('div');
-            renderAnsi(line, event.data);
-            output.append(line);
-            while (output.childElementCount > 500) output.firstElementChild.remove();
-            output.scrollTop = output.scrollHeight;
-        };
-        source.addEventListener('lagged', event => {
-            state.textContent = 'Some log messages were skipped (' + event.data + ').';
-        });
-        source.onerror = () => { state.textContent = 'Connection interrupted; reconnecting…'; };
+        let reader;
+        async function connect() {
+            try {
+                const response = await fetch('/log', {cache: 'no-store'});
+                if (!response.ok) { state.textContent = 'Management authentication is required.'; return; }
+                state.textContent = 'Connected';
+                reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let pending = '';
+                while (true) {
+                    const {value, done} = await reader.read();
+                    if (done) break;
+                    pending += decoder.decode(value, {stream: true});
+                    const blocks = pending.split(/\r?\n\r?\n/);
+                    pending = blocks.pop();
+                    for (const block of blocks) {
+                        const event = block.match(/^event:\s*(.+)$/m)?.[1];
+                        const data = [...block.matchAll(/^data:\s?(.*)$/gm)].map(match => match[1]).join('\n');
+                        if (event === 'lagged') state.textContent = 'Some log messages were skipped (' + data + ').';
+                        else if (data) {
+                            const line = document.createElement('div'); renderAnsi(line, data); output.append(line);
+                            while (output.childElementCount > 500) output.firstElementChild.remove();
+                            output.scrollTop = output.scrollHeight;
+                        }
+                    }
+                }
+                state.textContent = 'Connection interrupted.';
+            } catch (_) { state.textContent = 'Connection interrupted.'; }
+        }
+        connect();
         document.querySelector('#stop').onclick = () => {
-            source.close();
+            reader?.cancel();
             state.textContent = 'Stopped';
         };
     </script>
@@ -1984,6 +2146,7 @@ fn status_html() -> String {
   </section>
   <section aria-labelledby="resolve-heading">
     <h2 id="resolve-heading">Check URL against every loaded PAC</h2>
+    <p>Open a log viewer first to authenticate this browser session.</p>
     <form id="resolve-form"><label for="resolve-url">HTTP or HTTPS URL</label> <input id="resolve-url" type="url" required placeholder="https://example.com/path" style="width:min(32rem,70vw)"> <button>Check</button></form>
     <ul id="resolve-results" aria-live="polite"></ul>
   </section>
@@ -2098,7 +2261,12 @@ fn status_text(cfg: &ContextBuilder) -> String {
     let status = cfg.runtime_status.snapshot();
     let pac_loaded = cfg.policy.is_loaded();
     let pac_files = if pac_loaded && !status.pac_files.is_empty() {
-        status.pac_files.join(", ")
+        status
+            .pac_files
+            .iter()
+            .map(|source| public_pac_label(source))
+            .collect::<Vec<_>>()
+            .join(", ")
     } else if pac_loaded {
         "(inline policy)".to_owned()
     } else {
@@ -2151,7 +2319,7 @@ mod management_coverage_tests {
     fn status_text_reports_policy_and_upstream_authentication_states() {
         let cfg = builder(true);
         cfg.runtime_status.set_pac_files(vec!["local.pac".into()]);
-        assert!(status_text(&cfg).contains("PAC files: local.pac"));
+        assert!(status_text(&cfg).contains("PAC files: local PAC file"));
         assert!(status_text(&cfg).contains("No upstream result yet"));
         assert!(status_text(&cfg).contains("Configured, not verified"));
 
@@ -2174,6 +2342,41 @@ mod management_coverage_tests {
         inline.runtime_status.set_pac_files(Vec::new());
         assert!(status_text(&inline).contains("PAC files: (inline policy)"));
         assert!(status_text(&inline).contains("Not configured"));
+    }
+
+    #[test]
+    fn diagnostic_pac_labels_and_resolve_origins_hide_source_secrets() {
+        let secret_pac = "https://user:pass@pac.example.test:8443/private.pac?token=hidden";
+        assert_eq!(
+            diagnostic_pac_label(secret_pac),
+            "https://pac.example.test:8443"
+        );
+        assert_eq!(
+            diagnostic_pac_label("/users/alice/private.pac"),
+            "local PAC file"
+        );
+        assert_eq!(public_pac_label(secret_pac), "remote PAC file");
+        assert_eq!(
+            public_pac_label("/users/alice/private.pac"),
+            "local PAC file"
+        );
+        assert_eq!(
+            public_route_label(Some("HTTP proxy.internal:8080")),
+            Some("HTTP proxy")
+        );
+        let uri: Uri = "https://user:pass@origin.example/private/path?token=hidden"
+            .parse()
+            .unwrap();
+        assert_eq!(diagnostic_uri_origin(&uri), "https://origin.example");
+
+        let cfg = builder(false);
+        cfg.runtime_status.set_pac_files(vec![secret_pac.into()]);
+        let status = status_text(&cfg);
+        assert!(status.contains("remote PAC file"));
+        assert!(!status.contains("pac.example.test"));
+        assert!(!status.contains("user:pass"));
+        assert!(!status.contains("private.pac"));
+        assert!(!status.contains("token=hidden"));
     }
 
     #[tokio::test]

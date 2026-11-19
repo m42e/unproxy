@@ -162,6 +162,40 @@ fn windows_service_installer_protects_policy_files_and_limits_service_write_acce
         log_access_function.contains("[System.IO.Directory]::EnumerateFileSystemEntries($path)")
     );
     assert!(installer.contains("Grant-ServiceLogAccess $logs $networkServiceSid"));
+    assert!(installer.contains("function New-UnproxyManagementToken"));
+    assert!(installer.contains("RNGCryptoServiceProvider"));
+    assert!(installer.contains("BitConverter]::ToString($bytes)"));
+    assert!(service_setup.contains("--management-token-file \"' + $serviceTokenFile"));
+    assert!(service_setup.contains("$ownerSid, 'Read'"));
+    assert!(service_setup.contains("$trayTokenFile = Join-Path $traySupport 'management.token'"));
+    assert!(service_setup.contains("$allowedTokenSids -notcontains $rule.IdentityReference.Value"));
+    assert!(
+        service_setup.contains("$allowedTrayTokenSids -notcontains $rule.IdentityReference.Value")
+    );
+    assert!(service_setup.contains("$previousTokenOwner -eq $ownerSid.Value"));
+    assert!(service_setup.contains("management.token.owner"));
+    let token_provisioning = service_setup
+        .split("$ownerSid = [Security.Principal.WindowsIdentity]")
+        .nth(1)
+        .unwrap()
+        .split("Copy-Item (Join-Path $PSScriptRoot 'unproxy.exe')")
+        .next()
+        .unwrap();
+    assert!(!token_provisioning.contains("S-1-5-32-545"));
+    assert!(!token_provisioning.contains("Everyone"));
+    assert!(token_provisioning.contains("Test-Path -LiteralPath $serviceTokenFile"));
+    assert!(token_provisioning.contains("$ownerSid, 'Read'"));
+    assert!(token_provisioning.contains(
+        "$systemSid.Value, $administratorsSid.Value, $networkServiceSid.Value, $ownerSid.Value"
+    ));
+    assert!(
+        token_provisioning
+            .find("Set-Acl -LiteralPath $trayTokenFile")
+            .unwrap()
+            < token_provisioning
+                .find("[IO.File]::WriteAllText($trayTokenFile, $managementToken)")
+                .unwrap()
+    );
     assert!(service_setup.contains("Join-Path (Join-Path $serviceData 'logs') 'unproxy.log'"));
     assert!(service_setup.contains("$serviceData = Join-Path $serviceRoot 'data'"));
     assert!(!service_setup.contains("$env:ProgramData"));

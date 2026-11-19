@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use std::{net::SocketAddr, sync::Arc};
 
 #[cfg(target_os = "linux")]
@@ -13,6 +14,8 @@ use unproxy::{
     pac::Policy,
     proxy::ContextBuilder,
 };
+
+const OWNER_TOKEN: &str = "owner-capability-012345678901234567890123456789";
 
 async fn start(policy: Policy) -> unproxy::proxy::Context {
     ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
@@ -84,12 +87,20 @@ async fn generated_pac_uses_local_host_header() {
 
 #[tokio::test]
 async fn access_page_renders_untrusted_event_text_as_text() {
-    let proxy = start(Policy::new(None).unwrap()).await;
+    let proxy = ContextBuilder::new(
+        Arc::new(Policy::new(None).unwrap()),
+        ConnectionOptions::default(),
+    )
+    .management_token(OWNER_TOKEN)
+    .listen("127.0.0.1:0".parse().unwrap())
+    .bind()
+    .await
+    .unwrap();
     let addr = proxy.local_addrs()[0];
     let mut client = TcpStream::connect(addr).await.unwrap();
     client
         .write_all(
-            format!("GET /access.html HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+            format!("GET /access.html HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {OWNER_TOKEN}\r\nConnection: close\r\n\r\n")
                 .as_bytes(),
         )
         .await
@@ -99,18 +110,9 @@ async fn access_page_renders_untrusted_event_text_as_text() {
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     assert!(response.contains("Live access log"), "{response}");
     assert!(response.contains("role=\"log\""), "{response}");
-    assert!(
-        response.contains("new EventSource('/access.log')"),
-        "{response}"
-    );
-    assert!(
-        response.contains("line.textContent = event.data"),
-        "{response}"
-    );
-    assert!(
-        response.contains("Connection interrupted; reconnecting"),
-        "{response}"
-    );
+    assert!(response.contains("fetch('/access.log'"), "{response}");
+    assert!(response.contains("line.textContent = data"), "{response}");
+    assert!(response.contains("Connection interrupted."), "{response}");
     assert!(!response.contains("innerHTML"), "{response}");
     proxy.shutdown();
     proxy.wait().await;
@@ -118,12 +120,20 @@ async fn access_page_renders_untrusted_event_text_as_text() {
 
 #[tokio::test]
 async fn application_log_page_renders_log_stream_as_text() {
-    let proxy = start(Policy::new(None).unwrap()).await;
+    let proxy = ContextBuilder::new(
+        Arc::new(Policy::new(None).unwrap()),
+        ConnectionOptions::default(),
+    )
+    .management_token(OWNER_TOKEN)
+    .listen("127.0.0.1:0".parse().unwrap())
+    .bind()
+    .await
+    .unwrap();
     let addr = proxy.local_addrs()[0];
     let mut client = TcpStream::connect(addr).await.unwrap();
     client
         .write_all(
-            format!("GET /log.html HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+            format!("GET /log.html HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {OWNER_TOKEN}\r\nConnection: close\r\n\r\n")
                 .as_bytes(),
         )
         .await
@@ -131,11 +141,8 @@ async fn application_log_page_renders_log_stream_as_text() {
     let mut response = String::new();
     client.read_to_string(&mut response).await.unwrap();
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-    assert!(response.contains("new EventSource('/log')"), "{response}");
-    assert!(
-        response.contains("renderAnsi(line, event.data)"),
-        "{response}"
-    );
+    assert!(response.contains("fetch('/log'"), "{response}");
+    assert!(response.contains("renderAnsi(line, data)"), "{response}");
     assert!(
         response.contains("code === 38 || code === 48"),
         "{response}"
@@ -201,6 +208,7 @@ async fn resolve_endpoint_validates_urls_and_returns_policy_results() {
     ))
     .unwrap();
     let proxy = ContextBuilder::new(Arc::new(policy), ConnectionOptions::default())
+        .management_token("owner-capability-012345678901234567890123456789")
         .listen("127.0.0.1:0".parse::<SocketAddr>().unwrap())
         .filter_list(FilterList::parse(
             "0.0.0.0 ads.example.test\n||tracker.example.test^\nads.example.test\n",
@@ -214,7 +222,7 @@ async fn resolve_endpoint_validates_urls_and_returns_policy_results() {
         let mut client = TcpStream::connect(addr).await.unwrap();
         client
             .write_all(
-                format!("GET {target} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                format!("GET {target} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer owner-capability-012345678901234567890123456789\r\nConnection: close\r\n\r\n")
                     .as_bytes(),
             )
             .await
@@ -257,13 +265,16 @@ async fn resolve_endpoint_validates_urls_and_returns_policy_results() {
 
     let result = get(
         addr,
-        "/resolve.json?url=http%3A%2F%2Fsub.ads.example.test%2Fpath",
+        "/resolve.json?url=http%3A%2F%2Fsub.ads.example.test%2Fprivate%3Ftoken%3Dhidden",
     )
     .await;
     assert!(result.starts_with("HTTP/1.1 200"), "{result}");
     assert!(result.contains("proxy.example:8080"), "{result}");
     let result_body = result.split_once("\r\n\r\n").unwrap().1;
     let result: serde_json::Value = serde_json::from_str(result_body).unwrap();
+    assert_eq!(result["url"], "http://sub.ads.example.test");
+    assert!(!result_body.contains("private"));
+    assert!(!result_body.contains("token=hidden"));
     assert_eq!(result["filter_list"]["host"], "sub.ads.example.test");
     assert_eq!(result["filter_list"]["blocked"], true);
     assert_eq!(result["results"][0]["routes"], "HTTP proxy.example:8080");
@@ -279,7 +290,7 @@ async fn resolve_endpoint_validates_urls_and_returns_policy_results() {
     )
     .await;
     assert!(failure.starts_with("HTTP/1.1 200"), "{failure}");
-    assert!(failure.contains("FindProxyForURL returned a non-string value"));
+    assert!(failure.contains("PAC evaluation failed"));
     let status_response = get(addr, "/status.json").await;
     let status_body = status_response.split_once("\r\n\r\n").unwrap().1;
     let status: serde_json::Value = serde_json::from_str(status_body).unwrap();
@@ -292,6 +303,7 @@ async fn resolve_endpoint_validates_urls_and_returns_policy_results() {
         Arc::new(Policy::new(None).unwrap()),
         ConnectionOptions::default(),
     )
+    .management_token("owner-capability-012345678901234567890123456789")
     .strict_policy(true)
     .listen("127.0.0.1:0".parse().unwrap())
     .bind()
@@ -303,7 +315,7 @@ async fn resolve_endpoint_validates_urls_and_returns_policy_results() {
     )
     .await;
     assert!(strict_result.starts_with("HTTP/1.1 503"), "{strict_result}");
-    assert!(strict_result.contains("routing policy is unavailable"));
+    assert!(strict_result.contains("PAC evaluation unavailable"));
     strict.shutdown();
     strict.wait().await;
 }
@@ -407,6 +419,165 @@ async fn management_requires_a_trusted_authority_even_for_loopback_peers() {
     assert!(response.starts_with("HTTP/1.1 403"));
     proxy.shutdown();
     proxy.wait().await;
+}
+
+#[tokio::test]
+async fn management_logs_require_owner_capability_even_with_trusted_loopback_host() {
+    let proxy = ContextBuilder::new(
+        Arc::new(Policy::new(Some("function FindProxyForURL(){return 'DIRECT';}".into())).unwrap()),
+        ConnectionOptions::default(),
+    )
+    .management_token("owner-capability-012345678901234567890123456789")
+    .listen("127.0.0.1:0".parse().unwrap())
+    .bind()
+    .await
+    .unwrap();
+    let addr = proxy.local_addrs()[0];
+
+    let unauthenticated = get_management(addr, "/access.html", false).await;
+    assert!(
+        unauthenticated.starts_with("HTTP/1.1 401"),
+        "{unauthenticated}"
+    );
+    assert!(
+        unauthenticated.contains("www-authenticate: Basic"),
+        "{unauthenticated}"
+    );
+
+    let basic = base64::engine::general_purpose::STANDARD.encode(format!("unproxy:{OWNER_TOKEN}"));
+    let mut authenticated_page = TcpStream::connect(addr).await.unwrap();
+    authenticated_page
+        .write_all(
+            format!("GET /access.html HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Basic {basic}\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut page = String::new();
+    authenticated_page.read_to_string(&mut page).await.unwrap();
+    assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+    assert!(page.contains("Live access log"), "{page}");
+
+    let mut unauthenticated = TcpStream::connect(addr).await.unwrap();
+    unauthenticated
+        .write_all(
+            format!("GET /access.log HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut denied = String::new();
+    unauthenticated.read_to_string(&mut denied).await.unwrap();
+    assert!(denied.starts_with("HTTP/1.1 401"), "{denied}");
+
+    let mut owner = TcpStream::connect(addr).await.unwrap();
+    let basic = base64::engine::general_purpose::STANDARD.encode(format!("unproxy:{OWNER_TOKEN}"));
+    owner
+        .write_all(
+            format!(
+                "GET /access.log HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Basic {basic}\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut headers = Vec::new();
+    loop {
+        let mut byte = [0];
+        owner.read_exact(&mut byte).await.unwrap();
+        headers.push(byte[0]);
+        if headers.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let headers = String::from_utf8_lossy(&headers);
+    assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+    assert!(headers.contains("text/event-stream"), "{headers}");
+    drop(owner);
+
+    let mut unauthenticated = TcpStream::connect(addr).await.unwrap();
+    unauthenticated
+        .write_all(
+            format!("GET /resolve.json?url=http%3A%2F%2Fexample.test%2Fprivate%3Ftoken%3Dhidden HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut denied = String::new();
+    unauthenticated.read_to_string(&mut denied).await.unwrap();
+    assert!(denied.starts_with("HTTP/1.1 401"), "{denied}");
+
+    let owner_resolve = get_management(
+        addr,
+        "/resolve.json?url=http%3A%2F%2Fexample.test%2Fprivate%3Ftoken%3Dhidden",
+        true,
+    )
+    .await;
+    assert!(owner_resolve.starts_with("HTTP/1.1 200"), "{owner_resolve}");
+    assert!(!owner_resolve.contains("private"), "{owner_resolve}");
+    assert!(!owner_resolve.contains("token=hidden"), "{owner_resolve}");
+
+    let mut status = TcpStream::connect(addr).await.unwrap();
+    status
+        .write_all(
+            format!("GET /status.json HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    status.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+#[tokio::test]
+async fn public_status_hides_pac_source_names_and_upstream_addresses() {
+    let directory = tempfile::tempdir().unwrap();
+    let pac_path = directory.path().join("private-token-secret.pac");
+    tokio::fs::write(&pac_path, "function FindProxyForURL(){return 'DIRECT';}")
+        .await
+        .unwrap();
+    let proxy = ContextBuilder::new(
+        Arc::new(Policy::new(None).unwrap()),
+        ConnectionOptions::default(),
+    )
+    .pac_source(unproxy::route::PathOrUri::Path(pac_path.clone()))
+    .listen("127.0.0.1:0".parse().unwrap())
+    .bind()
+    .await
+    .unwrap();
+    let addr = proxy.local_addrs()[0];
+    let response = get_management(addr, "/status.json", false).await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(!response.contains("private-token-secret"), "{response}");
+    assert!(response.contains("local PAC file"), "{response}");
+    let body: serde_json::Value =
+        serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["pac_files"], serde_json::json!(["local PAC file"]));
+    assert_eq!(body["upstream_route"], serde_json::Value::Null);
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
+async fn get_management(addr: SocketAddr, target: &str, owner: bool) -> String {
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let authorization = if owner {
+        "Authorization: Bearer owner-capability-012345678901234567890123456789\r\n"
+    } else {
+        ""
+    };
+    client
+        .write_all(
+            format!(
+                "GET {target} HTTP/1.1\r\nHost: {addr}\r\n{authorization}Connection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    response
 }
 
 #[tokio::test]
@@ -897,10 +1068,18 @@ async fn direct_fallback_runs_after_proxy_connection_failure() {
 
 #[tokio::test]
 async fn access_sse_emits_records_and_reports_lag() {
-    let proxy = start(Policy::new(None).unwrap()).await;
+    let proxy = ContextBuilder::new(
+        Arc::new(Policy::new(None).unwrap()),
+        ConnectionOptions::default(),
+    )
+    .management_token("owner-capability-012345678901234567890123456789")
+    .listen("127.0.0.1:0".parse().unwrap())
+    .bind()
+    .await
+    .unwrap();
     let addr = proxy.local_addrs()[0];
     let mut sse = TcpStream::connect(addr).await.unwrap();
-    sse.write_all(format!("GET /access.log HTTP/1.1\r\nHost: {addr}\r\n\r\n").as_bytes())
+    sse.write_all(format!("GET /access.log HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer owner-capability-012345678901234567890123456789\r\n\r\n").as_bytes())
         .await
         .unwrap();
     let mut header = Vec::new();
@@ -971,8 +1150,9 @@ async fn failed_proxy_route_is_not_logged_as_direct() {
     client.read_to_string(&mut response).await.unwrap();
     assert!(response.starts_with("HTTP/1.1 502"));
     let entry = events.recv().await.unwrap();
-    assert!(entry.contains(" - \"GET http://example.test/resource HTTP/1.1\""));
-    assert!(entry.contains("error: \"could not connect to example.test:80\""));
+    assert!(entry.contains(" - \"GET <redacted> HTTP/1.1\""));
+    assert!(entry.contains("error: \"request failed\""));
+    assert!(!entry.contains("example.test"));
     assert!(!entry.contains(" DIRECT "));
     proxy.shutdown();
     proxy.wait().await;
@@ -1017,7 +1197,7 @@ async fn forwards_stream_and_removes_hop_headers() {
     assert!(response.ends_with("OK"));
     let entry = events.recv().await.unwrap();
     assert!(entry.contains(" 200 2b \"test-agent\""));
-    assert!(entry.contains("POST http://"));
+    assert!(entry.contains("POST <redacted> HTTP/1.1"));
     let sent = upstream.await.unwrap();
     let sent = String::from_utf8_lossy(&sent);
     assert!(sent.starts_with("POST /upload?q=1 HTTP/1.1"));
@@ -1765,16 +1945,13 @@ async fn policy_errors_return_502_without_origin_connections_and_publish_access(
                 .unwrap();
             assert!(response.starts_with("HTTP/1.1 502"), "{response}");
             assert!(response.contains("PAC evaluation failed"), "{response}");
-            assert!(response.contains(&pac_url), "{response}");
+            assert!(!response.contains(&pac_url), "{response}");
             let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(
-                event.contains("error:") && event.contains("PAC evaluation failed"),
-                "{event}"
-            );
-            assert!(event.contains(&pac_url), "{event}");
+            assert!(event.contains("error: \"request failed\""), "{event}");
+            assert!(!event.contains(&pac_url), "{event}");
             assert!(
                 tokio::time::timeout(Duration::from_millis(50), origin.accept())
                     .await

@@ -647,10 +647,12 @@ fn check_live_state(
     sources: &[PathOrUri],
     report: &mut DoctorReport,
 ) {
-    let expected_sources = sources.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let expected_source_count = sources.len();
     let live_loaded = status.pac_loaded.unwrap_or(false);
-    let expected_loaded = !expected_sources.is_empty();
-    if live_loaded == expected_loaded && (!live_loaded || status.pac_files == expected_sources) {
+    let expected_loaded = expected_source_count != 0;
+    if live_loaded == expected_loaded
+        && (!live_loaded || status.pac_files.len() == expected_source_count)
+    {
         report.add(
             "Running PAC state",
             CheckStatus::Pass,
@@ -670,8 +672,8 @@ fn check_live_state(
             format!(
                 "running instance reports loaded={} with sources [{}], while current settings select [{}]; restart the service to apply changed settings",
                 live_loaded,
-                status.pac_files.join(", "),
-                expected_sources.join(", ")
+                status.pac_files.len(),
+                expected_source_count
             ),
         );
     }

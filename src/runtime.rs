@@ -17,6 +17,45 @@ use std::{
     time::Duration,
 };
 
+fn validate_management_token(token: &str) -> Result<()> {
+    anyhow::ensure!(
+        token.len() >= 32
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
+        "management capability must be at least 32 URL-safe ASCII characters"
+    );
+    Ok(())
+}
+
+fn management_token(args: &config::MainArgs) -> Result<Option<String>> {
+    let environment = match std::env::var("UNPROXY_MANAGEMENT_TOKEN") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => anyhow::bail!("management capability environment value is not valid Unicode"),
+    };
+    let file = args
+        .management_token_file
+        .as_ref()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .map(|value| value.trim_end_matches(['\r', '\n']).to_owned())
+                .map_err(|_| anyhow::anyhow!("could not read management capability file"))
+        })
+        .transpose()?;
+    if let (Some(environment), Some(file)) = (&environment, &file) {
+        anyhow::ensure!(
+            environment == file,
+            "environment and file management capabilities do not match"
+        );
+    }
+    let token = environment.or(file);
+    if let Some(token) = token.as_deref() {
+        validate_management_token(token)?;
+    }
+    Ok(token)
+}
+
 const LOG_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 const LOG_FILE_BACKUPS: usize = 3;
 
@@ -242,6 +281,7 @@ async fn run_until(
     shutdown: impl std::future::Future<Output = ()>,
     on_ready: impl FnOnce(),
 ) -> Result<()> {
+    let management_token = management_token(&a)?;
     let log_stream = LogStream::new();
     let filter = std::env::var("UNPROXY_LOG")
         .ok()
@@ -316,6 +356,9 @@ async fn run_until(
         .server_keepalive(server_keepalive)
         .shutdown_timeout(Duration::from_secs(a.graceful_shutdown_timeout))
         .pac_sources(sources.clone());
+    if let Some(token) = management_token.as_deref() {
+        builder = builder.management_token(token);
+    }
     builder = builder.filter_list(filter_list);
     if let Some(name) = a.activate_socket.as_deref() {
         builder = builder.listeners(crate::platform::activated_listeners(name)?)
@@ -346,7 +389,7 @@ async fn run_until(
     for addr in context.local_addrs() {
         tracing::info!(%addr,"proxy listening")
     }
-    tracing::info!(pac_sources=?sources,"proxy started");
+    tracing::info!(pac_source_count = sources.len(), "proxy started");
 
     #[cfg(target_os = "macos")]
     let mut notifications = crate::network_notifications::NotificationAdapter::start()
@@ -387,14 +430,13 @@ async fn run_until(
                     ).await;
                 },
                 Some(event)=next_network_event(&mut notifications)=>{
-                    if let Err(error) = handle_network_event(&context, &mut native_state, event).await {
-                        tracing::error!(sources=?sources, error=%format!("{error:#}"), "native policy update failed; retaining previous policy");
+                    if handle_network_event(&context, &mut native_state, event).await.is_err() {
+                        tracing::error!(pac_source_count=sources.len(), "native policy update failed; retaining previous policy");
                     }
                 },
                 _=hup.recv()=>{
-                    let result = context.reload_pac().await;
-                    if let Err(error) = result {
-                        tracing::error!(sources=?sources, %error, "PAC reload failed; retaining previous policy");
+                    if context.reload_pac().await.is_err() {
+                        tracing::error!(pac_source_count=sources.len(), "PAC reload failed; retaining previous policy");
                     }
                 },
                 _=direct.recv()=>{
@@ -585,6 +627,14 @@ fn select_pac_ip(
 mod tests {
     use super::*;
     use tracing_subscriber::fmt::writer::MakeWriter;
+
+    #[test]
+    fn management_capabilities_reject_empty_short_and_non_url_safe_values() {
+        assert!(validate_management_token("").is_err());
+        assert!(validate_management_token("short").is_err());
+        assert!(validate_management_token(&"a".repeat(32)).is_ok());
+        assert!(validate_management_token(&format!("{}+", "a".repeat(32))).is_err());
+    }
 
     #[test]
     fn captured_log_lines_are_written_to_file_and_stream() {
