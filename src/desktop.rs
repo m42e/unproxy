@@ -309,6 +309,7 @@ fn parse_remote_filter_uri(source: &str) -> Result<Option<http::Uri>> {
     Ok(uri)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn validate_remote_pac_viewer_content(content: String) -> Result<String> {
     anyhow::ensure!(
         !content.contains('\0'),
