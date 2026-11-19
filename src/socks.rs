@@ -16,12 +16,12 @@ use crate::{
 pub(crate) async fn handshake(
     stream: BoxedIo,
     destination: &Endpoint,
-    proxy_host: &str,
+    proxy: &Endpoint,
     version5: bool,
     auth: &AuthFactory,
 ) -> Result<(BoxedIo, bool)> {
     if version5 {
-        socks5(stream, destination, proxy_host, auth).await
+        socks5(stream, destination, proxy, auth).await
     } else {
         let mut stream = stream;
         socks4(&mut stream, destination).await?;
@@ -72,11 +72,11 @@ async fn socks4(stream: &mut impl AsyncIo, destination: &Endpoint) -> Result<()>
 async fn socks5(
     mut stream: BoxedIo,
     destination: &Endpoint,
-    proxy_host: &str,
+    proxy: &Endpoint,
     auth: &AuthFactory,
 ) -> Result<(BoxedIo, bool)> {
-    let credentials = auth.socks_credentials(proxy_host);
-    let gss_enabled = auth.socks_gss_enabled(proxy_host);
+    let gss_enabled = auth.socks_gss_enabled(&proxy.host);
+    let credentials = auth.socks_credentials(&proxy.host, proxy.port);
     // A matching Negotiate policy requires the GSS protected stream. Do not
     // let the upstream select anonymous or username/password authentication.
     let mut methods = if gss_enabled { vec![1] } else { vec![0] };
@@ -106,7 +106,7 @@ async fn socks5(
             #[cfg(feature = "negotiate")]
             {
                 let auth = auth.clone();
-                let host = proxy_host.to_owned();
+                let host = proxy.host.clone();
                 let context = tokio::task::spawn_blocking(move || auth.socks_gss_context(&host))
                     .await
                     .context("starting SOCKS5 GSSAPI worker")??
@@ -128,12 +128,12 @@ async fn socks5(
                 (1..=255).contains(&username.len()) && (1..=255).contains(&password.len()),
                 "SOCKS5 username and password must each contain 1–255 bytes"
             );
-            let mut auth = vec![1, username.len() as u8];
-            auth.extend_from_slice(username.as_bytes());
-            auth.push(password.len() as u8);
-            auth.extend_from_slice(password.as_bytes());
+            let mut auth_request = vec![1, username.len() as u8];
+            auth_request.extend_from_slice(username.as_bytes());
+            auth_request.push(password.len() as u8);
+            auth_request.extend_from_slice(password.as_bytes());
             stream
-                .write_all(&auth)
+                .write_all(&auth_request)
                 .await
                 .context("SOCKS5 authentication")?;
             let mut reply = [0; 2];
@@ -442,7 +442,7 @@ mod tests {
             let result = socks5(
                 Box::new(client),
                 &"target.test:443".parse().unwrap(),
-                "proxy.corp.test",
+                &"proxy.corp.test:1080".parse().unwrap(),
                 &AuthFactory::negotiate(vec!["proxy.corp.test".into()]),
             )
             .await;

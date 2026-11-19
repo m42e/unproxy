@@ -1078,7 +1078,11 @@ async fn direct_get_forwards_origin_form_and_returns_body() {
     proxy.wait().await;
 }
 
-async fn http_proxy_get(netrc: Option<&'static str>, expected_auth: Option<&'static str>) {
+async fn http_proxy_get(
+    netrc: Option<&'static str>,
+    expected_auth: Option<&'static str>,
+    approval: Option<(&'static str, bool)>,
+) {
     let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = upstream.local_addr().unwrap();
     let upstream_task = tokio::spawn(async move {
@@ -1105,7 +1109,20 @@ async fn http_proxy_get(netrc: Option<&'static str>, expected_auth: Option<&'sta
     .unwrap();
     let mut options = ConnectionOptions::default();
     if let Some(netrc) = netrc {
-        options.auth = AuthFactory::basic(CredentialStore::parse(netrc).unwrap());
+        let approvals = approval
+            .map(|(scheme, mismatch_port)| {
+                let port = if mismatch_port {
+                    upstream_addr.port().checked_add(1).unwrap_or(1)
+                } else {
+                    upstream_addr.port()
+                };
+                format!("{scheme}://{}:{}", upstream_addr.ip(), port)
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        options.auth = AuthFactory::basic(CredentialStore::parse(netrc).unwrap())
+            .allow_insecure_proxy_auth(&approvals)
+            .unwrap();
     }
     let proxy = ContextBuilder::new(Arc::new(policy), options)
         .listen("127.0.0.1:0".parse().unwrap())
@@ -1140,26 +1157,50 @@ async fn http_proxy_get(netrc: Option<&'static str>, expected_auth: Option<&'sta
 }
 
 #[tokio::test]
-async fn http_proxy_get_uses_host_credentials() {
+async fn plaintext_http_proxy_does_not_receive_netrc_credentials() {
     http_proxy_get(
         Some("machine 127.0.0.1 login alice password secret"),
-        Some("Basic YWxpY2U6c2VjcmV0"),
+        None,
+        None,
     )
     .await;
 }
 
 #[tokio::test]
-async fn http_proxy_get_falls_back_to_default_credentials() {
+async fn plaintext_http_proxy_does_not_receive_default_netrc_credentials() {
     http_proxy_get(
         Some("machine proxy.invalid login wrong password wrong\ndefault login guest password fallback"),
-        Some("Basic Z3Vlc3Q6ZmFsbGJhY2s="),
+        None,
+        None,
     )
     .await;
 }
 
 #[tokio::test]
 async fn http_proxy_get_without_auth_sends_absolute_form() {
-    http_proxy_get(None, None).await;
+    http_proxy_get(None, None, None).await;
+}
+
+#[tokio::test]
+async fn plaintext_http_proxy_credentials_require_exact_endpoint_approval() {
+    http_proxy_get(
+        Some("machine 127.0.0.1 login alice password secret"),
+        Some("Basic YWxpY2U6c2VjcmV0"),
+        Some(("http", false)),
+    )
+    .await;
+    http_proxy_get(
+        Some("machine 127.0.0.1 login alice password secret"),
+        None,
+        Some(("socks5", false)),
+    )
+    .await;
+    http_proxy_get(
+        Some("machine 127.0.0.1 login alice password secret"),
+        None,
+        Some(("http", true)),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1333,7 +1374,10 @@ async fn upstream_connect_performs_proxy_handshake_before_replying() {
         }
         let head = String::from_utf8_lossy(&head);
         assert!(head.starts_with(&format!("CONNECT {target} HTTP/1.1")));
-        assert!(!head.to_ascii_lowercase().contains("proxy-authorization"));
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("proxy-authorization: basic ywxpy2u6c2vjcmv0")
+        );
         io.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await
             .unwrap();
@@ -1342,7 +1386,25 @@ async fn upstream_connect_performs_proxy_handshake_before_replying() {
         assert_eq!(&data, b"ping");
         io.write_all(b"pong").await.unwrap();
     });
-    let proxy = start(policy).await;
+    let options = ConnectionOptions {
+        auth: AuthFactory::basic(
+            CredentialStore::parse("machine 127.0.0.1 login alice password secret").unwrap(),
+        ),
+        // This must match the exact plaintext CONNECT endpoint.
+        ..ConnectionOptions::default()
+    };
+    let options = ConnectionOptions {
+        auth: options
+            .auth
+            .allow_insecure_proxy_auth(&[format!("http://{proxy_addr}")])
+            .unwrap(),
+        ..ConnectionOptions::default()
+    };
+    let proxy = ContextBuilder::new(Arc::new(policy), options)
+        .listen("127.0.0.1:0".parse().unwrap())
+        .bind()
+        .await
+        .unwrap();
     let mut client = TcpStream::connect(proxy.local_addrs()[0]).await.unwrap();
     client
         .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
@@ -1485,7 +1547,9 @@ async fn ordinary_407_is_a_local_bad_gateway() {
     let options = ConnectionOptions {
         auth: AuthFactory::basic(
             CredentialStore::parse("machine 127.0.0.1 login alice password secret").unwrap(),
-        ),
+        )
+        .allow_insecure_proxy_auth(&[format!("http://{addr}")])
+        .unwrap(),
         ..ConnectionOptions::default()
     };
     let proxy = ContextBuilder::new(Arc::new(policy), options)

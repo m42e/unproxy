@@ -136,6 +136,42 @@ async fn https_proxy_connect_auth_is_only_in_handshake_and_relays_binary_bytes()
 }
 
 #[tokio::test]
+async fn plaintext_http_proxy_connect_suppresses_netrc_without_approval() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = Endpoint {
+        host: "127.0.0.1".into(),
+        port: listener.local_addr().unwrap().port(),
+    };
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let head = read_head(&mut stream).await.to_ascii_lowercase();
+        assert!(head.starts_with("connect destination.invalid:443 http/1.1"));
+        assert!(!head.contains("proxy-authorization"));
+        assert!(!head.contains("secret"));
+        stream
+            .write_all(b"HTTP/1.1 200 Tunnel\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    let options = ConnectionOptions {
+        auth: AuthFactory::basic(
+            CredentialStore::parse("machine 127.0.0.1 login alice password secret").unwrap(),
+        ),
+        ..ConnectionOptions::default()
+    };
+    let _stream = connect(
+        &Route::Http(endpoint),
+        &"destination.invalid:443".parse().unwrap(),
+        true,
+        &options,
+        Duration::from_secs(3),
+    )
+    .await
+    .unwrap();
+    task.await.unwrap();
+}
+
+#[tokio::test]
 async fn tls_rejects_a_certificate_without_the_fixture_root() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();

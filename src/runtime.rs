@@ -549,7 +549,7 @@ fn load_auth_with_default_netrc(
     } else {
         CredentialStore::new()
     };
-    Ok(AuthFactory::basic(store))
+    AuthFactory::basic(store).allow_insecure_proxy_auth(&a.allow_insecure_proxy_auth)
 }
 /// Callable process entry used by embedded applications. It deliberately skips rc files.
 pub fn embedded_entry(args: Vec<OsString>) -> Result<()> {

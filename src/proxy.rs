@@ -1648,11 +1648,15 @@ async fn forward(
         .headers
         .insert(http::header::HOST, HeaderValue::from_str(&host)?);
     let proxy = match route {
-        Route::Http(e) | Route::Https(e) => Some(e),
+        Route::Http(e) => Some((e, false)),
+        Route::Https(e) => Some((e, true)),
         Route::Direct | Route::Socks4(_) | Route::Socks5(_) => None,
     };
-    if let Some(proxy) = proxy.filter(|_| !tunneled)
-        && let Some(v) = options.auth.authorization(&proxy.host).await?
+    if let Some((proxy, tls)) = proxy.filter(|_| !tunneled)
+        && let Some(v) = options
+            .auth
+            .authorization_for_proxy(&proxy.host, proxy.port, tls, "http")
+            .await?
     {
         *authentication_sent = true;
         parts.headers.insert("proxy-authorization", v);

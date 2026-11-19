@@ -389,11 +389,15 @@ async fn check_route_authentication(
             "SOCKS4 uses an empty user ID and does not use HTTP proxy authentication",
         ),
         Route::Socks5(endpoint) => {
-            if auth.socks_credentials(&endpoint.host).is_some() {
+            if auth.has_basic_credentials(&endpoint.host) {
                 report.add(
                     name,
-                    CheckStatus::Pass,
-                    "SOCKS5 username/password credentials are available; secrets were not displayed",
+                    CheckStatus::Warn,
+                    if auth.plaintext_auth_approved("socks5", &endpoint.host, endpoint.port) {
+                        "netrc username/password credentials are approved for this plaintext SOCKS5 endpoint"
+                    } else {
+                        "netrc username/password credentials are suppressed for plaintext SOCKS5; use an HTTPS proxy route or approve this exact endpoint"
+                    },
                 );
                 return;
             }
@@ -429,6 +433,7 @@ async fn check_route_authentication(
             );
         }
         Route::Http(endpoint) | Route::Https(endpoint) => {
+            let tls = matches!(route, Route::Https(_));
             if !auth.is_configured() {
                 report.add(
                     name,
@@ -437,7 +442,10 @@ async fn check_route_authentication(
                 );
                 return;
             }
-            match auth.authorization(&endpoint.host).await {
+            match auth
+                .authorization_for_proxy(&endpoint.host, endpoint.port, tls, "http")
+                .await
+            {
                 Ok(Some(_)) => report.add(
                     name,
                     CheckStatus::Pass,
@@ -446,7 +454,11 @@ async fn check_route_authentication(
                 Ok(None) => report.add(
                     name,
                     CheckStatus::Warn,
-                    "authentication is configured but is not enabled for this host",
+                    if auth.has_basic_credentials(&endpoint.host) && !tls {
+                        "netrc credentials are suppressed on plaintext HTTP unless this exact endpoint is approved"
+                    } else {
+                        "authentication is configured but is not enabled for this host"
+                    },
                 ),
                 Err(error) => {
                     let message = format!("{error:#}");
@@ -933,16 +945,31 @@ mod tests {
             "machine proxy.example.test login alice password private-secret",
         )
         .unwrap();
-        let basic = AuthFactory::basic(credentials);
+        let basic = AuthFactory::basic(credentials.clone());
         let mut report = DoctorReport::new();
         check_route_authentication(&Route::Http(endpoint.clone()), &basic, &mut report).await;
         check_route_authentication(&Route::Socks5(endpoint.clone()), &basic, &mut report).await;
-        assert_eq!(report.counts(), (2, 0, 0));
+        assert_eq!(report.counts(), (0, 2, 0));
         assert!(
             report
                 .checks
                 .iter()
                 .all(|check| !check.message.contains("private-secret"))
+        );
+
+        let approved = AuthFactory::basic(credentials)
+            .allow_insecure_proxy_auth(&[
+                "http://proxy.example.test:8080".into(),
+                "socks5://proxy.example.test:8080".into(),
+            ])
+            .unwrap();
+        let mut report = DoctorReport::new();
+        check_route_authentication(&Route::Socks5(endpoint.clone()), &approved, &mut report).await;
+        assert_eq!(report.counts(), (0, 1, 0));
+        assert!(
+            check(&report, "Authentication for SOCKS5 proxy.example.test:8080")
+                .message
+                .contains("are approved")
         );
 
         let unmatched = AuthFactory::basic(

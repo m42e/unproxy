@@ -82,6 +82,7 @@ async fn doctor_checks_routes_authentication_and_live_runtime_state() {
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_unproxy"));
     let listen = upstream_addr.to_string();
+    let auth_approval = format!("http://{upstream_addr}");
     command
         .args([
             "--listen",
@@ -90,6 +91,8 @@ async fn doctor_checks_routes_authentication_and_live_runtime_state() {
             pac.to_str().unwrap(),
             "--netrc-file",
             credentials.to_str().unwrap(),
+            "--allow-insecure-proxy-auth",
+            auth_approval.as_str(),
             "--filter-list",
             filter.to_str().unwrap(),
             "doctor",

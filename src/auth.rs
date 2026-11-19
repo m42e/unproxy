@@ -217,6 +217,13 @@ pub fn negotiate_server_token(headers: &HeaderMap) -> Option<Vec<u8>> {
 #[derive(Clone, Default)]
 pub struct AuthFactory {
     mode: AuthMode,
+    plaintext_approvals: Vec<PlaintextAuthApproval>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlaintextAuthApproval {
+    scheme: &'static str,
+    host: String,
+    port: u16,
 }
 #[derive(Clone, Default)]
 enum AuthMode {
@@ -243,12 +250,31 @@ impl AuthFactory {
     pub fn basic(store: CredentialStore) -> Self {
         Self {
             mode: AuthMode::Basic(store),
+            plaintext_approvals: Vec::new(),
         }
+    }
+    /// Explicitly allow reusable credentials on exact plaintext proxy endpoints.
+    pub fn allow_insecure_proxy_auth(mut self, endpoints: &[String]) -> Result<Self> {
+        self.plaintext_approvals = endpoints
+            .iter()
+            .map(|endpoint| PlaintextAuthApproval::parse(endpoint))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(self)
+    }
+    pub(crate) fn plaintext_auth_approved(&self, scheme: &str, host: &str, port: u16) -> bool {
+        self.plaintext_approvals.iter().any(|approval| {
+            approval.scheme == scheme
+                && approval
+                    .host
+                    .eq_ignore_ascii_case(host.trim_matches(['[', ']']))
+                && approval.port == port
+        })
     }
     #[cfg(feature = "negotiate")]
     pub fn negotiate(hosts: Vec<String>) -> Self {
         Self {
             mode: AuthMode::Negotiate(hosts),
+            plaintext_approvals: Vec::new(),
         }
     }
     /// Whether this process has an authentication mode or credentials available.
@@ -261,8 +287,13 @@ impl AuthFactory {
             AuthMode::Negotiate(_) => true,
         }
     }
-    /// Username/password credentials for SOCKS5; HTTP Negotiate is separate.
-    pub(crate) fn socks_credentials(&self, host: &str) -> Option<(String, String)> {
+    pub(crate) fn has_basic_credentials(&self, host: &str) -> bool {
+        matches!(&self.mode, AuthMode::Basic(store) if store.get(host).is_some())
+    }
+    pub(crate) fn socks_credentials(&self, host: &str, port: u16) -> Option<(String, String)> {
+        if !self.plaintext_auth_approved("socks5", host, port) {
+            return None;
+        }
         match &self.mode {
             AuthMode::Basic(store) => store.get(host),
             _ => None,
@@ -296,6 +327,24 @@ impl AuthFactory {
             })
             .await
         }
+    }
+
+    /// Generate credentials only when the transport is permitted for their auth mode.
+    pub(crate) async fn authorization_for_proxy(
+        &self,
+        host: &str,
+        port: u16,
+        tls: bool,
+        scheme: &str,
+    ) -> Result<Option<HeaderValue>> {
+        if let AuthMode::Basic(store) = &self.mode
+            && store.get(host).is_some()
+            && !tls
+            && !self.plaintext_auth_approved(scheme, host, port)
+        {
+            return Ok(None);
+        }
+        self.authorization(host).await
     }
 
     async fn authorization_with<F>(
@@ -339,6 +388,46 @@ impl AuthFactory {
     }
 }
 
+impl PlaintextAuthApproval {
+    fn parse(value: &str) -> Result<Self> {
+        let uri = value
+            .parse::<http::Uri>()
+            .with_context(|| format!("invalid insecure proxy auth endpoint {value:?}"))?;
+        let scheme = match uri.scheme_str() {
+            Some(scheme) if scheme.eq_ignore_ascii_case("http") => "http",
+            Some(scheme) if scheme.eq_ignore_ascii_case("socks5") => "socks5",
+            _ => anyhow::bail!("insecure proxy auth endpoint must use http:// or socks5://"),
+        };
+        let authority = uri
+            .authority()
+            .ok_or_else(|| anyhow!("insecure proxy auth endpoint must include a host and port"))?;
+        anyhow::ensure!(
+            !authority.as_str().contains('@'),
+            "insecure proxy auth endpoint must not contain user information"
+        );
+        let port = authority
+            .port_u16()
+            .ok_or_else(|| anyhow!("insecure proxy auth endpoint must include an explicit port"))?;
+        anyhow::ensure!(
+            port != 0,
+            "insecure proxy auth endpoint port must not be zero"
+        );
+        anyhow::ensure!(
+            (uri.path().is_empty() || uri.path() == "/") && uri.query().is_none(),
+            "insecure proxy auth endpoint must not include a path or query"
+        );
+        let host = authority
+            .host()
+            .trim_matches(['[', ']'])
+            .to_ascii_lowercase();
+        anyhow::ensure!(
+            !host.is_empty(),
+            "insecure proxy auth endpoint host is empty"
+        );
+        Ok(Self { scheme, host, port })
+    }
+}
+
 #[cfg(feature = "negotiate")]
 fn negotiate_header(
     host: &str,
@@ -367,6 +456,41 @@ pub use native::NegotiateContext;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plaintext_auth_approvals_match_exact_transport_host_and_port() {
+        let approvals = AuthFactory::no_auth()
+            .allow_insecure_proxy_auth(&[
+                "http://Proxy.Example:8080".into(),
+                "socks5://[::1]:1080/".into(),
+            ])
+            .unwrap();
+        assert!(approvals.plaintext_auth_approved("http", "proxy.example", 8080));
+        assert!(!approvals.plaintext_auth_approved("https", "proxy.example", 8080));
+        assert!(!approvals.plaintext_auth_approved("http", "proxy.example", 8081));
+        assert!(approvals.plaintext_auth_approved("socks5", "::1", 1080));
+        assert!(!approvals.plaintext_auth_approved("socks5", "::1", 1081));
+        assert!(!approvals.plaintext_auth_approved("http", "::1", 1080));
+    }
+
+    #[test]
+    fn plaintext_auth_approval_rejects_ambiguous_endpoints() {
+        for endpoint in [
+            "http://proxy.example",
+            "https://proxy.example:443",
+            "socks://proxy.example:1080",
+            "http://proxy.example:8080/path",
+            "http://proxy.example:8080/?query=1",
+            "http://alice@proxy.example:8080",
+            "http://[::1]",
+        ] {
+            assert!(
+                AuthFactory::no_auth()
+                    .allow_insecure_proxy_auth(&[endpoint.into()])
+                    .is_err(),
+                "accepted {endpoint}"
+            );
+        }
+    }
     #[test]
     fn server_negotiate_token_is_decoded_from_proxy_authenticate() {
         let mut headers = HeaderMap::new();

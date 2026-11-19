@@ -231,6 +231,8 @@ An unverified light is expected until a request uses an upstream that performs a
 
 For password authentication, confirm `.netrc` names the **proxy host**, and that the username and password are current. Restart after editing credentials. For Negotiate, check that the feature is available, the option is enabled, and system sign-in or Kerberos credentials are valid.
 
+Netrc passwords are suppressed by default on plaintext HTTP and SOCKS5 upstreams. If your administrator requires password authentication on one, configure `--allow-insecure-proxy-auth` for its exact scheme, host, and port; see [Authentication](authentication.md).
+
 A Windows service normally uses NetworkService and the computer’s domain identity. The tray app uses your signed-in account. See [Authentication](authentication.md).
 
 ## A request returns an error

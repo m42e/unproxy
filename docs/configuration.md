@@ -57,6 +57,7 @@ Desktop apps use their own preferences and launch their proxy with explicit sett
 | `--direct-fallback` | Try direct after selected proxy routes fail. | Off |
 | `--proxytunnel` | Use upstream CONNECT for every proxied request. | Off |
 | `--netrc-file PATH` | Read upstream password credentials from this file. | `~/.netrc` |
+| `--allow-insecure-proxy-auth ENDPOINT` | Allow netrc credentials on the exact plaintext `http://HOST:PORT` or `socks5://HOST:PORT` endpoint; repeatable. | None |
 | `--negotiate [HOST]` / `-n` | Integrated authentication; optionally restrict hosts, repeatable. | Off; requires Negotiate build |
 | `--release-info-url URL` | Custom JSON release metadata endpoint for `check-upgrade`. | GitHub Releases |
 

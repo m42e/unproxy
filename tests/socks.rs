@@ -117,7 +117,7 @@ async fn socks4a_and_socks5_forward_http_and_connect_without_http_proxy_credenti
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 if version5 {
-                    let request = socks5_request(&mut stream, true).await;
+                    let request = socks5_request(&mut stream, false).await;
                     assert_eq!(
                         request,
                         [
@@ -325,7 +325,79 @@ async fn rejected_socks_route_falls_back_in_pac_order() {
 }
 
 #[tokio::test]
-async fn socks5_authentication_rejects_bad_status_versions_and_credential_lengths() {
+async fn socks5_does_not_offer_reusable_netrc_credentials() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let route = Route::Socks5(endpoint(&listener));
+    let options = ConnectionOptions {
+        auth: AuthFactory::basic(
+            CredentialStore::parse("machine 127.0.0.1 login alice password secret").unwrap(),
+        ),
+        ..ConnectionOptions::default()
+    };
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(bytes(&mut stream, 3).await, [5, 1, 0]);
+        stream.write_all(&[5, 2]).await.unwrap();
+        let mut trailing = Vec::new();
+        stream.read_to_end(&mut trailing).await.unwrap();
+        assert!(
+            trailing.is_empty(),
+            "client sent data after password auth was refused"
+        );
+    });
+    let error = net::connect(
+        &route,
+        &"destination.test:443".parse().unwrap(),
+        true,
+        &options,
+        TIMEOUT,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(format!("{error:#}").contains("selected unoffered authentication method 2"));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn socks5_credentials_require_exact_endpoint_approval() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = endpoint(&listener);
+    let options = ConnectionOptions {
+        auth: AuthFactory::basic(
+            CredentialStore::parse("machine 127.0.0.1 login alice password secret").unwrap(),
+        )
+        .allow_insecure_proxy_auth(&[format!("socks5://{proxy}")])
+        .unwrap(),
+        ..ConnectionOptions::default()
+    };
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(bytes(&mut stream, 4).await, [5, 2, 0, 2]);
+        stream.write_all(&[5, 2]).await.unwrap();
+        assert_eq!(bytes(&mut stream, 14).await, b"\x01\x05alice\x06secret");
+        stream.write_all(&[1, 0]).await.unwrap();
+        assert_eq!(bytes(&mut stream, 4).await, [5, 1, 0, 3]);
+        assert_eq!(bytes(&mut stream, 14).await, b"\x0btarget.test\x01\xbb");
+        stream
+            .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+            .await
+            .unwrap();
+    });
+    net::connect(
+        &Route::Socks5(proxy),
+        &"target.test:443".parse().unwrap(),
+        true,
+        &options,
+        TIMEOUT,
+    )
+    .await
+    .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn socks5_opted_in_authentication_rejects_bad_replies_and_credential_lengths() {
     for (credentials, reply, expected) in [
         (
             "default login alice password secret".to_owned(),
@@ -349,9 +421,12 @@ async fn socks5_authentication_rejects_bad_status_versions_and_credential_length
         ),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let route = Route::Socks5(endpoint(&listener));
+        let proxy = endpoint(&listener);
+        let route = Route::Socks5(proxy.clone());
         let options = ConnectionOptions {
-            auth: AuthFactory::basic(CredentialStore::parse(&credentials).unwrap()),
+            auth: AuthFactory::basic(CredentialStore::parse(&credentials).unwrap())
+                .allow_insecure_proxy_auth(&[format!("socks5://{proxy}")])
+                .unwrap(),
             ..ConnectionOptions::default()
         };
         let invalid_length = expected == "1–255 bytes";

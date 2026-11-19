@@ -32,7 +32,14 @@ Restart Unproxy after changing credentials. To use a different file with the CLI
 unproxy --netrc-file /path/to/credentials.netrc --pac-file /path/to/company.pac
 ```
 
-Netrc supplies Basic authentication for HTTP upstream proxies and username/password authentication for SOCKS5.
+Netrc supplies Basic authentication for HTTPS upstream proxies, where TLS protects the connection. By default, Unproxy does not send reusable netrc passwords to plaintext HTTP proxies or SOCKS5 proxies. If an administrator requires one of those plaintext routes, opt in for its exact transport, host, and port:
+
+```sh
+unproxy --allow-insecure-proxy-auth http://proxy.example.org:8080
+unproxy --allow-insecure-proxy-auth socks5://proxy.example.org:1080
+```
+
+Repeat the option for multiple endpoints. The scheme and explicit port must match the selected PAC route. This deliberately exposes the password to observers on the network path to that proxy. An approval for one scheme or port does not authorize another endpoint. Without an approval, a plaintext upstream can still be used without password authentication.
 
 ## Integrated sign-in with Negotiate
 

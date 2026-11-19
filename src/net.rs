@@ -355,7 +355,7 @@ pub async fn connect_observed(
                 let (stream, authenticated) = crate::socks::handshake(
                     stream,
                     destination,
-                    &proxy.host,
+                    proxy,
                     matches!(route, Route::Socks5(_)),
                     &options.auth,
                 )
@@ -384,9 +384,13 @@ async fn proxy_connect(
     };
     let mut auth_sent = false;
     if tunnel {
+        // Basic credentials from netrc are reusable secrets. Only send them
+        // after TLS has been established to the upstream proxy.
         let authorization = time::timeout(
             Duration::from_secs(2),
-            options.auth.authorization(&proxy.host),
+            options
+                .auth
+                .authorization_for_proxy(&proxy.host, proxy.port, tls, "http"),
         )
         .await
         .context("upstream authorization timed out")??;

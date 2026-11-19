@@ -113,7 +113,9 @@ async fn forward_proxy_send_replaces_client_proxy_credentials() {
     let options = ConnectionOptions {
         auth: AuthFactory::basic(
             CredentialStore::parse("machine 127.0.0.1 login alice password secret").unwrap(),
-        ),
+        )
+        .allow_insecure_proxy_auth(&[format!("http://{address}")])
+        .unwrap(),
         ..ConnectionOptions::default()
     };
     let connection = Connection::proxy(endpoint(address), false, &options, Duration::from_secs(1))
@@ -138,6 +140,36 @@ async fn forward_proxy_send_replaces_client_proxy_credentials() {
     assert!(request.contains("proxy-authorization: basic ywxpy2u6c2vjcmv0\r\n"));
     assert!(!request.contains("client-supplied"));
     assert!(request.contains("connection: close\r\n"));
+}
+
+#[tokio::test]
+async fn forward_proxy_send_suppresses_unapproved_netrc_credentials() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = capture_request(&mut stream).await;
+        reply_ok(&mut stream).await;
+        request
+    });
+    let options = ConnectionOptions {
+        auth: AuthFactory::basic(
+            CredentialStore::parse("machine 127.0.0.1 login alice password secret").unwrap(),
+        ),
+        ..ConnectionOptions::default()
+    };
+    let connection = Connection::proxy(endpoint(address), false, &options, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let request = http::Request::get("http://example.test/resource")
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .unwrap();
+    connection.send(request).await.unwrap();
+    let request = String::from_utf8(server.await.unwrap())
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(!request.contains("proxy-authorization"));
+    assert!(!request.contains("secret"));
 }
 
 #[tokio::test]
@@ -166,7 +198,12 @@ async fn forward_proxy_send_reports_missing_credentials_before_http_exchange() {
 
 #[tokio::test]
 async fn direct_tls_and_https_proxy_constructors_keep_their_transport_identity() {
-    let options = tls_options();
+    let options = ConnectionOptions {
+        auth: AuthFactory::basic(
+            CredentialStore::parse("machine 127.0.0.1 login alice password secret").unwrap(),
+        ),
+        ..tls_options()
+    };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let direct_server = tokio::spawn(async move {
@@ -234,7 +271,8 @@ async fn direct_tls_and_https_proxy_constructors_keep_their_transport_identity()
     assert_eq!(response.status(), http::StatusCode::OK);
     let head = proxy_server.await.unwrap().to_ascii_lowercase();
     assert!(head.starts_with("get https://example.test/proxied http/1.1"));
-    assert!(!head.contains("proxy-authorization"));
+    assert!(head.contains("proxy-authorization: basic ywxpy2u6c2vjcmv0"));
+    assert!(!head.contains("client-value"));
 }
 
 #[tokio::test]

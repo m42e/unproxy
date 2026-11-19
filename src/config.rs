@@ -146,6 +146,10 @@ pub struct MainArgs {
     #[arg(long = "netrc-file")]
     #[cfg_attr(feature = "negotiate", arg(conflicts_with = "negotiate"))]
     pub netrc_file: Option<PathBuf>,
+    /// Allow netrc passwords on an exact plaintext proxy endpoint; repeatable.
+    #[arg(long = "allow-insecure-proxy-auth", action = clap::ArgAction::Append)]
+    #[cfg_attr(feature = "negotiate", arg(conflicts_with = "negotiate"))]
+    pub allow_insecure_proxy_auth: Vec<String>,
     /// Custom JSON release metadata endpoint used by `check-upgrade`.
     #[arg(long = "release-info-url")]
     pub release_info_url: Option<String>,
@@ -479,6 +483,21 @@ mod tests {
         assert_eq!(
             args.filter_list,
             ["blocked.txt", "https://example.test/list"]
+        );
+    }
+    #[test]
+    fn insecure_proxy_auth_approvals_are_repeatable() {
+        let args = MainArgs::try_parse_from([
+            "x",
+            "--allow-insecure-proxy-auth",
+            "http://proxy.example:8080",
+            "--allow-insecure-proxy-auth",
+            "socks5://proxy.example:1080",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.allow_insecure_proxy_auth,
+            ["http://proxy.example:8080", "socks5://proxy.example:1080"]
         );
     }
     #[test]

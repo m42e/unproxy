@@ -112,7 +112,16 @@ impl Connection {
             .remove(http::header::PROXY_AUTHORIZATION);
         if self.transport == Transport::ForwardProxy
             && let Route::Http(endpoint) | Route::Https(endpoint) = &self.route
-            && let Some(authorization) = self.options.auth.authorization(&endpoint.host).await?
+            && let Some(authorization) = self
+                .options
+                .auth
+                .authorization_for_proxy(
+                    &endpoint.host,
+                    endpoint.port,
+                    matches!(&self.route, Route::Https(_)),
+                    "http",
+                )
+                .await?
         {
             request
                 .headers_mut()

@@ -114,11 +114,12 @@ function FindProxyForURL(url, host) {
 }
 ```
 
-`SOCKS5` supports IPv6 destinations and optional username/password authentication through [netrc](authentication.md). Enable Negotiate for SOCKS5 GSSAPI with system credentials; it requests integrity and confidentiality protection.
+`SOCKS5` supports IPv6 destinations. Netrc username/password authentication is disabled by default because SOCKS5 carries it over plaintext. To enable it for a specific SOCKS5 endpoint, pass `--allow-insecure-proxy-auth socks5://proxy.example.org:1080`; see [authentication](authentication.md) for the security implications. Enable Negotiate for SOCKS5 GSSAPI with system credentials; it requests integrity and confidentiality protection.
 
 **When to use it:** Select a SOCKS route when the upstream provided by your
 organization speaks SOCKS instead of HTTP. Prefer `SOCKS5` when the upstream
-supports it and you need IPv6 destinations or username/password authentication.
+supports it and you need IPv6 destinations. Username/password authentication
+requires explicit endpoint approval because SOCKS5 carries it over plaintext.
 
 `SOCKS`, `SOCKS4`, and `SOCKS4A` select SOCKS4a with an empty user ID. Destination hostnames are resolved by the upstream. Both families support HTTP requests and HTTPS CONNECT tunnels; UDP ASSOCIATE and BIND are unsupported.
 
