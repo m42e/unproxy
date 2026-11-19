@@ -661,7 +661,10 @@ mod tests {
             "INFO startup\nWARN request failed\n"
         );
         let (history, _) = stream.subscribe_with_history();
-        assert_eq!(history, ["INFO startup", "WARN request failed"]);
+        assert_eq!(
+            history.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+            ["INFO startup", "WARN request failed"]
+        );
     }
 
     #[test]
