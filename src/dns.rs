@@ -7,8 +7,12 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UdpSocket,
+    sync::Semaphore,
+    task::JoinSet,
     time::timeout,
 };
+
+const MAX_CONCURRENT_DNS_EXCHANGES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DnsCounts {
@@ -372,22 +376,57 @@ async fn serve_socket(
     secondary_uri: http::Uri,
     proxy: crate::route::Route,
     options: crate::net::ConnectionOptions,
+    shutdown: impl std::future::Future + Unpin,
+) -> Result<()> {
+    serve_socket_with_limit(
+        socket,
+        primary_addr,
+        secondary_uri,
+        proxy,
+        options,
+        shutdown,
+        MAX_CONCURRENT_DNS_EXCHANGES,
+    )
+    .await
+}
+
+async fn serve_socket_with_limit(
+    socket: UdpSocket,
+    primary_addr: SocketAddr,
+    secondary_uri: http::Uri,
+    proxy: crate::route::Route,
+    options: crate::net::ConnectionOptions,
     mut shutdown: impl std::future::Future + Unpin,
+    max_concurrent: usize,
 ) -> Result<()> {
     tracing::info!(address=%socket.local_addr()?, "undns listening");
     let s = std::sync::Arc::new(socket);
+    let permits = std::sync::Arc::new(Semaphore::new(max_concurrent));
+    let mut tasks = JoinSet::new();
     let mut buf = vec![0; 65507];
     loop {
-        let (n, peer) = tokio::select! {
+        let received = tokio::select! {
             received = s.recv_from(&mut buf) => received?,
-            _ = &mut shutdown => return Ok(()),
+            _ = &mut shutdown => {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                return Ok(());
+            },
+            _ = tasks.join_next(), if !tasks.is_empty() => continue,
+        };
+        let (n, peer) = received;
+        while tasks.try_join_next().is_some() {}
+        // Shed excess packets before copying them or allocating exchange resources.
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            continue;
         };
         let q = buf[..n].to_vec();
         let socket = s.clone();
         let secondary_uri = secondary_uri.clone();
         let proxy = proxy.clone();
         let options = options.clone();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
+            let _permit = permit;
             let answer =
                 async { exchange(&q, primary_addr, &secondary_uri, &proxy, &options).await }.await;
             match answer {
@@ -674,6 +713,115 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(&response[..2], &query[..2]);
+        assert_eq!(parse_counts(&response[..size]).unwrap().answers, 1);
+
+        stop.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        primary_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_service_drops_excess_work_and_releases_capacity_on_completion() {
+        let primary = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let primary_address = primary.local_addr().unwrap();
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_address = server.local_addr().unwrap();
+        let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::channel(2);
+        let (release_first, wait_first) = tokio::sync::oneshot::channel();
+        let primary_task = tokio::spawn(async move {
+            let (mut first_stream, _) = primary.accept().await.unwrap();
+            let mut first_length = [0; 2];
+            first_stream.read_exact(&mut first_length).await.unwrap();
+            let mut first_query = vec![0; u16::from_be_bytes(first_length) as usize];
+            first_stream.read_exact(&mut first_query).await.unwrap();
+            accepted_tx.send(first_query[0..2].to_vec()).await.unwrap();
+            let first_handler = tokio::spawn(async move {
+                wait_first.await.unwrap();
+                let mut answer = first_query;
+                answer[6..8].copy_from_slice(&1u16.to_be_bytes());
+                answer.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 7]);
+                first_stream
+                    .write_all(&(answer.len() as u16).to_be_bytes())
+                    .await
+                    .unwrap();
+                first_stream.write_all(&answer).await.unwrap();
+            });
+
+            // Keep accepting while the first exchange is held, so a wrongly
+            // forwarded saturated query is reported to the test immediately.
+            let (mut stream, _) = primary.accept().await.unwrap();
+            let mut length = [0; 2];
+            stream.read_exact(&mut length).await.unwrap();
+            let mut query = vec![0; u16::from_be_bytes(length) as usize];
+            stream.read_exact(&mut query).await.unwrap();
+            accepted_tx.send(query[0..2].to_vec()).await.unwrap();
+            let mut answer = query;
+            answer[6..8].copy_from_slice(&1u16.to_be_bytes());
+            answer.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 7]);
+            stream
+                .write_all(&(answer.len() as u16).to_be_bytes())
+                .await
+                .unwrap();
+            stream.write_all(&answer).await.unwrap();
+            first_handler.await.unwrap();
+        });
+        let (stop, shutdown) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(serve_socket_with_limit(
+            server,
+            primary_address,
+            "https://dns.example.test/dns-query".parse().unwrap(),
+            crate::route::Route::Direct,
+            crate::net::ConnectionOptions::default(),
+            shutdown,
+            1,
+        ));
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let first_query = test_query(1);
+        client.send_to(&first_query, server_address).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), accepted_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            [0, 1]
+        );
+
+        // The first exchange is held open, so this packet must be shed at capacity.
+        let excess_query = test_query(2);
+        client.send_to(&excess_query, server_address).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), accepted_rx.recv())
+                .await
+                .is_err()
+        );
+
+        release_first.send(()).unwrap();
+        let mut response = [0u8; 128];
+        let (size, _) =
+            tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&response[..2], &first_query[..2]);
+        assert_eq!(parse_counts(&response[..size]).unwrap().answers, 1);
+
+        // A fresh packet is accepted after the first exchange releases its permit.
+        let next_query = test_query(3);
+        client.send_to(&next_query, server_address).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), accepted_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            [0, 3]
+        );
+        let (size, _) =
+            tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(&response[..2], &next_query[..2]);
         assert_eq!(parse_counts(&response[..size]).unwrap().answers, 1);
 
         stop.send(()).unwrap();

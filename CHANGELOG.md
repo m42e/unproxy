@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Cap `undns` at 64 concurrent DNS exchanges and drop excess datagrams when
+  upstream work is saturated.
 - Route `undns` primary DNS queries through the selected proxy using DNS-over-TCP
   and fail closed when that route cannot carry the query. The public
   `dns::exchange_primary` signature now requires the selected route and
