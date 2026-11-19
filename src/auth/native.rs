@@ -447,7 +447,11 @@ unsafe fn gss_unwrap_message(
         unsafe { std::slice::from_raw_parts(output.value.cast::<u8>(), output.len).to_vec() }
     };
     release_buffer(&mut minor, &mut output);
-    if (status as u32 & 0xffff_0000) != 0 {
+    // GSS supplementary statuses (for example, duplicate, old, unsequenced,
+    // or gap tokens) are nonzero even though they are not routine errors. Do
+    // not release any decoded SOCKS application data unless unwrap completed
+    // cleanly.
+    if status != 0 {
         return Err(anyhow!(
             "GSSAPI unwrap failed for {host}: {}",
             display_status(status as u32, 1)
@@ -974,6 +978,7 @@ mod tests {
     static INIT_NULL_MECH: AtomicUsize = AtomicUsize::new(0);
     static INIT_SERVER_TOKEN_MATCHES: AtomicUsize = AtomicUsize::new(0);
     static UNWRAP_CONFIDENTIALITY: AtomicUsize = AtomicUsize::new(0);
+    static UNWRAP_STATUS: AtomicUsize = AtomicUsize::new(0);
 
     unsafe fn fixture_set_buffer(buffer: *mut GssBuf, bytes: &[u8]) {
         let boxed = bytes.to_vec().into_boxed_slice();
@@ -1190,7 +1195,7 @@ mod tests {
             *conf_state = confidential;
             fixture_set_buffer(output, input);
         }
-        0
+        UNWRAP_STATUS.load(Ordering::SeqCst) as GssStatus
     }
 
     unsafe extern "C" fn fixture_unwrap_error(
@@ -1416,6 +1421,34 @@ mod tests {
         }
         .unwrap_err();
         assert!(error.to_string().contains("lacks confidentiality"));
+
+        // Supplementary statuses are not routine errors, but they still mean
+        // the sequence/replay checks failed. Even when GSS returns decoded
+        // bytes, none may be exposed to the SOCKS relay.
+        UNWRAP_CONFIDENTIALITY.store(1, Ordering::SeqCst);
+        for status in [1, 2, 4, 8] {
+            UNWRAP_STATUS.store(status, Ordering::SeqCst);
+            let error = unsafe {
+                gss_unwrap_message(
+                    &mut context,
+                    "proxy.fixture.test",
+                    b"payload",
+                    true,
+                    fixture_unwrap,
+                    fixture_buffer_release,
+                    fixture_status,
+                )
+            }
+            .unwrap_err();
+            assert!(error.to_string().contains("GSSAPI unwrap failed"));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("status {status} kind 1"))
+            );
+        }
+        UNWRAP_STATUS.store(0, Ordering::SeqCst);
+        UNWRAP_CONFIDENTIALITY.store(0, Ordering::SeqCst);
 
         let error = unsafe {
             gss_unwrap_message(
