@@ -330,7 +330,7 @@ fn unpack_archive(archive: &Path, output: &Path) -> Result<()> {
     std::fs::create_dir_all(output)?;
     if cfg!(windows) {
         powershell(&format!(
-            "$ErrorActionPreference = 'Stop'; try {{ Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory({}, {}, $true) }} catch {{ [Console]::Error.WriteLine($_); exit 1 }}",
+            "$ErrorActionPreference = 'Stop'; try {{ Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory({}, {}, [System.Text.Encoding]::UTF8, [bool]$true) }} catch {{ [Console]::Error.WriteLine($_); exit 1 }}",
             ps_literal(archive),
             ps_literal(output)
         ))
