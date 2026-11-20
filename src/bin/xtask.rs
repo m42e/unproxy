@@ -230,22 +230,7 @@ fn main() -> Result<()> {
                 Ok(())
             }
         }
-        Task::Unpack { archive, output } => {
-            std::fs::create_dir_all(&output)?;
-            if cfg!(windows) {
-                powershell(&format!(
-                    "Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
-                    ps_literal(&archive),
-                    ps_literal(&output)
-                ))
-            } else {
-                run(Command::new("unzip")
-                    .arg("-q")
-                    .arg(archive)
-                    .arg("-d")
-                    .arg(output))
-            }
-        }
+        Task::Unpack { archive, output } => unpack_archive(&archive, &output),
         Task::Bump { part } => {
             let version = unproxy::tools::bump_version(Path::new("Cargo.toml"), &part)?;
             println!("version={version}");
@@ -340,6 +325,22 @@ fn ps_literal(path: &Path) -> String {
 }
 fn powershell(script: &str) -> Result<()> {
     run(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]))
+}
+fn unpack_archive(archive: &Path, output: &Path) -> Result<()> {
+    std::fs::create_dir_all(output)?;
+    if cfg!(windows) {
+        powershell(&format!(
+            "$ErrorActionPreference = 'Stop'; try {{ Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory({}, {}, $true) }} catch {{ [Console]::Error.WriteLine($_); exit 1 }}",
+            ps_literal(archive),
+            ps_literal(output)
+        ))
+    } else {
+        run(Command::new("unzip")
+            .arg("-q")
+            .arg(archive)
+            .arg("-d")
+            .arg(output))
+    }
 }
 fn zip(directory: &Path, output: &Path) -> Result<()> {
     let absolute = if output.is_absolute() {
@@ -1015,25 +1016,17 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(payload.join("README.md"), b"package readme").unwrap();
         std::fs::write(nested.join("binary file"), b"fixture executable").unwrap();
-        let archive = temp.path().join("package output.zip");
+        let archive = temp.path().join("package's output.zip");
 
         zip(&payload, &archive).unwrap();
 
-        let extracted = temp.path().join("expanded package");
-        #[cfg(unix)]
-        run(Command::new("unzip")
-            .arg("-q")
-            .arg(&archive)
-            .arg("-d")
-            .arg(&extracted))
-        .unwrap();
+        let extracted = temp.path().join("expanded package's data");
         #[cfg(windows)]
-        powershell(&format!(
-            "Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
-            ps_literal(&archive),
-            ps_literal(&extracted)
-        ))
-        .unwrap();
+        {
+            std::fs::create_dir_all(&extracted).unwrap();
+            std::fs::write(extracted.join("README.md"), b"old package readme").unwrap();
+        }
+        unpack_archive(&archive, &extracted).unwrap();
 
         assert_eq!(
             std::fs::read(extracted.join("README.md")).unwrap(),
@@ -1043,5 +1036,15 @@ mod tests {
             std::fs::read(extracted.join("nested folder/binary file")).unwrap(),
             b"fixture executable"
         );
+    }
+
+    #[test]
+    fn unpack_helper_reports_corrupt_archives() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("corrupt.zip");
+        let output = temp.path().join("output");
+        std::fs::write(&archive, b"not a ZIP archive").unwrap();
+
+        assert!(unpack_archive(&archive, &output).is_err());
     }
 }
