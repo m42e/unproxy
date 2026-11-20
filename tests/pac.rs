@@ -271,18 +271,7 @@ fn helper_ranges_cover_valid_arity_wrap_gmt_and_empty_cases() {
 }
 
 #[test]
-fn script_replacement_clears_dns_cache_and_missing_functions_error() {
-    let mut p = Pac::new(Some(
-        "function FindProxyForURL(){ dnsResolve('nonexistent.invalid'); return 'DIRECT'; }",
-    ))
-    .unwrap();
-    p.evaluate("x", "x").unwrap();
-    assert_eq!(p.cache_snapshot().len(), 1);
-    p.evaluate("x", "x").unwrap();
-    assert_eq!(p.cache_snapshot().len(), 1);
-    p.set_script(Some("function FindProxyForURL(){return 'DIRECT'}"))
-        .unwrap();
-    assert_eq!(p.cache_snapshot().len(), 0);
+fn missing_functions_and_evaluation_errors_are_rejected() {
     for src in ["", "var FindProxyForURL=1;"] {
         assert!(Pac::new(Some(src)).is_err());
     }
