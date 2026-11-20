@@ -10,6 +10,20 @@ $zip = Join-Path $WorkDir 'package.zip'
 $marker = Join-Path $WorkDir 'invocation.txt'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+function Get-TestSha256([string]$Path) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $algorithm.Dispose()
+    }
+}
+
 function Write-FixtureArchive {
     if ([IO.File]::Exists($zip)) { [IO.File]::Delete($zip) }
     [IO.Compression.ZipFile]::CreateFromDirectory($source, $zip)
@@ -27,7 +41,7 @@ foreach ($name in @('install.ps1', 'uninstall.ps1')) {
 $helper = Join-Path $source 'unproxy-register.exe'
 [IO.File]::WriteAllText($helper, 'release')
 Write-FixtureArchive
-$trustedHash = (Get-FileHash -LiteralPath $zip).Hash
+$trustedHash = Get-TestSha256 $zip
 
 function Read-Host($prompt) {
     switch -Wildcard ($prompt) {
@@ -54,7 +68,7 @@ foreach ($changed in @('install.ps1', 'uninstall.ps1', 'unproxy-register.exe')) 
     $original = [IO.File]::ReadAllBytes($path)
     [IO.File]::AppendAllText($path, ' ')
     # A replacement ZIP may even include a matching manifest supplied by its author.
-    [IO.File]::WriteAllText((Join-Path $source 'SHA256SUMS'), (Get-FileHash -LiteralPath $path).Hash)
+    [IO.File]::WriteAllText((Join-Path $source 'SHA256SUMS'), (Get-TestSha256 $path))
     Write-FixtureArchive
     $operation = if ($changed -eq 'uninstall.ps1') { 'uninstall' } else { 'install' }
     try {

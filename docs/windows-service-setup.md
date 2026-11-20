@@ -22,6 +22,21 @@ extracting it, and removes staging when the operation ends.
 & {
     $ErrorActionPreference = 'Stop'
     $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
+
+    function Get-UnproxySha256([string]$Path) {
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        try {
+            $stream = [IO.File]::OpenRead($Path)
+            try {
+                return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+            } finally {
+                $stream.Dispose()
+            }
+        } finally {
+            $algorithm.Dispose()
+        }
+    }
+
     $zip = Read-Host 'Full path to the Windows ZIP'
     $expected = Read-Host 'SHA-256 from the trusted release or build'
     if ($expected -notmatch '\A[0-9a-f]{64}\z') { throw 'Expected a 64-character SHA-256 digest.' }
@@ -34,7 +49,7 @@ extracting it, and removes staging when the operation ends.
     try {
         $archive = Join-Path $stage 'release.zip'
         [IO.File]::WriteAllBytes($archive, [IO.File]::ReadAllBytes($zip))
-        if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expected) {
+        if ((Get-UnproxySha256 $archive) -cne $expected) {
             throw 'The staged ZIP does not match the trusted SHA-256 digest.'
         }
         $payload = Join-Path $stage 'payload'

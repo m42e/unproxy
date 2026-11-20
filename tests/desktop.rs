@@ -425,7 +425,7 @@ fn windows_service_setup_uses_an_independent_release_digest() {
     assert!(prose.contains("over HTTPS on a trusted machine or session"));
     assert!(prose.contains("Do not use a checksum file from the same writable download directory"));
     let trusted_digest = setup.find("$expected = Read-Host").unwrap();
-    let verify_archive = setup.find("Get-FileHash -LiteralPath $archive").unwrap();
+    let verify_archive = setup.find("Get-UnproxySha256 $archive").unwrap();
     let extract_archive = setup
         .find("ExtractToDirectory($archive, $payload)")
         .unwrap();

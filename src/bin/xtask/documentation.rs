@@ -360,7 +360,7 @@ mod tests {
         assert!(!user_guide.contains("<p class=nav-label>Contributors</p>"));
         let service_setup =
             std::fs::read_to_string(output.path().join("windows-service-setup.html")).unwrap();
-        assert!(service_setup.contains("Get-FileHash"));
+        assert!(service_setup.contains("Get-UnproxySha256"));
         assert!(service_setup.contains("trusted machine or session"));
         let routing = std::fs::read_to_string(output.path().join("routing.html")).unwrap();
         assert!(routing.contains("<th>Use case</th>"));
