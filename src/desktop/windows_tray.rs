@@ -231,11 +231,11 @@ pub(super) fn run() -> Result<()> {
         last_error,
         icon_directory,
     };
-    if controller.child.is_running() {
-        if let Err(error) = controller.set_environment_active(true) {
-            controller.last_error = Some(format!("{error:#}"));
-            show_error_async("Unproxy", &format!("{error:#}"));
-        }
+    if controller.child.is_running()
+        && let Err(error) = controller.set_environment_active(true)
+    {
+        controller.last_error = Some(format!("{error:#}"));
+        show_error_async("Unproxy", &format!("{error:#}"));
     }
     let mut last_refresh = Instant::now();
 
@@ -1960,8 +1960,9 @@ mod tests {
         let tracking = std::cell::RefCell::new(installed);
         let mut fail_https_activation = true;
         let mut fail_http_rollback = true;
+        let activation_tracking = tracking.borrow().clone();
         let result = sync_managed_proxy_values(
-            tracking.borrow().clone(),
+            activation_tracking,
             &original,
             Some(attempted_url),
             |name| Ok(current.borrow().get(name).cloned()),
@@ -1996,8 +1997,9 @@ mod tests {
         assert_eq!(tracking.borrow()["https_proxy_pending"], old_url);
 
         let mut fail_https_withdrawal = true;
+        let failed_withdrawal_tracking = tracking.borrow().clone();
         let withdrawal = sync_managed_proxy_values(
-            tracking.borrow().clone(),
+            failed_withdrawal_tracking,
             &original,
             None,
             |name| Ok(current.borrow().get(name).cloned()),
@@ -2029,8 +2031,9 @@ mod tests {
         );
         assert!(!stopped);
 
+        let final_withdrawal_tracking = tracking.borrow().clone();
         sync_managed_proxy_values(
-            tracking.borrow().clone(),
+            final_withdrawal_tracking,
             &original,
             None,
             |name| Ok(current.borrow().get(name).cloned()),
