@@ -1339,26 +1339,6 @@ mod tests {
     }
 
     #[test]
-    fn script_replacement_clears_dns_cache() {
-        let host = "cache-reset.test";
-        let expected: IpAddr = "192.0.2.45".parse().unwrap();
-        let resolver = DnsResolver::new(1, 1, Arc::new(move |_| Some(expected)));
-        let source =
-            format!("function FindProxyForURL(){{dnsResolve('{host}'); return 'DIRECT';}}");
-        let ip = "127.0.0.1".parse().unwrap();
-        let mut pac = Pac::new_with_ip_and_resolver(Some(&source), ip, resolver).unwrap();
-
-        pac.evaluate("x", "x").unwrap();
-        assert_eq!(pac.cache_snapshot().get(host), Some(&Some(expected)));
-        pac.evaluate("x", "x").unwrap();
-        assert_eq!(pac.cache_snapshot().get(host), Some(&Some(expected)));
-
-        pac.set_script(Some("function FindProxyForURL(){return 'DIRECT'}"))
-            .unwrap();
-        assert!(pac.cache_snapshot().is_empty());
-    }
-
-    #[test]
     fn blocked_dns_lookup_does_not_block_another_worker() {
         let (blocked_tx, blocked_rx) = mpsc::channel();
         let (release_tx, release_rx) = sync_channel(0);

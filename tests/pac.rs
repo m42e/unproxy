@@ -280,6 +280,21 @@ fn missing_functions_and_evaluation_errors_are_rejected() {
 }
 
 #[test]
+fn script_replacement_clears_dns_cache() {
+    let host = "192.0.2.45";
+    let script = format!("function FindProxyForURL(){{ dnsResolve('{host}'); return 'DIRECT'; }}");
+    let mut pac = Pac::new(Some(&script)).unwrap();
+    pac.evaluate("x", "x").unwrap();
+    assert!(pac.cache_snapshot().contains_key(host));
+    pac.evaluate("x", "x").unwrap();
+    assert!(pac.cache_snapshot().contains_key(host));
+
+    pac.set_script(Some("function FindProxyForURL(){return 'DIRECT'}"))
+        .unwrap();
+    assert!(pac.cache_snapshot().is_empty());
+}
+
+#[test]
 fn uri_destinations_supply_defaults_and_preserve_path_query() {
     use unproxy::route::Destination;
     let uri: http::Uri = "https://[::1]/a?q=1".parse().unwrap();
