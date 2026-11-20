@@ -756,9 +756,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_binds_before_ready_and_drains_after_shutdown() {
+    async fn server_binds_before_ready_and_drains_after_shutdown_with_filter_retry() {
         let dir = tempfile::tempdir().unwrap();
         let pac = dir.path().join("proxy.pac");
+        let missing_filter = dir.path().join("missing-hosts.txt");
         fs::write(&pac, "function FindProxyForURL(){return 'DIRECT';}").unwrap();
         let args = MainArgs::try_parse_from([
             "unproxy",
@@ -766,6 +767,8 @@ mod tests {
             "127.0.0.1:0",
             "--pac-file",
             pac.to_str().unwrap(),
+            "--filter-list",
+            missing_filter.to_str().unwrap(),
             "--graceful-shutdown-timeout",
             "1",
         ])

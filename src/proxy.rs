@@ -2662,17 +2662,27 @@ mod management_coverage_tests {
 
     #[tokio::test]
     async fn filter_retry_stops_when_the_proxy_shuts_down_before_its_delay() {
-        let context = builder(false)
+        let mut context = builder(false)
             .listen("127.0.0.1:0".parse().unwrap())
             .bind()
             .await
             .unwrap();
-        context.retry_filter_lists_after(
-            vec!["http://127.0.0.1:1/hosts.txt".into()],
-            crate::filter_list::FilterListSnapshots::default(),
-            Duration::from_secs(60),
-        );
+        context.pac_sources = vec!["http://127.0.0.1:1/proxy.pac".parse().unwrap()];
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            context.retry_filter_lists_after(
+                vec!["http://127.0.0.1:1/hosts.txt".into()],
+                crate::filter_list::FilterListSnapshots::default(),
+                Duration::from_secs(60),
+            );
+            context.retry_pac_sources_after(Duration::from_secs(60));
+        });
+        tokio::task::yield_now().await;
         context.shutdown();
+        tokio::task::yield_now().await;
         context.wait().await;
     }
 
