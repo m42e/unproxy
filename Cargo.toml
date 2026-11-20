@@ -1,6 +1,6 @@
 [package]
 name = "unproxy"
-version = "0.4.7"
+version = "0.5.0"
 edition = "2024"
 license = "MIT"
 description = "A local HTTP proxy with PAC routing and corporate authentication"

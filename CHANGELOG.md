@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 - Match valid single-label filter-list entries against their exact normalized host.
 - Cap `undns` at 64 concurrent DNS exchanges and drop excess datagrams when
@@ -9,6 +9,13 @@
   and fail closed when that route cannot carry the query. The public
   `dns::exchange_primary` signature now requires the selected route and
   connection options; this is a source compatibility change for Rust callers.
+- Require HTTPS for remote PAC files, filter lists, and update metadata; protect
+  management diagnostics and prevent direct routing from bypassing PAC DNS.
+- Strengthen proxy authentication and Windows service package and policy-file
+  verification, and bound DNS, retry, status, and diagnostic resources.
+- Expire idle CONNECT tunnels and cancel unfinished authentication relays on drop.
+
+## Unreleased
 
 ## 0.4.7
 
