@@ -13,7 +13,7 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(target_os = "macos", windows))]
 const STATUS_PROBE_DEADLINE: Duration = Duration::from_millis(250);
 #[cfg(any(target_os = "macos", windows, test))]
 const MAX_STATUS_RESPONSE_BYTES: usize = 16 * 1024;
