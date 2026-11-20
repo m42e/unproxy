@@ -1,11 +1,13 @@
 # Corporate authentication integration tests
 
 `tests/corporate_auth.rs` contains opt-in tests for the native GSSAPI (Unix) and
-SSPI (Windows) adapters. They run the native adapter against a proxy that
-accepts Kerberos Negotiate, check rejection without credentials and when the
-proxy host is excluded, then verify HTTP forwarding and CONNECT. A separate case
-creates and drops several native contexts and requires a nonempty first SPNEGO
-token. Fixture configuration is mandatory: a missing value fails the test.
+SSPI (Windows) adapters. They check rejection without credentials, host
+exclusion on CONNECT, and refusal to send HTTP Negotiate over a plaintext
+forwarding connection. CONNECT succeeds only when the proxy completes mutual
+Negotiate proof in its successful response; a 2xx response without that proof is
+rejected before a tunnel is returned. A separate case creates and drops several
+native contexts and requires a nonempty first SPNEGO token. Fixture configuration is
+mandatory: a missing value fails the test.
 
 ## Disposable Linux Kerberos realm
 
@@ -23,8 +25,12 @@ files are under a temporary directory and removed on exit. It starts isolated
 listeners on loopback ports 61088, 61880, and 63128. Stop any package-managed
 Squid service first because Squid instances share a system-wide shared-memory
 name; CI does this on its ephemeral runner. It verifies that the client can
-obtain a service ticket before running the ignored integration tests. The test command
-can be replaced by appending a command to the script, for example:
+obtain a service ticket before running the ignored integration tests. This
+Squid fixture challenges unauthenticated requests but does not provide mutual
+proof on CONNECT success, so the test expects the client to reject that tunnel.
+It also verifies that native Negotiate is refused before a plaintext ordinary
+HTTP proxy connection is opened. The test command can be replaced by appending
+a command to the script, for example:
 
 ```sh
 bash scripts/test_corporate_auth.sh cargo test --locked --test corporate_auth -- --ignored --test-threads=1
@@ -52,13 +58,16 @@ Provide these repository or `corporate-auth` environment variables:
 | `UNPROXY_AUTH_EXPECTED_BODY` | Exact body returned by `GET /identity.txt` |
 
 The proxy must require Kerberos Negotiate for the origin, reject anonymous
-requests, and return the configured body only to authenticated requests. Its
+requests, and return the configured body only to authenticated requests. For a
+successful CONNECT test, its 2xx response must include a valid completed
+Negotiate proof; otherwise the test expects the tunnel to be rejected. Its
 service identity must own the HTTP SPN and have access to the matching keytab.
 Keep the proxy and origin restricted to the test network. The workflow checks
 that the runner is domain-authenticated and can obtain a service ticket for the
 proxy before running the tests. Because the proxy allows Kerberos authentication
-only, the successful requests also verify that SSPI selected Kerberos rather
-than falling back to NTLM.
+only, the tests also verify that SSPI selected Kerberos rather than falling back
+to NTLM. Plaintext ordinary HTTP forwarding with Negotiate is intentionally
+rejected; an allowed authenticated forwarding test requires an HTTPS proxy.
 
 Run the exact Windows test command locally from the configured domain account:
 

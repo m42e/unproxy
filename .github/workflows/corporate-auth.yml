@@ -24,7 +24,7 @@ jobs:
           sudo apt-get update
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y krb5-kdc krb5-admin-server krb5-user squid
           sudo systemctl stop squid.service
-      - name: Authenticate forwarding and CONNECT with MIT Kerberos
+      - name: Check Kerberos identity and CONNECT proof handling
         run: bash scripts/test_corporate_auth.sh
   windows-sspi:
     # Domain credentials must never be exposed to pull-request code.
@@ -55,5 +55,5 @@ jobs:
           }
           klist get "HTTP/$env:UNPROXY_AUTH_PROXY_HOST"
           if ($LASTEXITCODE -ne 0) { throw 'Fixture Kerberos service ticket unavailable' }
-      - name: Authenticate forwarding and CONNECT with Windows SSPI
+      - name: Check native identity and CONNECT proof handling with Windows SSPI
         run: cargo test --locked --test corporate_auth -- --ignored --test-threads=1

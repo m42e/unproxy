@@ -87,7 +87,7 @@ fn native_identity_creates_spnego_and_releases_repeated_contexts() {
 
 #[tokio::test]
 #[ignore = "dedicated corporate-auth job supplies a real native identity and proxy"]
-async fn native_identity_authenticates_http_forwarding() {
+async fn native_identity_rejects_plaintext_http_forwarding() {
     tokio::time::timeout(DEADLINE, async {
         let fixture = Fixture::load();
         let (status, headers, _) = fixture.forward(&fixture.options(false)).await;
@@ -110,28 +110,47 @@ async fn native_identity_authenticates_http_forwarding() {
         // Host restrictions must not offer the process identity to this proxy.
         let mut restricted = fixture.options(false);
         restricted.auth = AuthFactory::negotiate(vec!["excluded.invalid".into()]);
-        assert_eq!(
-            fixture.forward(&restricted).await.0,
-            http::StatusCode::PROXY_AUTHENTICATION_REQUIRED
+        let restricted_error = match Connection::tunnel(
+            Route::Http(fixture.proxy.clone()),
+            &fixture.origin,
+            &restricted,
+            DEADLINE,
+        )
+        .await
+        {
+            Ok(_) => panic!("proxy accepted CONNECT without an allowed identity"),
+            Err(error) => error,
+        };
+        assert!(
+            restricted_error.to_string().contains("HTTP 407"),
+            "an excluded proxy host must not receive credentials: {restricted_error:#}"
         );
 
-        for _ in 0..2 {
-            let (status, _, body) = fixture.forward(&fixture.options(true)).await;
-            assert_eq!(status, http::StatusCode::OK, "native identity rejected");
-            assert_eq!(
-                body,
-                fixture.body.as_bytes(),
-                "authenticated origin response"
-            );
-        }
+        let error = match Connection::proxy(
+            fixture.proxy.clone(),
+            false,
+            &fixture.options(true),
+            DEADLINE,
+        )
+        .await
+        {
+            Ok(_) => panic!("plaintext HTTP Negotiate unexpectedly connected"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("HTTP Negotiate cannot use an ordinary plaintext proxy connection"),
+            "plaintext forwarding must fail before contacting the proxy: {error:#}"
+        );
     })
     .await
-    .expect("bounded native HTTP authentication test");
+    .expect("bounded plaintext HTTP Negotiate rejection test");
 }
 
 #[tokio::test]
 #[ignore = "dedicated corporate-auth job supplies a real native identity and proxy"]
-async fn native_identity_authenticates_connect_tunnel() {
+async fn native_identity_requires_completed_proof_for_connect_tunnel() {
     tokio::time::timeout(DEADLINE, async {
         let fixture = Fixture::load();
         let route = Route::Http(fixture.proxy.clone());
@@ -150,31 +169,37 @@ async fn native_identity_authenticates_connect_tunnel() {
             error.to_string().contains("HTTP 407"),
             "expected authentication rejection: {error}"
         );
-        let mut connection =
-            Connection::tunnel(route, &fixture.origin, &fixture.options(true), DEADLINE)
-                .await
-                .expect("authenticated CONNECT");
-        connection
-            .write_all(
-                format!(
-                    "GET /identity.txt HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-                    fixture.origin
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-        let mut response = String::new();
-        connection.read_to_string(&mut response).await.unwrap();
-        let (headers, body) = response
-            .split_once("\r\n\r\n")
-            .expect("origin response headers");
-        assert!(headers.starts_with("HTTP/1.1 200") || headers.starts_with("HTTP/1.0 200"));
-        assert_eq!(
-            body, fixture.body,
-            "CONNECT relays the authenticated origin body"
-        );
+        match Connection::tunnel(route, &fixture.origin, &fixture.options(true), DEADLINE).await {
+            Ok(mut connection) => {
+                connection
+                    .write_all(
+                        format!(
+                            "GET /identity.txt HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                            fixture.origin
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                let mut response = String::new();
+                connection.read_to_string(&mut response).await.unwrap();
+                let (headers, body) = response
+                    .split_once("\r\n\r\n")
+                    .expect("origin response headers");
+                assert!(headers.starts_with("HTTP/1.1 200") || headers.starts_with("HTTP/1.0 200"));
+                assert_eq!(
+                    body, fixture.body,
+                    "CONNECT relays the authenticated origin body"
+                );
+            }
+            Err(error) => assert!(
+                error
+                    .to_string()
+                    .contains("upstream CONNECT response is missing completed Negotiate proof"),
+                "native CONNECT failed before proving a supported outcome: {error:#}"
+            ),
+        }
     })
     .await
-    .expect("bounded native CONNECT authentication test");
+    .expect("bounded native CONNECT proof test");
 }
