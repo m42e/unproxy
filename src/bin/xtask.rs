@@ -330,9 +330,46 @@ fn unpack_archive(archive: &Path, output: &Path) -> Result<()> {
     std::fs::create_dir_all(output)?;
     if cfg!(windows) {
         powershell(&format!(
-            "$ErrorActionPreference = 'Stop'; try {{ Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory({}, {}, [System.Text.Encoding]::UTF8, [bool]$true) }} catch {{ [Console]::Error.WriteLine($_); exit 1 }}",
+            r#"
+$ErrorActionPreference = 'Stop'
+try {{
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $root = [System.IO.Path]::GetFullPath({})
+    $rootPrefix = $root
+    $rootSeparator = [string][System.IO.Path]::DirectorySeparatorChar
+    if (-not $rootPrefix.EndsWith($rootSeparator, [System.StringComparison]::OrdinalIgnoreCase)) {{
+        $rootPrefix += $rootSeparator
+    }}
+    $zip = [System.IO.Compression.ZipFile]::OpenRead({})
+    try {{
+        foreach ($entry in $zip.Entries) {{
+            $destination = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($root, $entry.FullName))
+            $isRoot = [string]::Equals($destination, $root, [System.StringComparison]::OrdinalIgnoreCase)
+            if (-not $isRoot -and -not $destination.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {{
+                throw [System.IO.InvalidDataException]::new("ZIP entry escapes extraction directory: $($entry.FullName)")
+            }}
+            if ([string]::IsNullOrEmpty($entry.Name)) {{
+                [System.IO.Directory]::CreateDirectory($destination) | Out-Null
+                continue
+            }}
+            if ($isRoot) {{
+                throw [System.IO.InvalidDataException]::new("ZIP file entry resolves to extraction directory: $($entry.FullName)")
+            }}
+            [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($destination)) | Out-Null
+            $source = $entry.Open()
+            try {{
+                $target = [System.IO.File]::Open($destination, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+                try {{ $source.CopyTo($target) }} finally {{ $target.Dispose() }}
+            }} finally {{ $source.Dispose() }}
+        }}
+    }} finally {{ $zip.Dispose() }}
+}} catch {{
+    [Console]::Error.WriteLine($_)
+    exit 1
+}}
+"#,
+            ps_literal(output),
             ps_literal(archive),
-            ps_literal(output)
         ))
     } else {
         run(Command::new("unzip")
@@ -1036,6 +1073,23 @@ mod tests {
             std::fs::read(extracted.join("nested folder/binary file")).unwrap(),
             b"fixture executable"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unpack_helper_rejects_entries_outside_the_output_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("traversal.zip");
+        let output = temp.path().join("output");
+        let escaped = temp.path().join("escaped.txt");
+        let create_archive = format!(
+            "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression; $stream = [System.IO.File]::Open({}, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write); try {{ $zip = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create); try {{ $entry = $zip.CreateEntry('../escaped.txt'); $writer = [System.IO.StreamWriter]::new($entry.Open()); try {{ $writer.Write('outside') }} finally {{ $writer.Dispose() }} }} finally {{ $zip.Dispose() }} }} finally {{ $stream.Dispose() }}",
+            ps_literal(&archive)
+        );
+        powershell(&create_archive).unwrap();
+
+        assert!(unpack_archive(&archive, &output).is_err());
+        assert!(!escaped.exists());
     }
 
     #[test]
