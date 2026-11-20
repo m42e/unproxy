@@ -1269,8 +1269,20 @@ fn system_dns_lookup(host: &str) -> std::result::Result<Option<IpAddr>, ()> {
 
 #[cfg(windows)]
 fn system_dns_lookup(host: &str) -> std::result::Result<Option<IpAddr>, ()> {
-    match (host, 0).to_socket_addrs() {
-        Ok(addresses) => Ok(preferred_ip(addresses.map(|address| address.ip()))),
+    classify_windows_dns_lookup((host, 0).to_socket_addrs())
+}
+
+#[cfg(windows)]
+fn classify_windows_dns_lookup<I>(
+    result: std::io::Result<I>,
+) -> std::result::Result<Option<IpAddr>, ()>
+where
+    I: IntoIterator<Item = std::net::SocketAddr>,
+{
+    match result {
+        Ok(addresses) => Ok(preferred_ip(
+            addresses.into_iter().map(|address| address.ip()),
+        )),
         Err(error)
             if error.kind() == std::io::ErrorKind::NotFound
                 || definitive_windows_dns_error(error.raw_os_error()) =>
@@ -1318,6 +1330,10 @@ mod tests {
         },
         time::{Duration, Instant},
     };
+
+    #[cfg(windows)]
+    #[path = "windows_dns_tests.rs"]
+    mod windows_dns_tests;
 
     #[test]
     fn pac_instances_keep_separate_dns_caches_with_shared_resolver() {
