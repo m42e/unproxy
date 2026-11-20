@@ -1,18 +1,24 @@
 //! Native macOS menu-bar adapter and its platform-independent preference model.
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "macos", windows, test))]
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
-    path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
+use std::{
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+};
 
+#[cfg(any(target_os = "macos", windows, test))]
 const STATUS_PROBE_DEADLINE: Duration = Duration::from_millis(250);
+#[cfg(any(target_os = "macos", windows, test))]
 const MAX_STATUS_RESPONSE_BYTES: usize = 16 * 1024;
 
+#[cfg(any(target_os = "macos", windows, test))]
 fn read_status_response(address: SocketAddr, deadline: Instant) -> Option<Vec<u8>> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     let mut stream = TcpStream::connect_timeout(&address, remaining).ok()?;
@@ -298,6 +304,7 @@ fn parse_remote_pac_uri(source: &str) -> Result<Option<http::Uri>> {
     Ok(Some(uri))
 }
 
+#[cfg(any(target_os = "macos", windows, test))]
 fn parse_remote_filter_uri(source: &str) -> Result<Option<http::Uri>> {
     let uri = parse_remote_pac_uri(source)?;
     if let Some(uri) = &uri {
