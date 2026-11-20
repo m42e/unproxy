@@ -1,5 +1,5 @@
 use std::net::IpAddr;
-use unproxy::pac::{Pac, Policy};
+use unproxy::pac::Policy;
 
 #[tokio::test]
 async fn policy_runtimes_are_isolated_and_direct_policies_fall_through() {
@@ -15,21 +15,6 @@ async fn policy_runtimes_are_isolated_and_direct_policies_fall_through() {
             .to_string(),
         "HTTP second:80"
     );
-}
-
-#[test]
-fn pac_sources_keep_separate_dns_caches() {
-    let host = "cache-isolation-check.invalid";
-    let script = format!("function FindProxyForURL(){{dnsResolve('{host}'); return 'DIRECT';}}");
-    let mut first = Pac::new(Some(&script)).unwrap();
-    let mut second = Pac::new(Some(&script)).unwrap();
-
-    first.evaluate("x", "x").unwrap();
-    assert!(first.cache_snapshot().contains_key(host));
-    assert!(second.cache_snapshot().is_empty());
-
-    second.evaluate("x", "x").unwrap();
-    assert!(second.cache_snapshot().contains_key(host));
 }
 
 #[tokio::test]
@@ -77,7 +62,7 @@ async fn configured_ip_is_visible_during_top_level_script_execution() {
 
 #[tokio::test]
 async fn failed_collection_replacement_preserves_globals_and_dns_cache() {
-    let host = "policy-atomicity-check.invalid";
+    let host = "192.0.2.43";
     let policy = Policy::new_scripts(vec![
         format!("let n=0; function FindProxyForURL(){{ n++; dnsResolve('{host}'); return n===1 ? 'DIRECT' : 'PROXY persisted:80'; }}"),
         "function FindProxyForURL(){return 'PROXY second:80';}".into(),
@@ -114,7 +99,7 @@ async fn failed_collection_replacement_preserves_globals_and_dns_cache() {
 
 #[tokio::test]
 async fn successful_replacement_resets_runtime_globals_and_cache() {
-    let host = "policy-success-reset.invalid";
+    let host = "192.0.2.44";
     let policy = Policy::new_scripts(vec![format!(
         "let n=0; function FindProxyForURL(){{ n++; dnsResolve('{host}'); return 'PROXY old:80'; }}"
     )])

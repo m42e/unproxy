@@ -1320,6 +1320,25 @@ mod tests {
     };
 
     #[test]
+    fn pac_instances_keep_separate_dns_caches_with_shared_resolver() {
+        let host = "cache-isolation.test";
+        let expected: IpAddr = "192.0.2.42".parse().unwrap();
+        let resolver = DnsResolver::new(1, 1, Arc::new(move |_| Some(expected)));
+        let source =
+            format!("function FindProxyForURL(){{dnsResolve('{host}'); return 'DIRECT';}}");
+        let ip = "127.0.0.1".parse().unwrap();
+        let mut first = Pac::new_with_ip_and_resolver(Some(&source), ip, resolver.clone()).unwrap();
+        let mut second = Pac::new_with_ip_and_resolver(Some(&source), ip, resolver).unwrap();
+
+        first.evaluate("x", "x").unwrap();
+        assert_eq!(first.cache_snapshot().get(host), Some(&Some(expected)));
+        assert!(second.cache_snapshot().is_empty());
+
+        second.evaluate("x", "x").unwrap();
+        assert_eq!(second.cache_snapshot().get(host), Some(&Some(expected)));
+    }
+
+    #[test]
     fn blocked_dns_lookup_does_not_block_another_worker() {
         let (blocked_tx, blocked_rx) = mpsc::channel();
         let (release_tx, release_rx) = sync_channel(0);
