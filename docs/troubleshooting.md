@@ -198,16 +198,16 @@ systemctl --user stop unproxy
 
 ## Find status and logs
 
-On Windows or macOS, choose **Open Status Page** from the tray or menu bar menu to open the current listener in your default browser. The status page is sanitized and remains available to the tray. Opening a log viewer prompts for HTTP Basic credentials; use username `unproxy` and the owner capability as the password. The browser then uses its same-origin auth cache for the live stream and route resolver. See [Listener access and privacy](configuration.md#listener-access-and-privacy) for token setup.
+On Windows or macOS, choose **Open Status Page** from the tray or menu bar menu to open the current listener in your default browser. The status page is sanitized and remains available to the tray. If management authentication is enabled and a token is configured, opening a log viewer prompts for HTTP Basic credentials; use username `unproxy` and the owner capability as the password. The desktop setting **Allow unauthenticated log and status details** disables that prompt for the desktop proxy. See [Listener access and privacy](configuration.md#listener-access-and-privacy) for token setup.
 
 For a CLI or service, use the following paths at your configured listener’s HTTP address. For example, with the default listener, `/access.html` becomes `http://127.0.0.1:3128/access.html`.
 
 | Path | Use it for |
 | --- | --- |
 | `/` | Policy, upstream, and authentication summary. |
-| `/access.html` | Static viewer for the owner-authenticated live access stream. |
-| `/log.html` | Static viewer for the owner-authenticated runtime log stream. |
-| `/resolve.json` | Owner-authenticated PAC route evaluation. |
+| `/access.html` | Static viewer for the live access stream; requires the owner capability unless management authentication is disabled. |
+| `/log.html` | Static viewer for the runtime log stream; requires the owner capability unless management authentication is disabled. |
+| `/resolve.json` | PAC route evaluation; requires the owner capability unless management authentication is disabled. |
 | `/status.json` | Public, sanitized machine-readable runtime state. |
 
 File locations are listed in [Configuration reference](configuration.md#desktop-files). The OS instructions above show how to read the relevant log from a terminal.

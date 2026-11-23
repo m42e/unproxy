@@ -56,6 +56,7 @@ Desktop apps use their own preferences and launch their proxy with explicit sett
 | `--strict-policy` | Reject traffic until policy loads and on PAC evaluation errors. | Off |
 | `--direct-fallback` | Try direct after selected proxy routes fail. | Off |
 | `--proxytunnel` | Use upstream CONNECT for every proxied request. | Off |
+| `--disable-management-auth` | Make log, access, and PAC route detail endpoints available without a management token. | Off |
 | `--netrc-file PATH` | Read upstream password credentials from this file. | `~/.netrc` |
 | `--allow-insecure-proxy-auth ENDPOINT` | Allow netrc credentials on the exact plaintext `http://HOST:PORT` or `socks5://HOST:PORT` endpoint; repeatable. | None |
 | `--negotiate [HOST]` / `-n` | Integrated authentication; optionally restrict hosts, repeatable. | Off; requires Negotiate build |
@@ -145,7 +146,9 @@ opening a browser.
 
 ## Listener access and privacy
 
-Proxy requests and the sanitized status page do not require client authentication. The public status response reports PAC source type and route protocol without source paths, PAC hosts, or upstream proxy addresses. The access log page and stream, application log page and stream, and PAC route resolver require the owner capability. A missing or incorrect token denies them even for a loopback client with a trusted `Host` header.
+Proxy requests and the sanitized status page do not require client authentication. The public status response reports PAC source type and route protocol without source paths, PAC hosts, or upstream proxy addresses. The access log page and stream, application log page and stream, and PAC route resolver require the owner capability. If no valid management token is configured, those endpoints remain closed. A missing or incorrect credential denies them even for a loopback client with a trusted `Host` header.
+
+Use `--disable-management-auth` to make those detail endpoints available without a token. The desktop app has the **Allow unauthenticated log and status details** setting, which applies the same option to its managed proxy. Any local process that can reach the endpoints over loopback can read detailed logs and route information while this option is enabled.
 
 For a foreground runtime and its tray app, create a 32-byte random token in the owner’s process environment before starting them. On macOS or Linux:
 
@@ -162,7 +165,7 @@ try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
 $env:UNPROXY_MANAGEMENT_TOKEN = ([BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
 ```
 
-The tray’s **Open Status Page** opens the sanitized page. Opening a log viewer prompts the browser for Basic authentication: use username `unproxy` and the token as the password. Programmatic clients can send it as a Bearer token. The browser keeps HTTP Basic credentials in its origin-scoped auth cache; Unproxy never puts the token in a URL, cookie, process argument, or log.
+The tray’s **Open Status Page** opens the sanitized page. When management authentication is enabled and a token is configured, opening a log viewer prompts the browser for Basic authentication: use username `unproxy` and the token as the password. Programmatic clients can send it as a Bearer token. The browser keeps HTTP Basic credentials in its origin-scoped auth cache; Unproxy never puts the token in a URL, cookie, process argument, or log.
 
 Windows service setup creates a random token file readable only by NetworkService, SYSTEM, Administrators, and the installing user; the service config refers to it with `--management-token-file`. The tray gets an owner-only copy in that user’s support directory. Repair preserves the token only when the installing-user SID matches the recorded owner; changing the owner rotates it. For a manually managed service, provide a protected token file and grant access only to the service account and intended owner. Without a token, the tray continues to show sanitized status while detailed management endpoints remain closed.
 

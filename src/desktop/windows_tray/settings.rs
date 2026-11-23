@@ -47,7 +47,7 @@ use windows_sys::Win32::{
 
 const WINDOW_CLASS: &str = "UnproxySettingsWindow";
 const CLIENT_WIDTH: i32 = 760;
-const CLIENT_HEIGHT: i32 = 540;
+const CLIENT_HEIGHT: i32 = 568;
 
 const ID_LISTENERS: u16 = 1001;
 const ID_PAC_FILES: u16 = 1002;
@@ -60,6 +60,7 @@ const ID_DIRECT_FALLBACK: u16 = 1008;
 const ID_AUTOSTART: u16 = 1009;
 const ID_SAVE: u16 = 1010;
 const ID_CANCEL: u16 = 1011;
+const ID_ALLOW_UNAUTHENTICATED_DETAILS: u16 = 1012;
 
 struct Controls {
     listeners: HWND,
@@ -68,6 +69,7 @@ struct Controls {
     negotiate: HWND,
     tunnel: HWND,
     direct_fallback: HWND,
+    allow_unauthenticated_details: HWND,
     autostart: HWND,
 }
 
@@ -93,6 +95,7 @@ struct SettingsFields {
     negotiate: bool,
     tunnel: bool,
     direct_fallback: bool,
+    allow_unauthenticated_details: bool,
     autostart: bool,
 }
 
@@ -107,6 +110,7 @@ impl SettingsDialog {
                 negotiate: null_mut(),
                 tunnel: null_mut(),
                 direct_fallback: null_mut(),
+                allow_unauthenticated_details: null_mut(),
                 autostart: null_mut(),
             },
             result: None,
@@ -124,6 +128,9 @@ impl SettingsDialog {
                 negotiate: control_checked(self.controls.negotiate),
                 tunnel: control_checked(self.controls.tunnel),
                 direct_fallback: control_checked(self.controls.direct_fallback),
+                allow_unauthenticated_details: control_checked(
+                    self.controls.allow_unauthenticated_details,
+                ),
                 autostart: control_checked(self.controls.autostart),
             },
         )
@@ -306,6 +313,7 @@ fn build_preferences(current: &Preferences, fields: SettingsFields) -> Result<Pr
     }
     updated.proxytunnel = fields.tunnel;
     updated.direct_fallback = fields.direct_fallback;
+    updated.allow_unauthenticated_details = fields.allow_unauthenticated_details;
     updated.autostart = fields.autostart;
     Ok(updated)
 }
@@ -613,6 +621,19 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
     if !cfg!(feature = "negotiate") {
         unsafe { EnableWindow(state.controls.negotiate, 0) };
     }
+    state.controls.allow_unauthenticated_details = create_checkbox(
+        window,
+        instance,
+        "Allow unauthenticated log and status details",
+        state.current.allow_unauthenticated_details,
+        ControlBounds {
+            x: 18,
+            y: 466,
+            width: 724,
+            height: 24,
+        },
+        ID_ALLOW_UNAUTHENTICATED_DETAILS,
+    )?;
     state.controls.autostart = create_checkbox(
         window,
         instance,
@@ -635,7 +656,7 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
         ControlBounds {
             x: 572,
-            y: 486,
+            y: 520,
             width: 80,
             height: 30,
         },
@@ -649,7 +670,7 @@ fn create_controls(window: HWND, instance: HINSTANCE, state: &mut SettingsDialog
         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         ControlBounds {
             x: 662,
-            y: 486,
+            y: 520,
             width: 80,
             height: 30,
         },
@@ -906,6 +927,7 @@ mod tests {
                 negotiate: true,
                 tunnel: true,
                 direct_fallback: true,
+                allow_unauthenticated_details: true,
                 autostart: false,
             },
         )
@@ -941,6 +963,7 @@ mod tests {
         assert_eq!(updated.negotiate, cfg!(feature = "negotiate"));
         assert!(updated.proxytunnel);
         assert!(updated.direct_fallback);
+        assert!(updated.allow_unauthenticated_details);
         assert!(!updated.autostart);
         assert_eq!(updated.release_info_url, current.release_info_url);
     }

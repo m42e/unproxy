@@ -10,7 +10,7 @@ Click the Unproxy icon to open its menu.
 | --- | --- |
 | Proxy status row | Starts or stops the local proxy. |
 | Open Status Page | Opens the status page in your default browser using the first configured listener’s current address and port. |
-| Settings… | Opens listeners, PAC sources, ad blocking lists, and connection preferences. |
+| Settings… | Opens listeners, PAC sources, ad blocking lists, connection preferences, and detailed page access. |
 | Copy Proxy Address | Copies the first configured listener. |
 | Open Log | Opens the diagnostic log. |
 | Start with Login (macOS) | Controls whether Unproxy opens when you sign in. |
@@ -71,6 +71,8 @@ Lists support hosts-format mappings and plain domain names. A blocked domain and
 Company packages can supply different first-run defaults. Existing saved preferences take precedence when updating the app.
 
 Enable DIRECT fallback only if your network policy permits direct access. For integrated authentication requirements, see [Authentication](authentication.md).
+
+Settings also includes **Allow unauthenticated log and status details**. Enable it to open detailed logs and PAC route information without the management-token prompt. Any local process that can reach the endpoints over loopback can read these details while the setting is on.
 
 ## Save and apply changes
 

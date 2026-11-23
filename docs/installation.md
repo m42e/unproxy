@@ -95,6 +95,11 @@ BUILTIN\Users or Everyone. Repair preserves the token only when the recorded
 owner SID matches the installing account; changing owners rotates it. The tray
 still polls only sanitized public status. To open detailed logs, enter the
 token as the password in the browser’s management authentication prompt.
+For a service that should expose details without a token, add
+`--disable-management-auth` to
+`C:\Program Files\Unproxy\data\unproxyrc` and restart the service. This makes
+detailed logs and route information available to anyone who can reach its
+management endpoints over loopback.
 
 The service runs as NetworkService, so Negotiate uses the computer account on
 a domain. You can change the service logon account in Windows Services if your

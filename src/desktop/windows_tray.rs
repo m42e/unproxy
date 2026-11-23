@@ -1013,6 +1013,7 @@ fn child_restart_required(current: &Preferences, updated: &Preferences) -> bool 
         || current.effective_filter_lists() != updated.effective_filter_lists()
         || current.proxytunnel != updated.proxytunnel
         || current.direct_fallback != updated.direct_fallback
+        || current.allow_unauthenticated_details != updated.allow_unauthenticated_details
         || (cfg!(feature = "negotiate") && current.negotiate != updated.negotiate)
 }
 
@@ -1520,6 +1521,12 @@ mod tests {
 
         let updated = Preferences {
             direct_fallback: !current.direct_fallback,
+            ..current.clone()
+        };
+        assert!(child_restart_required(&current, &updated));
+
+        let updated = Preferences {
+            allow_unauthenticated_details: true,
             ..current.clone()
         };
         assert!(child_restart_required(&current, &updated));

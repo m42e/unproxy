@@ -145,6 +145,7 @@ pub struct ContextBuilder {
     initialize_inline: bool,
     trusted_management_hosts: Vec<String>,
     management_token: Option<String>,
+    disable_management_auth: bool,
     session_limit: Arc<tokio::sync::Semaphore>,
     exchange_timeout: Duration,
     relay_handles: Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
@@ -177,6 +178,7 @@ impl Clone for ContextBuilder {
             initialize_inline: self.initialize_inline,
             trusted_management_hosts: self.trusted_management_hosts.clone(),
             management_token: self.management_token.clone(),
+            disable_management_auth: self.disable_management_auth,
             session_limit: self.session_limit.clone(),
             exchange_timeout: self.exchange_timeout,
             relay_handles: self.relay_handles.clone(),
@@ -212,6 +214,7 @@ impl ContextBuilder {
             initialize_inline: false,
             trusted_management_hosts: vec![],
             management_token: None,
+            disable_management_auth: false,
             session_limit: Arc::new(tokio::sync::Semaphore::new(256)),
             exchange_timeout: Duration::from_secs(30),
             relay_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -248,6 +251,11 @@ impl ContextBuilder {
     /// Set the owner capability required for access logs and route diagnostics.
     pub fn management_token(mut self, token: impl Into<String>) -> Self {
         self.management_token = Some(token.into());
+        self
+    }
+    /// Make local log and route detail endpoints available without a capability.
+    pub fn disable_management_auth(mut self) -> Self {
+        self.disable_management_auth = true;
         self
     }
     pub fn exchange_timeout(mut self, timeout: Duration) -> Self {
@@ -1168,7 +1176,8 @@ async fn handle(
         if matches!(
             path,
             "/resolve.json" | "/access.html" | "/access.log" | "/log.html" | "/log"
-        ) && !management_authorized(&req, cfg.management_token.as_deref())
+        ) && !cfg.disable_management_auth
+            && !management_authorized(&req, cfg.management_token.as_deref())
         {
             let mut response =
                 error_response(StatusCode::UNAUTHORIZED, "Management capability required");

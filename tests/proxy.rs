@@ -559,6 +559,38 @@ async fn public_status_hides_pac_source_names_and_upstream_addresses() {
     proxy.wait().await;
 }
 
+#[tokio::test]
+async fn management_auth_can_be_disabled_for_log_and_route_details() {
+    let proxy = ContextBuilder::new(
+        Arc::new(Policy::new(Some("function FindProxyForURL(){return 'DIRECT';}".into())).unwrap()),
+        ConnectionOptions::default(),
+    )
+    .management_token(OWNER_TOKEN)
+    .disable_management_auth()
+    .listen("127.0.0.1:0".parse().unwrap())
+    .bind()
+    .await
+    .unwrap();
+    let addr = proxy.local_addrs()[0];
+
+    for target in [
+        "/access.html",
+        "/log.html",
+        "/resolve.json?url=http%3A%2F%2Fexample.test%2F",
+    ] {
+        let response = get_management(addr, target, false).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{target}: {response}");
+    }
+    for target in ["/access.log", "/log"] {
+        let headers = get_management_headers(addr, target).await;
+        assert!(headers.starts_with("HTTP/1.1 200"), "{target}: {headers}");
+        assert!(headers.contains("text/event-stream"), "{target}: {headers}");
+    }
+
+    proxy.shutdown();
+    proxy.wait().await;
+}
+
 async fn get_management(addr: SocketAddr, target: &str, owner: bool) -> String {
     let mut client = TcpStream::connect(addr).await.unwrap();
     let authorization = if owner {
@@ -578,6 +610,26 @@ async fn get_management(addr: SocketAddr, target: &str, owner: bool) -> String {
     let mut response = String::new();
     client.read_to_string(&mut response).await.unwrap();
     response
+}
+
+async fn get_management_headers(addr: SocketAddr, target: &str) -> String {
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client
+        .write_all(
+            format!("GET {target} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut headers = Vec::new();
+    loop {
+        let mut byte = [0];
+        client.read_exact(&mut byte).await.unwrap();
+        headers.push(byte[0]);
+        if headers.ends_with(b"\r\n\r\n") {
+            return String::from_utf8(headers).unwrap();
+        }
+    }
 }
 
 #[tokio::test]

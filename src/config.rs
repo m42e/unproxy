@@ -117,6 +117,9 @@ pub struct MainArgs {
     /// Read the management capability from a protected file. Useful for service deployments.
     #[arg(long)]
     pub management_token_file: Option<PathBuf>,
+    /// Allow access to log and route details without a management capability.
+    #[arg(long)]
+    pub disable_management_auth: bool,
     /// Increase log verbosity; repeat to enable DEBUG and TRACE output.
     #[arg(short='v',long="verbose",action=clap::ArgAction::Count)]
     pub verbose: u8,
@@ -480,6 +483,16 @@ mod tests {
             Some(Path::new("/secure/management.token"))
         );
     }
+
+    #[test]
+    fn management_auth_can_be_disabled_from_cli_or_settings() {
+        let args = MainArgs::try_parse_from(["unproxy", "--disable-management-auth"]).unwrap();
+        assert!(args.disable_management_auth);
+
+        let defaults = MainArgs::try_parse_from(["unproxy"]).unwrap();
+        assert!(!defaults.disable_management_auth);
+    }
+
     #[test]
     fn routing_options_default_off_and_can_be_enabled_together() {
         let defaults = MainArgs::try_parse_from(["x"]).unwrap();

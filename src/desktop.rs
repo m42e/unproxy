@@ -97,6 +97,7 @@ pub struct Preferences {
     pub proxytunnel: bool,
     #[serde(alias = "direct_fallback")]
     pub direct_fallback: bool,
+    pub allow_unauthenticated_details: bool,
     pub autostart: bool,
 }
 
@@ -112,6 +113,7 @@ pub struct DesktopDefaults {
     pub negotiate: Option<bool>,
     pub proxytunnel: Option<bool>,
     pub direct_fallback: Option<bool>,
+    pub allow_unauthenticated_details: Option<bool>,
     pub autostart: Option<bool>,
     pub release_info_url: Option<String>,
 }
@@ -136,6 +138,9 @@ impl DesktopDefaults {
         }
         if let Some(direct_fallback) = self.direct_fallback {
             preferences.direct_fallback = direct_fallback;
+        }
+        if let Some(allow_unauthenticated_details) = self.allow_unauthenticated_details {
+            preferences.allow_unauthenticated_details = allow_unauthenticated_details;
         }
         if let Some(autostart) = self.autostart {
             preferences.autostart = autostart;
@@ -165,6 +170,7 @@ impl Default for Preferences {
             negotiate: false,
             proxytunnel: false,
             direct_fallback: false,
+            allow_unauthenticated_details: false,
             autostart: true,
         };
         apply_desktop_defaults_json(
@@ -444,6 +450,9 @@ impl Preferences {
         }
         if self.direct_fallback {
             a.push("--direct-fallback".into())
+        }
+        if self.allow_unauthenticated_details {
+            a.push("--disable-management-auth".into())
         }
         #[cfg(feature = "negotiate")]
         if self.negotiate {
@@ -1886,12 +1895,10 @@ mod native {
         (title, tooltip): (&str, &str),
         enabled: bool,
         tag: isize,
-        x: f64,
-        width: f64,
+        frame: Rect,
     ) -> *mut AnyObject {
         let allocated: *mut AnyObject = unsafe { msg_send![objc2::class!(NSButton), alloc] };
-        let button: *mut AnyObject =
-            unsafe { msg_send![allocated, initWithFrame:rect(x, 94.0, width, 24.0)] };
+        let button: *mut AnyObject = unsafe { msg_send![allocated, initWithFrame:frame] };
         let _: () = unsafe { msg_send![button, setButtonType:3isize] };
         let _: () = unsafe { msg_send![button, setTitle:cocoa_string(title)] };
         let _: () = unsafe { msg_send![button, setState:if enabled {1isize}else{0isize}] };
@@ -2553,6 +2560,7 @@ mod native {
                     3001 => prefs.proxytunnel = enabled,
                     3002 => prefs.direct_fallback = enabled,
                     3003 => prefs.negotiate = enabled,
+                    3005 => prefs.allow_unauthenticated_details = enabled,
                     _ => return,
                 }
             }
@@ -2568,6 +2576,7 @@ mod native {
                     3001 => current.proxytunnel,
                     3002 => current.direct_fallback,
                     3003 => current.negotiate,
+                    3005 => current.allow_unauthenticated_details,
                     _ => enabled,
                 };
                 if applied != enabled {
@@ -2577,6 +2586,7 @@ mod native {
                             3001 => prefs.proxytunnel = applied,
                             3002 => prefs.direct_fallback = applied,
                             3003 => prefs.negotiate = applied,
+                            3005 => prefs.allow_unauthenticated_details = applied,
                             _ => {}
                         }
                     }
@@ -2900,8 +2910,7 @@ mod native {
             ),
             prefs.proxytunnel,
             3001,
-            24.0,
-            250.0,
+            rect(24.0, 94.0, 250.0, 24.0),
         );
         settings_label(
             content,
@@ -2921,8 +2930,7 @@ mod native {
             ),
             prefs.direct_fallback,
             3002,
-            300.0,
-            210.0,
+            rect(300.0, 94.0, 210.0, 24.0),
         );
         settings_label(
             content,
@@ -2943,8 +2951,7 @@ mod native {
             ),
             prefs.negotiate,
             3003,
-            540.0,
-            130.0,
+            rect(540.0, 94.0, 130.0, 24.0),
         );
         #[cfg(feature = "negotiate")]
         settings_label(
@@ -2955,6 +2962,17 @@ mod native {
             280.0,
             22.0,
             false,
+        );
+        settings_checkbox(
+            content,
+            target,
+            (
+                "Allow unauthenticated log and status details",
+                "Anyone who can reach this listener can read detailed logs and PAC route information.",
+            ),
+            prefs.allow_unauthenticated_details,
+            3005,
+            rect(24.0, 40.0, 650.0, 24.0),
         );
         settings_button(
             content,
@@ -3166,6 +3184,7 @@ mod native {
             ("proxytunnel", 1),
             ("directFallback", 2),
             ("autostart", 3),
+            ("allowUnauthenticatedDetails", 4),
         ] {
             let obj = get(name);
             if obj.is_null() {
@@ -3173,7 +3192,8 @@ mod native {
                     0 => p.negotiate,
                     1 => p.proxytunnel,
                     2 => p.direct_fallback,
-                    _ => p.autostart,
+                    3 => p.autostart,
+                    _ => p.allow_unauthenticated_details,
                 };
                 let _: () = unsafe {
                     msg_send![defaults,setBool:objc2::runtime::Bool::new(default),forKey:key(name)]
@@ -3184,7 +3204,8 @@ mod native {
                     0 => p.negotiate = b.as_bool(),
                     1 => p.proxytunnel = b.as_bool(),
                     2 => p.direct_fallback = b.as_bool(),
-                    _ => p.autostart = b.as_bool(),
+                    3 => p.autostart = b.as_bool(),
+                    _ => p.allow_unauthenticated_details = b.as_bool(),
                 }
             }
         }
@@ -3242,6 +3263,9 @@ mod native {
         };
         let _: () = unsafe {
             msg_send![d,setBool:objc2::runtime::Bool::new(p.autostart),forKey:cocoa_string("autostart")]
+        };
+        let _: () = unsafe {
+            msg_send![d,setBool:objc2::runtime::Bool::new(p.allow_unauthenticated_details),forKey:cocoa_string("allowUnauthenticatedDetails")]
         };
         let _: () = unsafe { msg_send![d,removeObjectForKey:cocoa_string("releaseInfoUrl")] };
         let _: objc2::runtime::Bool = unsafe { msg_send![d, synchronize] };
@@ -3551,6 +3575,7 @@ mod native {
                 negotiate: true,
                 proxytunnel: false,
                 direct_fallback: false,
+                allow_unauthenticated_details: true,
                 autostart: true,
             };
             save_native_preferences(&prefs, &preferences_path, defaults)?;
@@ -3902,6 +3927,7 @@ mod native {
             let mut has_fetch_status = false;
             let mut has_filter_url = false;
             let mut has_release_info_field = false;
+            let mut has_unauthenticated_details = false;
             for index in 0..subview_count {
                 let subview: *mut AnyObject = unsafe { msg_send![subviews, objectAtIndex:index] };
                 let tag: isize = unsafe { msg_send![subview, tag] };
@@ -3912,6 +3938,7 @@ mod native {
                 has_fetch_status |= tag == 1210;
                 has_filter_url |= tag == 1307;
                 has_release_info_field |= tag == 3004;
+                has_unauthenticated_details |= tag == 3005;
             }
             anyhow::ensure!(
                 has_open_view,
@@ -3934,6 +3961,10 @@ mod native {
             anyhow::ensure!(
                 !has_release_info_field,
                 "release info URL should only be configured in preferences.json"
+            );
+            anyhow::ensure!(
+                has_unauthenticated_details,
+                "settings window has no unauthenticated details option"
             );
             let original_listeners = prefs.effective_listeners();
 
@@ -4179,6 +4210,9 @@ mod native {
                 send_editor_action(9999, None);
                 send_editor_action(3001, Some(true));
                 send_editor_action(3002, Some(true));
+                send_editor_action(3005, Some(true));
+                anyhow::ensure!(state.lock().unwrap().prefs.allow_unauthenticated_details);
+                send_editor_action(3005, Some(false));
                 #[cfg(feature = "negotiate")]
                 send_editor_action(3003, Some(false));
                 send_editor_action(3002, Some(false));
@@ -5111,6 +5145,7 @@ mod tests {
             negotiate: Some(true),
             proxytunnel: Some(true),
             direct_fallback: Some(true),
+            allow_unauthenticated_details: Some(true),
             autostart: Some(false),
             release_info_url: Some("https://updates.example.test/unproxy.json".into()),
         }
@@ -5121,6 +5156,7 @@ mod tests {
         assert!(preferences.negotiate);
         assert!(preferences.proxytunnel);
         assert!(preferences.direct_fallback);
+        assert!(preferences.allow_unauthenticated_details);
         assert!(!preferences.autostart);
         assert_eq!(
             preferences.release_info_url.as_deref(),
@@ -5195,8 +5231,21 @@ mod tests {
         let prefs = Preferences::load(&path).unwrap();
         assert_eq!(prefs.port, 65534);
         assert!(prefs.direct_fallback);
+        assert!(!prefs.allow_unauthenticated_details);
         assert!(!prefs.negotiate);
         assert!(prefs.autostart);
+
+        let enabled = Preferences {
+            allow_unauthenticated_details: true,
+            ..Preferences::default()
+        };
+        let enabled_path = dir.path().join("enabled-preferences.json");
+        enabled.save(&enabled_path).unwrap();
+        assert!(
+            Preferences::load(&enabled_path)
+                .unwrap()
+                .allow_unauthenticated_details
+        );
 
         for port in [
             serde_json::json!(-1),
@@ -5241,6 +5290,7 @@ mod tests {
             port: 4321,
             proxytunnel: true,
             direct_fallback: true,
+            allow_unauthenticated_details: true,
             ..Preferences::default()
         };
         prefs.pac_file = pac;
@@ -5256,6 +5306,7 @@ mod tests {
         assert!(args.contains("--listen 127.0.0.1:4321"));
         assert!(args.contains("--proxytunnel"));
         assert!(args.contains("--direct-fallback"));
+        assert!(args.contains("--disable-management-auth"));
         #[cfg(feature = "negotiate")]
         assert!(!args.contains("--negotiate"));
         assert!(

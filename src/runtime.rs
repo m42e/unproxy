@@ -281,7 +281,11 @@ async fn run_until(
     shutdown: impl std::future::Future<Output = ()>,
     on_ready: impl FnOnce(),
 ) -> Result<()> {
-    let management_token = management_token(&a)?;
+    let management_token = if a.disable_management_auth {
+        None
+    } else {
+        management_token(&a)?
+    };
     let log_stream = LogStream::new();
     let filter = std::env::var("UNPROXY_LOG")
         .ok()
@@ -361,6 +365,9 @@ async fn run_until(
         .server_keepalive(server_keepalive)
         .shutdown_timeout(Duration::from_secs(a.graceful_shutdown_timeout))
         .pac_sources(sources.clone());
+    if a.disable_management_auth {
+        builder = builder.disable_management_auth();
+    }
     if let Some(token) = management_token.as_deref() {
         builder = builder.management_token(token);
     }
